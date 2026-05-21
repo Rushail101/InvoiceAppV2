@@ -27,6 +27,21 @@ export async function loadAll() {
     supabase.from('bank_transactions').select('*').order('txn_date', { ascending: false }),
     supabase.from('items').select('*').order('name'),
   ]);
+
+  // Handle any relational load errors up front
+  if (biz.error) throw biz.error;
+  if (inv.error) throw inv.error;
+  if (par.error) throw par.error;
+  if (exp.error) throw exp.error;
+  if (pay.error) throw pay.error;
+  if (accs.error) throw accs.error;
+  if (jnl.error) throw jnl.error;
+  if (jlines.error) throw jlines.error;
+  if (cns.error) throw cns.error;
+  if (banks.error) throw banks.error;
+  if (bankTxns.error) throw bankTxns.error;
+  if (itms.error) throw itms.error;
+
   return {
     businesses: biz.data || [],
     invoices: inv.data || [],
@@ -99,8 +114,6 @@ export async function seedAccounts(bizId, defaults) {
 }
 
 // ── Invoices ───────────────────────────────────────────────────────────────────
-// Safe column list — only fields that exist in the DB schema
-// This prevents "column not found" errors when running old schema versions
 const INV_COLS = [
   'business_id','party_id','invoice_number','type','status',
   'issue_date','due_date','notes','discount_percent','discount_amount',
@@ -119,11 +132,11 @@ export async function saveInvoice(inv, items, id) {
   let rid = id;
   if (id) {
     const { error } = await supabase.from('invoices').update(invData).eq('id', id);
-    if (error) throw new Error(`Invoice save failed: ${error.message}. Run the migration SQL from Settings → SQL Setup.`);
+    if (error) throw new Error(`Invoice save failed: ${error.message}.`);
     await supabase.from('invoice_items').delete().eq('invoice_id', id);
   } else {
     const { data, error } = await supabase.from('invoices').insert(invData).select().single();
-    if (error) throw new Error(`Invoice save failed: ${error.message}. Run the migration SQL from Settings → SQL Setup.`);
+    if (error) throw new Error(`Invoice save failed: ${error.message}.`);
     rid = data.id;
   }
   if (items?.length) {
@@ -229,20 +242,17 @@ const CATEGORY_ACCOUNT_MAP = {
 };
 
 export async function saveExpenseWithJournal(data) {
-  // 1. Save expense
   const { data: expRow, error } = await supabase.from('expenses')
     .insert({ ...data, vendor_id: data.vendor_id || null, journal_posted: true })
     .select().single();
   if (error) throw error;
 
-  // 2. Find expense account (by category mapping)
   const acctName = CATEGORY_ACCOUNT_MAP[data.category] || 'Miscellaneous';
   const expAcct = await findAccount(data.business_id, acctName);
   const cashAcct = await findAccount(data.business_id, 'Bank Account') ||
                    await findAccount(data.business_id, 'Cash');
-  if (!expAcct || !cashAcct) return expRow.id; // skip journal if accounts not set up
+  if (!expAcct || !cashAcct) return expRow.id;
 
-  // 3. Create journal entry (Dr Expense / Cr Bank)
   const { data: jnl, error: je } = await supabase.from('journal_entries').insert({
     business_id: data.business_id,
     entry_date: data.expense_date,
