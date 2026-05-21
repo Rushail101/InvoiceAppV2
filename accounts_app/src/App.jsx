@@ -11,8 +11,14 @@ import { GSTR1View } from './views/GSTR1.jsx';
 import { ItemsView } from './views/Items.jsx';
 import { Badge, ModalShell, FG, EmptyState } from './components/ui.jsx';
 
-// Alternative if your main file expects the variable name to be 'supabase'
-const supabase = createClient(URL, KEY, { db: { schema: 'accounts_erp' } });
+// Accounts ERP Client Initialization using your Vite environment variables
+const supabase = createClient(
+  import.meta.env.VITE_SUPABASE_URL, 
+  import.meta.env.VITE_SUPABASE_ANON_KEY, 
+  { db: { schema: 'accounts_erp' } }
+);
+
+// Inject this custom schema client context into your db.js queries
 initSupabase(supabase);
 
 const NAV = [
