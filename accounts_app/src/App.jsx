@@ -11,8 +11,9 @@ import { GSTR1View } from './views/GSTR1.jsx';
 import { ItemsView } from './views/Items.jsx';
 import { Badge, ModalShell, FG, EmptyState } from './components/ui.jsx';
 
-// Accounts ERP Client
-const accountsClient = createClient(URL, KEY, { db: { schema: 'accounts_erp' } })
+// Alternative if your main file expects the variable name to be 'supabase'
+const supabase = createClient(URL, KEY, { db: { schema: 'accounts_erp' } });
+initSupabase(supabase);
 
 const NAV = [
   { id: 'dashboard',   label: 'Dashboard',        icon: '◈',  group: null },
