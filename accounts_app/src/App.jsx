@@ -11,6 +11,9 @@ import { GSTR1View } from './views/GSTR1.jsx';
 import { ItemsView } from './views/Items.jsx';
 import { Badge, ModalShell, FG, EmptyState } from './components/ui.jsx';
 
+// Accounts ERP Client
+const accountsClient = createClient(URL, KEY, { db: { schema: 'accounts_erp' } })
+
 const NAV = [
   { id: 'dashboard',   label: 'Dashboard',        icon: '◈',  group: null },
   { id: 'invoices',    label: 'Invoices',          icon: '📄',  group: 'Sales' },
