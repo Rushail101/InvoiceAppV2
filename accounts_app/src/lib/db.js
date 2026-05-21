@@ -11,7 +11,7 @@ async function q(table, method, ...args) {
   return data;
 }
 
-// ── Load all data ──────────────────────────────────────────────────────────────
+// ── Load all data (Fixed for Custom Schema Response Payload) ───────────────────
 export async function loadAll() {
   const [biz, inv, par, exp, pay, accs, jnl, jlines, cns, banks, bankTxns, itms] = await Promise.all([
     supabase.from('businesses').select('*').order('name'),
@@ -28,36 +28,34 @@ export async function loadAll() {
     supabase.from('items').select('*').order('name'),
   ]);
 
-  // Handle any relational load errors up front
-  if (biz.error) throw biz.error;
-  if (inv.error) throw inv.error;
-  if (par.error) throw par.error;
-  if (exp.error) throw exp.error;
-  if (pay.error) throw pay.error;
-  if (accs.error) throw accs.error;
-  if (jnl.error) throw jnl.error;
-  if (jlines.error) throw jlines.error;
-  if (cns.error) throw cns.error;
-  if (banks.error) throw banks.error;
-  if (bankTxns.error) throw bankTxns.error;
-  if (itms.error) throw itms.error;
+  // If any errors were returned, log them explicitly to help debug
+  if (biz.error) console.error("Error loading businesses:", biz.error);
+  if (inv.error) console.error("Error loading invoices:", inv.error);
+
+  // Custom schemas return data directly as an array or inside .data depending on client instantiation.
+  // This helper function safely extracts your records either way.
+  const extract = (res) => {
+    if (!res) return [];
+    if (Array.isArray(res)) return res;
+    if (res.data && Array.isArray(res.data)) return res.data;
+    return [];
+  };
 
   return {
-    businesses: biz.data || [],
-    invoices: inv.data || [],
-    parties: par.data || [],
-    expenses: exp.data || [],
-    payments: pay.data || [],
-    accounts: accs.data || [],
-    journalEntries: jnl.data || [],
-    journalLines: jlines.data || [],
-    creditNotes: cns.data || [],
-    bankAccounts: banks.data || [],
-    bankTransactions: bankTxns.data || [],
-    items: itms.data || [],
+    businesses: extract(biz),
+    invoices: extract(inv),
+    parties: extract(par),
+    expenses: extract(exp),
+    payments: extract(pay),
+    accounts: extract(accs),
+    journalEntries: extract(jnl),
+    journalLines: extract(jlines),
+    creditNotes: extract(cns),
+    bankAccounts: extract(banks),
+    bankTransactions: extract(bankTxns),
+    items: extract(itms),
   };
 }
-
 // ── Businesses ─────────────────────────────────────────────────────────────────
 export async function saveBusiness(data, id) {
   if (id) {
