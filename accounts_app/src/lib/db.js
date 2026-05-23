@@ -1,15 +1,9 @@
-// db.js — all Supabase queries in one place
+// db.js — all Supabase queries for Needle Point ERP (accounts_erp schema)
+// Schema is set at client init time in App.jsx — no table-name changes needed here.
 
 export let supabase = null;
 
 export function initSupabase(client) { supabase = client; }
-
-// ── Generic ────────────────────────────────────────────────────────────────────
-async function q(table, method, ...args) {
-  const { data, error } = await supabase.from(table)[method](...args);
-  if (error) throw error;
-  return data;
-}
 
 // ── Load all data ──────────────────────────────────────────────────────────────
 export async function loadAll() {
@@ -28,18 +22,18 @@ export async function loadAll() {
     supabase.from('items').select('*').order('name'),
   ]);
   return {
-    businesses: biz.data || [],
-    invoices: inv.data || [],
-    parties: par.data || [],
-    expenses: exp.data || [],
-    payments: pay.data || [],
-    accounts: accs.data || [],
-    journalEntries: jnl.data || [],
-    journalLines: jlines.data || [],
-    creditNotes: cns.data || [],
-    bankAccounts: banks.data || [],
-    bankTransactions: bankTxns.data || [],
-    items: itms.data || [],
+    businesses:       biz.data       || [],
+    invoices:         inv.data       || [],
+    parties:          par.data       || [],
+    expenses:         exp.data       || [],
+    payments:         pay.data       || [],
+    accounts:         accs.data      || [],
+    journalEntries:   jnl.data       || [],
+    journalLines:     jlines.data    || [],
+    creditNotes:      cns.data       || [],
+    bankAccounts:     banks.data     || [],
+    bankTransactions: bankTxns.data  || [],
+    items:            itms.data      || [],
   };
 }
 
@@ -99,8 +93,6 @@ export async function seedAccounts(bizId, defaults) {
 }
 
 // ── Invoices ───────────────────────────────────────────────────────────────────
-// Safe column list — only fields that exist in the DB schema
-// This prevents "column not found" errors when running old schema versions
 const INV_COLS = [
   'business_id','party_id','invoice_number','type','status',
   'issue_date','due_date','notes','discount_percent','discount_amount',
@@ -119,27 +111,27 @@ export async function saveInvoice(inv, items, id) {
   let rid = id;
   if (id) {
     const { error } = await supabase.from('invoices').update(invData).eq('id', id);
-    if (error) throw new Error(`Invoice save failed: ${error.message}. Run the migration SQL from Settings → SQL Setup.`);
+    if (error) throw new Error(`Invoice save failed: ${error.message}`);
     await supabase.from('invoice_items').delete().eq('invoice_id', id);
   } else {
     const { data, error } = await supabase.from('invoices').insert(invData).select().single();
-    if (error) throw new Error(`Invoice save failed: ${error.message}. Run the migration SQL from Settings → SQL Setup.`);
+    if (error) throw new Error(`Invoice save failed: ${error.message}`);
     rid = data.id;
   }
   if (items?.length) {
     const rows = items.map(it => ({
-      invoice_id: rid,
-      description: it.description,
-      hsn_code: it.hsn_code || null,
-      quantity: Number(it.quantity),
-      unit_price: Number(it.unit_price),
+      invoice_id:       rid,
+      description:      it.description,
+      hsn_code:         it.hsn_code || null,
+      quantity:         Number(it.quantity),
+      unit_price:       Number(it.unit_price),
       discount_percent: Number(it.discount_percent || 0),
-      tax_percent: Number(it.tax_percent || 0),
-      taxable_amount: Number(it.taxable || 0),
-      cgst_amount: Number(it.cgst || 0),
-      sgst_amount: Number(it.sgst || 0),
-      igst_amount: Number(it.igst || 0),
-      amount: Number(it.lineTotal || 0),
+      tax_percent:      Number(it.tax_percent || 0),
+      taxable_amount:   Number(it.taxable || 0),
+      cgst_amount:      Number(it.cgst || 0),
+      sgst_amount:      Number(it.sgst || 0),
+      igst_amount:      Number(it.igst || 0),
+      amount:           Number(it.lineTotal || 0),
     }));
     const { error } = await supabase.from('invoice_items').insert(rows);
     if (error) throw new Error(`Invoice items save failed: ${error.message}`);
@@ -151,11 +143,9 @@ export async function getInvoiceItems(invoiceId) {
   const { data } = await supabase.from('invoice_items').select('*').eq('invoice_id', invoiceId);
   return data || [];
 }
-
 export async function updateInvoiceStatus(id, status) {
   await supabase.from('invoices').update({ status }).eq('id', id);
 }
-
 export async function deleteInvoice(id) {
   await supabase.from('invoices').delete().eq('id', id);
 }
@@ -165,7 +155,9 @@ export async function savePayment(data) {
   const { error } = await supabase.from('payments').insert(data);
   if (error) throw error;
 }
-export async function deletePayment(id) { await supabase.from('payments').delete().eq('id', id); }
+export async function deletePayment(id) {
+  await supabase.from('payments').delete().eq('id', id);
+}
 
 // ── Journal ────────────────────────────────────────────────────────────────────
 export async function saveJournal(entry, lines) {
@@ -207,7 +199,6 @@ export async function deleteExpense(id) {
   if (error) throw error;
 }
 
-// Auto-post expense → journal entry
 async function findAccount(bizId, nameLike) {
   const { data } = await supabase.from('accounts')
     .select('*').eq('business_id', bizId).ilike('name', `%${nameLike}%`).limit(1);
@@ -215,47 +206,44 @@ async function findAccount(bizId, nameLike) {
 }
 
 const CATEGORY_ACCOUNT_MAP = {
-  'Raw Materials': 'Raw Materials',
-  'Wages & Salaries': 'Wages',
-  'Rent': 'Rent',
-  'Utilities': 'Utilities',
-  'Shipping & Freight': 'Shipping',
-  'Marketing': 'Marketing',
-  'Software': 'Software',
-  'Travel': 'Travel',
-  'Printing & Packaging': 'Miscellaneous',
-  'Equipment': 'Fixed Assets',
-  'Miscellaneous': 'Miscellaneous',
+  'Raw Materials':       'Raw Materials',
+  'Wages & Salaries':    'Wages',
+  'Rent':                'Rent',
+  'Utilities':           'Utilities',
+  'Shipping & Freight':  'Shipping',
+  'Marketing':           'Marketing',
+  'Software':            'Software',
+  'Travel':              'Travel',
+  'Printing & Packaging':'Miscellaneous',
+  'Equipment':           'Fixed Assets',
+  'Miscellaneous':       'Miscellaneous',
 };
 
 export async function saveExpenseWithJournal(data) {
-  // 1. Save expense
   const { data: expRow, error } = await supabase.from('expenses')
     .insert({ ...data, vendor_id: data.vendor_id || null, journal_posted: true })
     .select().single();
   if (error) throw error;
 
-  // 2. Find expense account (by category mapping)
   const acctName = CATEGORY_ACCOUNT_MAP[data.category] || 'Miscellaneous';
-  const expAcct = await findAccount(data.business_id, acctName);
+  const expAcct  = await findAccount(data.business_id, acctName);
   const cashAcct = await findAccount(data.business_id, 'Bank Account') ||
                    await findAccount(data.business_id, 'Cash');
-  if (!expAcct || !cashAcct) return expRow.id; // skip journal if accounts not set up
+  if (!expAcct || !cashAcct) return expRow.id;
 
-  // 3. Create journal entry (Dr Expense / Cr Bank)
   const { data: jnl, error: je } = await supabase.from('journal_entries').insert({
     business_id: data.business_id,
-    entry_date: data.expense_date,
-    reference: data.reference || `EXP-${expRow.id.slice(0,8)}`,
-    narration: `${data.category}${data.description ? ' — ' + data.description : ''}`,
-    source: 'expense',
-    source_id: expRow.id,
+    entry_date:  data.expense_date,
+    reference:   data.reference || `EXP-${expRow.id.slice(0,8)}`,
+    narration:   `${data.category}${data.description ? ' — ' + data.description : ''}`,
+    source:      'expense',
+    source_id:   expRow.id,
   }).select().single();
   if (je) return expRow.id;
 
   await supabase.from('journal_lines').insert([
-    { journal_id: jnl.id, account_id: expAcct.id, debit: Number(data.amount), credit: 0, narration: data.category },
-    { journal_id: jnl.id, account_id: cashAcct.id, debit: 0, credit: Number(data.amount), narration: data.method || 'Payment' },
+    { journal_id: jnl.id, account_id: expAcct.id,  debit: Number(data.amount), credit: 0,                  narration: data.category },
+    { journal_id: jnl.id, account_id: cashAcct.id, debit: 0,                  credit: Number(data.amount), narration: data.method || 'Payment' },
   ]);
   return expRow.id;
 }
