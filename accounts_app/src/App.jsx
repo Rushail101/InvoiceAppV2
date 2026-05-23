@@ -818,10 +818,17 @@ export default function App() {
     const url = import.meta.env.VITE_SUPABASE_URL || localStorage.getItem('sb_url');
     const key = import.meta.env.VITE_SUPABASE_ANON_KEY || localStorage.getItem('sb_key');
     if (url && key) {
-      const c = createClient(url, key);
-      initSupabase(c);
-      setClient(c);
-    }
+        useEffect(() => {
+      const url = import.meta.env.VITE_SUPABASE_URL || localStorage.getItem('sb_url');
+      const key = import.meta.env.VITE_SUPABASE_ANON_KEY || localStorage.getItem('sb_key');
+      if (url && key) {
+        // ↓ CHANGED: db option tells PostgREST to route all queries to accounts_erp schema
+        const c = createClient(url, key, {
+          db: { schema: 'accounts_erp' },
+        });
+        initSupabase(c);
+        setClient(c);
+      }
   }, []);
 
   const reload = useCallback(async () => {
