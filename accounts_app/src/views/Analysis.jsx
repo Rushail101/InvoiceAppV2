@@ -24,8 +24,9 @@ function BarRow({ label, sub, amount, pct, color }) {
 // Monthly income/spend/net trend — plain SVG bars, no charting library.
 // The number above each month's bars is the net for that month (in
 // thousands), colour-coded green/red, so a bad month jumps out immediately
-// instead of needing to scan a table.
-function MonthlyTrendChart({ months }) {
+// instead of needing to scan a table. Click a month to drill into its
+// category breakdown (rendered by the caller, below this chart).
+function MonthlyTrendChart({ months, selectedKey, onSelect }) {
   if (!months.length) return null;
   const barW = 16, pairGap = 4, groupW = barW * 2 + pairGap, groupGap = 30;
   const chartH = 130, topPad = 22, bottomPad = 34;
@@ -41,18 +42,24 @@ function MonthlyTrendChart({ months }) {
         {months.map((m, i) => {
           const gx = groupGap + i * (groupW + groupGap);
           const incH = scale(m.income), spH = scale(m.spend);
+          const selected = m.key === selectedKey;
           return (
-            <g key={m.key}>
+            <g key={m.key} onClick={() => onSelect(m.key)} style={{ cursor: 'pointer' }}>
+              {/* Invisible wide hit-area so clicking near the bars (not just exactly on them) still works */}
+              <rect x={gx - 6} y={0} width={groupW + 12} height={chartH + topPad + 16} fill="transparent" />
+              {selected && (
+                <rect x={gx - 6} y={0} width={groupW + 12} height={chartH + topPad + 16} fill="var(--bg3)" rx={4} />
+              )}
               <text x={gx + groupW / 2} y={14} textAnchor="middle" fontSize="10" fontFamily="var(--mono)" fontWeight="700" fill={m.net >= 0 ? 'var(--green)' : 'var(--red)'}>
                 {m.net >= 0 ? '+' : ''}{fmtK(m.net)}
               </text>
-              <rect x={gx} y={chartH + topPad - incH} width={barW} height={incH} fill="var(--green)" rx={2}>
+              <rect x={gx} y={chartH + topPad - incH} width={barW} height={incH} fill="var(--green)" rx={2} opacity={selected || !selectedKey ? 1 : 0.4}>
                 <title>{`${m.label} income: ${fmt(m.income)}`}</title>
               </rect>
-              <rect x={gx + barW + pairGap} y={chartH + topPad - spH} width={barW} height={spH} fill="var(--red)" rx={2}>
+              <rect x={gx + barW + pairGap} y={chartH + topPad - spH} width={barW} height={spH} fill="var(--red)" rx={2} opacity={selected || !selectedKey ? 1 : 0.4}>
                 <title>{`${m.label} spend: ${fmt(m.spend)}`}</title>
               </rect>
-              <text x={gx + groupW / 2} y={chartH + topPad + 18} textAnchor="middle" fontSize="10.5" fontFamily="var(--mono)" fill="var(--text3)">
+              <text x={gx + groupW / 2} y={chartH + topPad + 18} textAnchor="middle" fontSize="10.5" fontFamily="var(--mono)" fontWeight={selected ? 700 : 400} fill={selected ? 'var(--text1)' : 'var(--text3)'}>
                 {m.label}
               </text>
             </g>
@@ -62,7 +69,7 @@ function MonthlyTrendChart({ months }) {
       <div style={{ display: 'flex', gap: 14, marginTop: 4, fontSize: 10.5, color: 'var(--text3)' }}>
         <span><span style={{ display: 'inline-block', width: 8, height: 8, background: 'var(--green)', borderRadius: 2, marginRight: 4 }} />Income</span>
         <span><span style={{ display: 'inline-block', width: 8, height: 8, background: 'var(--red)', borderRadius: 2, marginRight: 4 }} />Spend</span>
-        <span>Number above bars = net for that month · hover a bar for the exact figure</span>
+        <span>Click a month for its breakdown · hover a bar for the exact figure</span>
       </div>
     </div>
   );
@@ -71,6 +78,7 @@ function MonthlyTrendChart({ months }) {
 export function AnalysisView({ journalEntries, journalLines, accounts, businesses, activeBiz, parties, invoices, payments }) {
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
+  const [selectedMonth, setSelectedMonth] = useState(null);
 
   function applyPreset(preset) {
     const now = new Date();
@@ -100,7 +108,9 @@ export function AnalysisView({ journalEntries, journalLines, accounts, businesse
 
   // ── Monthly trend — income vs spend vs net, one bucket per calendar
   // month within whatever range is selected. This is what actually answers
-  // "which month was down" at a glance instead of reading raw totals. ──
+  // "which month was down" at a glance instead of reading raw totals.
+  // Also tracks a per-category breakdown within each month, so clicking a
+  // month can show exactly where that month's money went. ──
   const journalDateById = {};
   periodJournals.forEach(j => { journalDateById[j.id] = j.entry_date; });
   const monthlyMap = {};
@@ -108,17 +118,24 @@ export function AnalysisView({ journalEntries, journalLines, accounts, businesse
     const d = journalDateById[l.journal_id];
     if (!d) return;
     const key = d.slice(0, 7); // YYYY-MM
-    if (!monthlyMap[key]) monthlyMap[key] = { income: 0, spend: 0 };
+    if (!monthlyMap[key]) monthlyMap[key] = { income: 0, spend: 0, spendByAcct: {}, incomeByAcct: {} };
     const acc = acctById[l.account_id];
     if (!acc) return;
-    if (l.type === 'debit' && acc.group === 'expense') monthlyMap[key].spend += Number(l.amount);
-    if (l.type === 'credit' && acc.group === 'income') monthlyMap[key].income += Number(l.amount);
+    if (l.type === 'debit' && acc.group === 'expense') {
+      monthlyMap[key].spend += Number(l.amount);
+      monthlyMap[key].spendByAcct[acc.name] = (monthlyMap[key].spendByAcct[acc.name] || 0) + Number(l.amount);
+    }
+    if (l.type === 'credit' && acc.group === 'income') {
+      monthlyMap[key].income += Number(l.amount);
+      monthlyMap[key].incomeByAcct[acc.name] = (monthlyMap[key].incomeByAcct[acc.name] || 0) + Number(l.amount);
+    }
   });
   const monthlyTrend = Object.entries(monthlyMap)
     .map(([key, v]) => ({
       key,
       label: new Date(key + '-15').toLocaleDateString('en-IN', { month: 'short', year: '2-digit' }),
       income: v.income, spend: v.spend, net: v.income - v.spend,
+      spendByAcct: v.spendByAcct, incomeByAcct: v.incomeByAcct,
     }))
     .sort((a, b) => a.key.localeCompare(b.key));
 
@@ -244,7 +261,44 @@ export function AnalysisView({ journalEntries, journalLines, accounts, businesse
         <div className="section-title" style={{ marginTop: 0 }}>Monthly trend</div>
         {monthlyTrend.length === 0
           ? <EmptyState icon="📊" message="Not enough data in this period for a trend" />
-          : <MonthlyTrendChart months={monthlyTrend} />}
+          : <MonthlyTrendChart months={monthlyTrend} selectedKey={selectedMonth} onSelect={key => setSelectedMonth(prev => prev === key ? null : key)} />}
+
+        {selectedMonth && (() => {
+          const m = monthlyTrend.find(x => x.key === selectedMonth);
+          if (!m) return null;
+          const spendRowsM = Object.entries(m.spendByAcct).sort((a, b) => b[1] - a[1]);
+          const incomeRowsM = Object.entries(m.incomeByAcct).sort((a, b) => b[1] - a[1]);
+          return (
+            <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid var(--border2)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 12 }}>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>{m.label} breakdown</div>
+                <button className="btn btn-ghost btn-sm" onClick={() => setSelectedMonth(null)}>Close ✕</button>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
+                <div>
+                  <div style={{ fontSize: 10.5, color: 'var(--text3)', fontFamily: 'var(--mono)', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 10 }}>
+                    Spend — {fmt(m.spend)}
+                  </div>
+                  {spendRowsM.length === 0
+                    ? <p style={{ fontSize: 12, color: 'var(--text4)' }}>No spending this month</p>
+                    : spendRowsM.map(([name, amt], i) => (
+                        <BarRow key={name} label={name} amount={amt} pct={m.spend ? (amt / m.spend) * 100 : 0} color={COLORS[i % COLORS.length]} />
+                      ))}
+                </div>
+                <div>
+                  <div style={{ fontSize: 10.5, color: 'var(--text3)', fontFamily: 'var(--mono)', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 10 }}>
+                    Income — {fmt(m.income)}
+                  </div>
+                  {incomeRowsM.length === 0
+                    ? <p style={{ fontSize: 12, color: 'var(--text4)' }}>No income this month</p>
+                    : incomeRowsM.map(([name, amt], i) => (
+                        <BarRow key={name} label={name} amount={amt} pct={m.income ? (amt / m.income) * 100 : 0} color={COLORS[i % COLORS.length]} />
+                      ))}
+                </div>
+              </div>
+            </div>
+          );
+        })()}
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
