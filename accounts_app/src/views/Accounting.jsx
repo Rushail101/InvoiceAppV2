@@ -534,10 +534,16 @@ export function TrialBalanceView({ accounts, journalLines, journalEntries, invoi
   const rows = filtered.map(a => {
     const b = accBalances[a.id] || { dr: 0, cr: 0 };
     const net = b.dr - b.cr;
-    // Normal balance: Assets+Expenses = Dr; Liabilities+Equity+Income = Cr
-    const isDebitNormal = ['asset', 'expense'].includes(a.group);
-    const closingDr = isDebitNormal ? (net > 0 ? net : 0) : (net < 0 ? -net : 0);
-    const closingCr = !isDebitNormal ? (net < 0 ? -net : 0) : (net > 0 ? 0 : -net);
+    // Closing balance just goes on whichever side has the bigger raw total —
+    // this is a universal trial-balance rule and doesn't need to branch on
+    // the account's "normal" side. The previous version tried to special-case
+    // debit-normal vs credit-normal accounts and ended up computing the exact
+    // same (wrong) formula for both Dr and Cr columns on credit-normal
+    // accounts — which is why an account like a loan could show the same
+    // number in both columns, and an account with an "abnormal" balance
+    // (e.g. a liability sitting at a debit balance) would show blank in both.
+    const closingDr = net > 0 ? net : 0;
+    const closingCr = net < 0 ? -net : 0;
     return { ...a, totalDr: b.dr, totalCr: b.cr, closingDr, closingCr };
   }).filter(r => r.totalDr > 0 || r.totalCr > 0);
 
@@ -614,9 +620,25 @@ export function BalanceSheetView({ accounts, journalLines, journalEntries, invoi
     return dr - cr;
   }
 
+  // An account only ever gets excluded from the Balance Sheet if it's
+  // explicitly filed under a DIFFERENT recognized sub-group (e.g. "Fixed
+  // Assets" accounts don't show up under "Current Assets"). An account with
+  // a blank/unset sub_group — very possible if it was created quickly mid-
+  // transaction via "+ Add Account" without filling that dropdown in —
+  // defaults into the Current bucket instead of silently disappearing from
+  // every total. This is what was causing accounts like a loan to count
+  // toward nothing at all, while Trial Balance (which doesn't do this
+  // filtering) still included it — hence Trial Balance showing balanced
+  // while Balance Sheet didn't.
+  function inSubGroup(a, targetSubGroup) {
+    if (a.sub_group === targetSubGroup) return true;
+    const isCurrentBucket = targetSubGroup === 'Current Assets' || targetSubGroup === 'Current Liabilities';
+    return isCurrentBucket && !a.sub_group;
+  }
+
   function groupTotal(grp, subGrp) {
     return bizAccounts
-      .filter(a => a.group === grp && (!subGrp || a.sub_group === subGrp))
+      .filter(a => a.group === grp && (!subGrp || inSubGroup(a, subGrp)))
       .reduce((s, a) => {
         const bal = getBalance(a.id);
         return s + (grp === 'asset' || grp === 'expense' ? bal : -bal);
