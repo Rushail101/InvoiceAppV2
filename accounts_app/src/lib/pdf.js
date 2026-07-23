@@ -225,15 +225,12 @@ tbody tr:nth-child(even) td{background:#fafafa}
   const blob = new Blob([html], { type: 'text/html' });
   const burl = URL.createObjectURL(blob);
   const docNum = invoice.invoice_number || invoice.cn_number || 'doc';
-  // File name = "<Client/Vendor>-<InvoiceNumber>.html" instead of just the
-  // invoice number, so downloads are identifiable once they're out of the
-  // app (e.g. sitting in a Downloads folder or emailed to someone). Uses
-  // the party linked to the invoice — the client for a sale invoice, the
-  // vendor for a purchase invoice — rather than your own business name,
-  // since that's more useful for telling files apart in a folder. Strip
-  // characters that are invalid in file names on Windows/Mac/Linux.
-  const safePartyName = (party?.name || '').replace(/[\\/:*?"<>|]/g, '').trim();
-  const fileName = safePartyName ? `${safePartyName}-${docNum}` : docNum;
+  // File name = "<Brand>-<InvoiceNumber>.html" instead of just the invoice
+  // number, so downloads are identifiable once they're out of the app (e.g.
+  // sitting in a Downloads folder or emailed to someone). Strip characters
+  // that are invalid in file names on Windows/Mac/Linux.
+  const safeBizName = (biz.name || '').replace(/[\\/:*?"<>|]/g, '').trim();
+  const fileName = safeBizName ? `${safeBizName}-${docNum}` : docNum;
 
   const ov = document.createElement('div');
   ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.8);display:flex;align-items:center;justify-content:center;z-index:9999;font-family:sans-serif;backdrop-filter:blur(3px)';
