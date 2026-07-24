@@ -51,7 +51,17 @@ export function printInvoice(invoice, items, party, biz, invPayments, isCreditNo
   const titleMap = { proforma: 'PROFORMA INVOICE', draft: 'TAX INVOICE', sent: 'TAX INVOICE', paid: 'TAX INVOICE', partially_paid: 'TAX INVOICE', overdue: 'TAX INVOICE', cancelled: 'TAX INVOICE' };
   const docTitle = isCN ? 'CREDIT NOTE' : (titleMap[invoice.status] || 'TAX INVOICE');
 
-  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${invoice.invoice_number || invoice.cn_number}</title>
+  const docNum = invoice.invoice_number || invoice.cn_number || 'doc';
+  // File/tab name = "<Client/Vendor>-<InvoiceNumber>" instead of just the
+  // invoice number, so downloads and Save-As-PDF dialogs are identifiable
+  // once they're out of the app. Uses the party linked to the invoice — the
+  // client for a sale invoice, the vendor for a purchase invoice — rather
+  // than your own business name. Strip characters invalid in file names on
+  // Windows/Mac/Linux.
+  const safePartyName = (party?.name || '').replace(/[\\/:*?"<>|]/g, '').trim();
+  const fileName = safePartyName ? `${safePartyName}-${docNum}` : docNum;
+
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${fileName}</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Helvetica Neue',Arial,sans-serif;font-size:11px;color:#111;background:#fff;padding:20px}
@@ -224,13 +234,6 @@ tbody tr:nth-child(even) td{background:#fafafa}
 
   const blob = new Blob([html], { type: 'text/html' });
   const burl = URL.createObjectURL(blob);
-  const docNum = invoice.invoice_number || invoice.cn_number || 'doc';
-  // File name = "<Brand>-<InvoiceNumber>.html" instead of just the invoice
-  // number, so downloads are identifiable once they're out of the app (e.g.
-  // sitting in a Downloads folder or emailed to someone). Strip characters
-  // that are invalid in file names on Windows/Mac/Linux.
-  const safeBizName = (biz.name || '').replace(/[\\/:*?"<>|]/g, '').trim();
-  const fileName = safeBizName ? `${safeBizName}-${docNum}` : docNum;
 
   const ov = document.createElement('div');
   ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.8);display:flex;align-items:center;justify-content:center;z-index:9999;font-family:sans-serif;backdrop-filter:blur(3px)';
@@ -250,7 +253,18 @@ tbody tr:nth-child(even) td{background:#fafafa}
     const ifr = document.createElement('iframe');
     ifr.style.cssText = 'position:fixed;top:-9999px;left:-9999px;width:900px;height:700px;border:none';
     ifr.src = burl; document.body.appendChild(ifr);
-    ifr.onload = () => { setTimeout(() => ifr.contentWindow.print(), 600); setTimeout(() => { document.body.removeChild(ifr); URL.revokeObjectURL(burl); }, 5000); };
+    // Chrome's "Save as PDF" dialog uses the TOP-LEVEL page's title when
+    // printing through a hidden iframe like this — it ignores the iframe's
+    // own <title>. So the ERP app's own title ("Accounts — Multi-Business
+    // ERP") would show up as the suggested file name instead of the
+    // invoice's, unless we temporarily swap the real page title in and out
+    // around the print call.
+    const originalTitle = document.title;
+    document.title = fileName;
+    ifr.onload = () => {
+      setTimeout(() => ifr.contentWindow.print(), 600);
+      setTimeout(() => { document.body.removeChild(ifr); URL.revokeObjectURL(burl); document.title = originalTitle; }, 5000);
+    };
     document.body.removeChild(ov);
   };
 }
