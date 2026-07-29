@@ -59,7 +59,7 @@ export function printInvoice(invoice, items, party, biz, invPayments, isCreditNo
   // than your own business name. Strip characters invalid in file names on
   // Windows/Mac/Linux.
   const safePartyName = (party?.name || '').replace(/[\\/:*?"<>|]/g, '').trim();
-  const fileName = safePartyName ? `${safePartyName}-${docNum}` : docNum;
+  const fileName = docNum ? `${docNum}-${safePartyName}` : safePartyName;
 
   const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${fileName}</title>
 <style>
