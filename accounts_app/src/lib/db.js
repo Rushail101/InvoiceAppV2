@@ -11,37 +11,61 @@ async function q(table, method, ...args) {
   return data;
 }
 
+// Supabase/PostgREST caps any single .select() response at a default of
+// 1000 rows, silently — no error, just a truncated array. Any table that
+// grows past that (journal_lines is usually first, since every voucher
+// writes 2+ rows) starts dropping its newest rows from what the app sees,
+// which is why journal entries can suddenly show ₹0.00 debit/credit even
+// though the entry itself is fine. This helper pages through with
+// .range() until a page comes back short, so every row loads regardless
+// of table size.
+async function fetchAll(table, { order, select } = {}) {
+  const pageSize = 1000;
+  let from = 0;
+  let all = [];
+  for (;;) {
+    let query = supabase.from(table).select(select || '*');
+    if (order) query = query.order(order.column, { ascending: order.ascending !== false });
+    const { data, error } = await query.range(from, from + pageSize - 1);
+    if (error) throw error;
+    all = all.concat(data || []);
+    if (!data || data.length < pageSize) break;
+    from += pageSize;
+  }
+  return all;
+}
+
 // ── Load all data ──────────────────────────────────────────────────────────────
 export async function loadAll() {
   const [biz, inv, par, exp, pay, accs, jnl, jlines, cns, banks, bankTxns, itms, dcs] = await Promise.all([
-    supabase.from('businesses').select('*').order('name'),
-    supabase.from('invoices').select('*').order('created_at', { ascending: false }),
-    supabase.from('parties').select('*').order('name'),
-    supabase.from('expenses').select('*').order('expense_date', { ascending: false }),
-    supabase.from('payments').select('*').order('payment_date', { ascending: false }),
-    supabase.from('accounts').select('*').order('code'),
-    supabase.from('journal_entries').select('*').order('entry_date', { ascending: false }),
-    supabase.from('journal_lines').select('*'),
-    supabase.from('credit_notes').select('*').order('created_at', { ascending: false }),
-    supabase.from('bank_accounts').select('*').order('name'),
-    supabase.from('bank_transactions').select('*').order('txn_date', { ascending: false }),
-    supabase.from('items').select('*').order('name'),
-    supabase.from('delivery_challans').select('*').order('challan_date', { ascending: false }),
+    fetchAll('businesses', { order: { column: 'name', ascending: true } }),
+    fetchAll('invoices', { order: { column: 'created_at', ascending: false } }),
+    fetchAll('parties', { order: { column: 'name', ascending: true } }),
+    fetchAll('expenses', { order: { column: 'expense_date', ascending: false } }),
+    fetchAll('payments', { order: { column: 'payment_date', ascending: false } }),
+    fetchAll('accounts', { order: { column: 'code', ascending: true } }),
+    fetchAll('journal_entries', { order: { column: 'entry_date', ascending: false } }),
+    fetchAll('journal_lines'),
+    fetchAll('credit_notes', { order: { column: 'created_at', ascending: false } }),
+    fetchAll('bank_accounts', { order: { column: 'name', ascending: true } }),
+    fetchAll('bank_transactions', { order: { column: 'txn_date', ascending: false } }),
+    fetchAll('items', { order: { column: 'name', ascending: true } }),
+    fetchAll('delivery_challans', { order: { column: 'challan_date', ascending: false } }),
   ]);
   return {
-    businesses: biz.data || [],
-    invoices: inv.data || [],
-    parties: par.data || [],
-    expenses: exp.data || [],
-    payments: pay.data || [],
-    accounts: accs.data || [],
-    journalEntries: jnl.data || [],
-    journalLines: jlines.data || [],
-    creditNotes: cns.data || [],
-    bankAccounts: banks.data || [],
-    bankTransactions: bankTxns.data || [],
-    items: itms.data || [],
-    challans: dcs.data || [],
+    businesses: biz,
+    invoices: inv,
+    parties: par,
+    expenses: exp,
+    payments: pay,
+    accounts: accs,
+    journalEntries: jnl,
+    journalLines: jlines,
+    creditNotes: cns,
+    bankAccounts: banks,
+    bankTransactions: bankTxns,
+    items: itms,
+    challans: dcs,
   };
 }
 
