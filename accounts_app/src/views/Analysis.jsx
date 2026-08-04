@@ -209,12 +209,21 @@ export function AnalysisView({ journalEntries, journalLines, accounts, businesse
   const COLORS = ['var(--accent)', 'var(--blue)', 'var(--purple)', 'var(--amber)', 'var(--green)', '#ff8cc8', '#f97316', '#22d3ee'];
 
   // ── Financial ratios / KPIs ──────────────────────────────────────────────
-  // Gross margin: Sales Revenue minus direct cost of what was sold (Raw
-  // Materials / Cost of Goods Sold), as a % of Sales Revenue. Falls back to
-  // 0 cost if neither account has any spend recorded, rather than hiding
-  // the metric — still useful to see 100% margin flagged as suspicious.
+  // Gross margin: Sales Revenue minus every direct cost of what was sold —
+  // this means ALL accounts tagged "Direct Expenses" in the Chart of
+  // Accounts (Raw Materials, Cost of Goods Sold, Wages & Salaries, and any
+  // custom direct-expense account you add), not just raw materials. Wages
+  // for production staff are a direct cost of the goods sold, so leaving
+  // them out overstates gross margin. Falls back to 0 cost if no direct
+  // expense has any spend recorded, rather than hiding the metric — still
+  // useful to see 100% margin flagged as suspicious.
   const salesRevenue = incomeByAcct['Sales Revenue'] || 0;
-  const cogs = (spendByAcct['Cost of Goods Sold'] || 0) + (spendByAcct['Raw Materials'] || 0);
+  const cogs = periodLines.reduce((sum, l) => {
+    if (l.type !== 'debit') return sum;
+    const acc = acctById[l.account_id];
+    if (!acc || acc.group !== 'expense' || acc.sub_group !== 'Direct Expenses') return sum;
+    return sum + Number(l.amount);
+  }, 0);
   const grossMargin = salesRevenue > 0 ? ((salesRevenue - cogs) / salesRevenue) * 100 : null;
   const netMargin = totalIncome > 0 ? (net / totalIncome) * 100 : null;
 
@@ -269,7 +278,7 @@ export function AnalysisView({ journalEntries, journalLines, accounts, businesse
 
       <div className="section-title" style={{ marginTop: 0 }}>Key Ratios</div>
       <div className="stats-grid">
-        <StatCard label="Gross Margin" value={grossMargin !== null ? `${grossMargin.toFixed(1)}%` : '—'} color={grossMargin === null ? 'blue' : grossMargin >= 30 ? 'green' : grossMargin >= 10 ? 'amber' : 'red'} sub="Sales Revenue − COGS/Raw Materials" />
+        <StatCard label="Gross Margin" value={grossMargin !== null ? `${grossMargin.toFixed(1)}%` : '—'} color={grossMargin === null ? 'blue' : grossMargin >= 30 ? 'green' : grossMargin >= 10 ? 'amber' : 'red'} sub="Sales Revenue − all Direct Expenses" />
         <StatCard label="Net Margin" value={netMargin !== null ? `${netMargin.toFixed(1)}%` : '—'} color={netMargin === null ? 'blue' : netMargin >= 0 ? 'green' : 'red'} sub="Net ÷ Total Earned, this period" />
         <StatCard label="Cash Balance" value={fmt(cashBalance)} color={cashBalance >= 0 ? 'blue' : 'red'} sub="Bank Account, all-time" />
         <StatCard label="Runway" value={runwayMonths !== null ? `${runwayMonths.toFixed(1)} mo` : '—'} color={runwayMonths === null ? 'green' : runwayMonths < 3 ? 'red' : runwayMonths < 6 ? 'amber' : 'green'} sub={monthlyBurn > 0 ? `Burning ${fmt(monthlyBurn)}/mo` : 'Not burning cash this period'} />
