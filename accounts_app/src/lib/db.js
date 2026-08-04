@@ -202,44 +202,64 @@ export async function deletePayment(id) { await supabase.from('payments').delete
 // Bank-imported payments already get their journal entry from
 // saveBankTxnWithJournal, so BankImport.jsx deliberately keeps calling the
 // plain savePayment() above to avoid double-posting the same money in.
+// Shared by savePaymentWithJournal (new payment) and repostPaymentJournal
+// (retroactively posting an existing payment row that never got a journal —
+// see JournalHealthView). Never throws; always returns a skipped/skipReason
+// result so a batch re-post can continue past individual failures.
+async function postPaymentJournal(payRow, isPurchase) {
+  if (!payRow.business_id) return { journalId: null, skipped: true, skipReason: 'no_business_id' };
+
+  const bankAcct = await findAccount(payRow.business_id, 'Bank Account');
+  const otherAcct = isPurchase
+    ? (await findAccount(payRow.business_id, 'Cost of Goods Sold')) || (await findAccount(payRow.business_id, 'Raw Materials'))
+    : await findAccount(payRow.business_id, 'Sales Revenue');
+  if (!bankAcct || !otherAcct) return { journalId: null, skipped: true, skipReason: 'account_not_found' };
+
+  const { data: jnl, error: je } = await supabase.from('journal_entries').insert({
+    business_id: payRow.business_id,
+    entry_date: payRow.payment_date,
+    reference: payRow.reference || `PAY-${payRow.id.slice(0, 8)}`,
+    description: isPurchase ? `Bill payment${payRow.method ? ' — ' + payRow.method : ''}` : `Payment received${payRow.method ? ' — ' + payRow.method : ''}`,
+    narration: payRow.notes || '',
+    source: 'payment',
+    source_id: payRow.id,
+  }).select().single();
+  if (je) return { journalId: null, skipped: true, skipReason: je.message };
+
+  const lines = isPurchase
+    ? [
+        { journal_id: jnl.id, account_id: otherAcct.id, type: 'debit', amount: Number(payRow.amount), narration: payRow.method || 'Bill payment' },
+        { journal_id: jnl.id, account_id: bankAcct.id, type: 'credit', amount: Number(payRow.amount), narration: payRow.method || 'Bill payment' },
+      ]
+    : [
+        { journal_id: jnl.id, account_id: bankAcct.id, type: 'debit', amount: Number(payRow.amount), narration: payRow.method || 'Payment received' },
+        { journal_id: jnl.id, account_id: otherAcct.id, type: 'credit', amount: Number(payRow.amount), narration: payRow.method || 'Payment received' },
+      ];
+  const { error: lErr } = await supabase.from('journal_lines').insert(lines);
+  if (lErr) return { journalId: jnl.id, skipped: true, skipReason: lErr.message };
+
+  return { journalId: jnl.id, skipped: false };
+}
+
 export async function savePaymentWithJournal(data) {
   const isPurchase = data.invoice_type === 'purchase';
   const { invoice_type, ...payRecord } = data; // invoice_type isn't a real payments column
   const { data: payRow, error } = await supabase.from('payments').insert(payRecord).select().single();
   if (error) throw error;
 
-  if (!data.business_id) return { id: payRow.id, journalId: null, skipped: true, skipReason: 'no_business_id' };
+  const result = await postPaymentJournal(payRow, isPurchase);
+  return { id: payRow.id, ...result };
+}
 
-  const bankAcct = await findAccount(data.business_id, 'Bank Account');
-  const otherAcct = isPurchase
-    ? (await findAccount(data.business_id, 'Cost of Goods Sold')) || (await findAccount(data.business_id, 'Raw Materials'))
-    : await findAccount(data.business_id, 'Sales Revenue');
-  if (!bankAcct || !otherAcct) return { id: payRow.id, journalId: null, skipped: true, skipReason: 'account_not_found' };
-
-  const { data: jnl, error: je } = await supabase.from('journal_entries').insert({
-    business_id: data.business_id,
-    entry_date: data.payment_date,
-    reference: data.reference || `PAY-${payRow.id.slice(0, 8)}`,
-    description: isPurchase ? `Bill payment${data.method ? ' — ' + data.method : ''}` : `Payment received${data.method ? ' — ' + data.method : ''}`,
-    narration: data.notes || '',
-    source: 'payment',
-    source_id: payRow.id,
-  }).select().single();
-  if (je) return { id: payRow.id, journalId: null, skipped: true, skipReason: je.message };
-
-  const lines = isPurchase
-    ? [
-        { journal_id: jnl.id, account_id: otherAcct.id, type: 'debit', amount: Number(data.amount), narration: data.method || 'Bill payment' },
-        { journal_id: jnl.id, account_id: bankAcct.id, type: 'credit', amount: Number(data.amount), narration: data.method || 'Bill payment' },
-      ]
-    : [
-        { journal_id: jnl.id, account_id: bankAcct.id, type: 'debit', amount: Number(data.amount), narration: data.method || 'Payment received' },
-        { journal_id: jnl.id, account_id: otherAcct.id, type: 'credit', amount: Number(data.amount), narration: data.method || 'Payment received' },
-      ];
-  const { error: lErr } = await supabase.from('journal_lines').insert(lines);
-  if (lErr) return { id: payRow.id, journalId: jnl.id, skipped: true, skipReason: lErr.message };
-
-  return { id: payRow.id, journalId: jnl.id, skipped: false };
+// Retroactively post a journal entry for a payment that was saved without one
+// (e.g. account wasn't set up yet at the time, or it predates the JE-lines
+// column-name fix). `invoices` is the loaded invoice list, used to figure out
+// whether this was a sale or purchase payment via the linked invoice's type.
+export async function repostPaymentJournal(payRow, invoices) {
+  const inv = (invoices || []).find(i => i.id === payRow.invoice_id);
+  const isPurchase = inv?.type === 'purchase';
+  const result = await postPaymentJournal(payRow, isPurchase);
+  return { id: payRow.id, ...result };
 }
 
 // ── Journal ────────────────────────────────────────────────────────────────────
@@ -315,45 +335,61 @@ const CATEGORY_ACCOUNT_MAP = {
   'Miscellaneous': 'Miscellaneous',
 };
 
-export async function saveExpenseWithJournal(data) {
-  // 1. Save expense
-  const { data: expRow, error } = await supabase.from('expenses')
-    .insert({ ...data, vendor_id: data.vendor_id || null, journal_posted: true })
-    .select().single();
-  if (error) throw error;
+// Shared by saveExpenseWithJournal (new expense) and repostExpenseJournal
+// (retroactively posting an existing expense row). Never throws. Only
+// updates expenses.journal_posted to true once the journal entry AND its
+// lines have both actually landed — previously the flag was set at insert
+// time regardless of what happened afterward, so it could say "posted" for
+// an expense with no journal entry at all.
+async function postExpenseJournal(expRow) {
+  const acctName = CATEGORY_ACCOUNT_MAP[expRow.category] || 'Miscellaneous';
+  const expAcct = await findAccount(expRow.business_id, acctName);
+  const cashAcct = await findAccount(expRow.business_id, 'Bank Account') ||
+                   await findAccount(expRow.business_id, 'Cash');
+  if (!expAcct || !cashAcct) return { journalId: null, skipped: true, skipReason: 'account_not_found' };
 
-  // 2. Find expense account (by category mapping)
-  const acctName = CATEGORY_ACCOUNT_MAP[data.category] || 'Miscellaneous';
-  const expAcct = await findAccount(data.business_id, acctName);
-  const cashAcct = await findAccount(data.business_id, 'Bank Account') ||
-                   await findAccount(data.business_id, 'Cash');
-  if (!expAcct || !cashAcct) return { id: expRow.id, journalId: null, skipped: true, skipReason: 'account_not_found' };
-
-  // 3. Create journal entry (Dr Expense / Cr Bank)
-  // NOTE: journal_entries.description is NOT NULL — this was previously omitted,
-  // which made this insert fail silently every time (the code below correctly
-  // detected the error and bailed out, but nothing ever surfaced it), so no
-  // expense has ever actually produced a journal entry until this fix.
   const { data: jnl, error: je } = await supabase.from('journal_entries').insert({
-    business_id: data.business_id,
-    entry_date: data.expense_date,
-    reference: data.reference || `EXP-${expRow.id.slice(0, 8)}`,
-    description: `${data.category}${data.description ? ' — ' + data.description : ''}`,
-    narration: data.description || '',
+    business_id: expRow.business_id,
+    entry_date: expRow.expense_date,
+    reference: expRow.reference || `EXP-${expRow.id.slice(0, 8)}`,
+    description: `${expRow.category}${expRow.description ? ' — ' + expRow.description : ''}`,
+    narration: expRow.description || '',
     source: 'expense',
     source_id: expRow.id,
   }).select().single();
-  if (je) return { id: expRow.id, journalId: null, skipped: true, skipReason: je.message };
+  if (je) return { journalId: null, skipped: true, skipReason: je.message };
 
-  // journal_lines uses type ('debit'|'credit') + amount columns, not debit/credit
-  // numeric columns — this mismatch was also silently discarding every line.
   const { error: lErr } = await supabase.from('journal_lines').insert([
-    { journal_id: jnl.id, account_id: expAcct.id, type: 'debit', amount: Number(data.amount), narration: data.category },
-    { journal_id: jnl.id, account_id: cashAcct.id, type: 'credit', amount: Number(data.amount), narration: data.method || 'Payment' },
+    { journal_id: jnl.id, account_id: expAcct.id, type: 'debit', amount: Number(expRow.amount), narration: expRow.category },
+    { journal_id: jnl.id, account_id: cashAcct.id, type: 'credit', amount: Number(expRow.amount), narration: expRow.method || 'Payment' },
   ]);
-  if (lErr) return { id: expRow.id, journalId: jnl.id, skipped: true, skipReason: lErr.message };
+  if (lErr) return { journalId: jnl.id, skipped: true, skipReason: lErr.message };
 
-  return { id: expRow.id, journalId: jnl.id, skipped: false };
+  // Only now, with the entry and both lines confirmed written, mark it posted.
+  await supabase.from('expenses').update({ journal_posted: true }).eq('id', expRow.id);
+  return { journalId: jnl.id, skipped: false };
+}
+
+export async function saveExpenseWithJournal(data) {
+  // 1. Save expense — journal_posted starts false and is only flipped once
+  // postExpenseJournal actually confirms the journal entry + lines exist.
+  const { data: expRow, error } = await supabase.from('expenses')
+    .insert({ ...data, vendor_id: data.vendor_id || null, journal_posted: false })
+    .select().single();
+  if (error) throw error;
+
+  const result = await postExpenseJournal(expRow);
+  return { id: expRow.id, ...result };
+}
+
+// Retroactively post a journal entry for an expense that was saved without
+// one (missing Chart of Accounts entry at the time, historical data from
+// before the JE-column-name fix, etc). Safe to call on any expense — pass
+// only expenses that JournalHealthView has already confirmed have no
+// matching journal_entries row, so this never double-posts.
+export async function repostExpenseJournal(expRow) {
+  const result = await postExpenseJournal(expRow);
+  return { id: expRow.id, ...result };
 }
 
 // ── Bank Transaction → Journal Entry (Auto-post) ───────────────────────────────
@@ -400,9 +436,65 @@ function applyRuleEngine(txn) {
   return null;
 }
 
+// Shared by saveBankTxnWithJournal (new import) and repostBankTxnJournal
+// (retroactively posting an existing bank_transactions row). Never throws —
+// returns skipped/skipReason so a batch import or re-post can carry on past
+// one bad row instead of aborting or (worse) leaving journal_posted=true on
+// a row that never actually got an entry.
+async function postBankTxnJournal(txnRow, accounts, bizId, overrideMapping) {
+  let mapping = overrideMapping;
+  if (!mapping) mapping = applyRuleEngine(txnRow);
+  if (!mapping) {
+    mapping = txnRow.type === 'credit'
+      ? { debitAcct: 'Bank Account', creditAcct: 'Other Income', confidence: 'low', method: 'fallback' }
+      : { debitAcct: 'Miscellaneous Expenses', creditAcct: 'Bank Account', confidence: 'low', method: 'fallback' };
+  }
+
+  if (!bizId) {
+    console.warn('JE skipped: no business_id resolvable for bank txn', txnRow);
+    return { journalId: null, mapping, skipped: true, skipReason: 'no_business_id' };
+  }
+  const bizAccounts = accounts.filter(a => a.business_id === bizId);
+  const findAcct = (name) => bizAccounts.find(a =>
+    a.name.toLowerCase().includes(name.toLowerCase()) ||
+    name.toLowerCase().includes(a.name.toLowerCase())
+  );
+  const debitAcct = findAcct(mapping.debitAcct);
+  const creditAcct = findAcct(mapping.creditAcct);
+  if (!debitAcct || !creditAcct) {
+    console.warn('JE skipped: account not found', mapping, 'missing:', !debitAcct ? mapping.debitAcct : mapping.creditAcct);
+    return { journalId: null, mapping, skipped: true, skipReason: 'account_not_found' };
+  }
+
+  const { data: jnl, error: jErr } = await supabase
+    .from('journal_entries')
+    .insert({
+      business_id: bizId,
+      entry_date: txnRow.txn_date || txnRow.date,
+      reference: txnRow.reference || `BANK-${txnRow.id.slice(0, 8)}`,
+      description: mapping.reason || txnRow.description || 'Bank transaction',
+      narration: txnRow.description,
+      source: 'bank_import',
+      source_id: txnRow.id,
+    })
+    .select().single();
+  if (jErr) return { journalId: null, mapping, skipped: true, skipReason: jErr.message };
+
+  const { error: lErr } = await supabase.from('journal_lines').insert([
+    { journal_id: jnl.id, account_id: debitAcct.id, type: 'debit', amount: txnRow.amount, narration: mapping.reason || txnRow.description },
+    { journal_id: jnl.id, account_id: creditAcct.id, type: 'credit', amount: txnRow.amount, narration: mapping.reason || txnRow.description },
+  ]);
+  if (lErr) return { journalId: jnl.id, mapping, skipped: true, skipReason: lErr.message };
+
+  // Only now, with the entry and both lines confirmed written, mark it posted.
+  await supabase.from('bank_transactions').update({ journal_posted: true }).eq('id', txnRow.id);
+  return { journalId: jnl.id, mapping, skipped: false };
+}
+
 // Main: save bank transaction + auto-generate journal entry
 export async function saveBankTxnWithJournal(txnData, accounts, bizId) {
-  // 1. Save bank transaction record
+  // 1. Save bank transaction record — journal_posted starts false and is only
+  // flipped once postBankTxnJournal confirms the journal entry + lines exist.
   const { data: txnRow, error: txnErr } = await supabase
     .from('bank_transactions')
     .insert({
@@ -414,91 +506,31 @@ export async function saveBankTxnWithJournal(txnData, accounts, bizId) {
       amount: txnData.amount,
       reconciled: true,
       party_id: txnData.partyId || null,
-      journal_posted: true,
+      journal_posted: false,
     })
     .select().single();
   if (txnErr) throw txnErr;
 
-  // 2. Determine debit/credit accounts
-  // User-edited overrides take priority, then rule engine, then fallback (no AI)
-  let mapping;
+  // 2. Determine debit/credit accounts — user-edited overrides take priority,
+  // then rule engine, then fallback (no AI) — resolved inside postBankTxnJournal.
+  let overrideMapping = null;
   if (txnData._overrideDebit && txnData._overrideCredit) {
-    mapping = { debitAcct: txnData._overrideDebit, creditAcct: txnData._overrideCredit, confidence: 'high', method: 'user' };
-  } else {
-    mapping = applyRuleEngine(txnData);
-  }
-  if (!mapping) {
-    mapping = txnData.type === 'credit'
-      ? { debitAcct: 'Bank Account', creditAcct: 'Other Income', confidence: 'low', method: 'fallback' }
-      : { debitAcct: 'Miscellaneous Expenses', creditAcct: 'Bank Account', confidence: 'low', method: 'fallback' };
+    overrideMapping = { debitAcct: txnData._overrideDebit, creditAcct: txnData._overrideCredit, confidence: 'high', method: 'user' };
   }
 
-  // 3. Look up account IDs by name
-  if (!bizId) {
-    // This should never happen from the UI now — bank import always scopes to the
-    // selected bank account's own business_id — but guard against it explicitly
-    // rather than silently filtering accounts down to an empty list.
-    console.warn('JE skipped: no business_id provided to saveBankTxnWithJournal', txnData);
-    return { txnId: txnRow.id, journalId: null, mapping, skipped: true, skipReason: 'no_business_id' };
-  }
-  const bizAccounts = accounts.filter(a => a.business_id === bizId);
-  const findAcct = (name) => bizAccounts.find(a =>
-    a.name.toLowerCase().includes(name.toLowerCase()) ||
-    name.toLowerCase().includes(a.name.toLowerCase())
-  );
+  const result = await postBankTxnJournal(txnRow, accounts, bizId, overrideMapping);
+  return { txnId: txnRow.id, ...result };
+}
 
-  const debitAcct = findAcct(mapping.debitAcct);
-  const creditAcct = findAcct(mapping.creditAcct);
-
-  if (!debitAcct || !creditAcct) {
-    // Accounts not set up — save txn only, skip journal
-    console.warn('JE skipped: account not found', mapping, 'missing:', !debitAcct ? mapping.debitAcct : mapping.creditAcct);
-    return { txnId: txnRow.id, journalId: null, mapping, skipped: true, skipReason: 'account_not_found' };
-  }
-
-  // 4. Create journal entry header
-  // NOTE: journal_entries.description is NOT NULL — it was missing here, which
-  // made this insert fail every single time. The catch in BankImport.jsx/
-  // BulkImport.jsx logged it to console and moved on, so transactions kept
-  // getting marked "posted" while silently never producing a journal entry.
-  const { data: jnl, error: jErr } = await supabase
-    .from('journal_entries')
-    .insert({
-      business_id: bizId,
-      entry_date: txnData.date,
-      reference: txnData.reference || `BANK-${txnRow.id.slice(0, 8)}`,
-      description: mapping.reason || txnData.description || 'Bank transaction',
-      narration: txnData.description,
-      source: 'bank_import',
-      source_id: txnRow.id,
-    })
-    .select().single();
-  if (jErr) throw jErr;
-
-  // 5. Create debit + credit journal lines
-  // journal_lines uses type ('debit'|'credit') + amount columns, not separate
-  // debit/credit numeric columns — this mismatch silently discarded every line
-  // insert (Postgres rejects unknown columns), which is the other half of why
-  // no journal lines ever actually landed for bank-imported transactions.
-  const { error: lErr } = await supabase.from('journal_lines').insert([
-    {
-      journal_id: jnl.id,
-      account_id: debitAcct.id,
-      type: 'debit',
-      amount: txnData.amount,
-      narration: mapping.reason || txnData.description,
-    },
-    {
-      journal_id: jnl.id,
-      account_id: creditAcct.id,
-      type: 'credit',
-      amount: txnData.amount,
-      narration: mapping.reason || txnData.description,
-    },
-  ]);
-  if (lErr) throw lErr;
-
-  return { txnId: txnRow.id, journalId: jnl.id, mapping, skipped: false };
+// Retroactively post a journal entry for a bank transaction that was saved
+// without one. `bankAccounts` is the loaded bank_accounts list, used to
+// resolve the transaction's business_id (bank_transactions doesn't store it
+// directly — it's inherited from the bank account it belongs to).
+export async function repostBankTxnJournal(txnRow, accounts, bankAccounts) {
+  const acct = (bankAccounts || []).find(b => b.id === txnRow.bank_account_id);
+  const bizId = acct?.business_id || null;
+  const result = await postBankTxnJournal(txnRow, accounts, bizId, null);
+  return { txnId: txnRow.id, ...result };
 }
 
 // ── Bank Accounts ──────────────────────────────────────────────────────────────
