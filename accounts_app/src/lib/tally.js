@@ -16,7 +16,7 @@ const AUTO_IMPORT_NOTE = 'Auto-imported from bank statement';
 
 // A journal entry is always balanced (debit total === credit total), so
 // summing either side gives the entry's amount.
-function jeAmount(je, journalLines) {
+export function jeAmount(je, journalLines) {
   return journalLines
     .filter(l => l.journal_id === je.id && l.type === 'debit')
     .reduce((s, l) => s + Number(l.amount), 0);
@@ -71,4 +71,47 @@ export function tallySummary(resultsById) {
     missing: results.filter(r => r.status === 'missing').length,
     total: results.length,
   };
+}
+
+// ── Duplicate detection ─────────────────────────────────────────────────────
+//
+// Different problem from the tally checks above: those confirm an
+// *already-saved* record still matches its journal entry. This instead runs
+// BEFORE saving, to catch a second expense/journal entry that's really the
+// same transaction entered twice. Used by ExpenseModal and JournalModal.
+
+// Journal: an entry on the same date, for the same business, is flagged as a
+// likely duplicate of the one being saved if EITHER its description matches
+// OR its total amount matches. Either signal alone is enough to warn on —
+// a duplicate is often re-typed with a slightly different description but
+// the same numbers, or copy-pasted (same description) and then the amount
+// gets edited. Requiring both at once (the old check effectively required
+// description alone) misses too many real duplicates.
+export function findDuplicateJournalEntry(candidate, allEntries, journalLines, excludeId) {
+  const candDesc = (candidate.description || '').trim().toLowerCase();
+  const candAmt = Number(candidate.totalAmount) || 0;
+  return allEntries.find(e => {
+    if (excludeId && e.id === excludeId) return false;
+    if (e.business_id !== candidate.business_id) return false;
+    if (e.entry_date !== candidate.entry_date) return false;
+    const sameDesc = !!candDesc && (e.description || '').trim().toLowerCase() === candDesc;
+    const sameAmt = candAmt > 0 && Math.abs(jeAmount(e, journalLines) - candAmt) <= AMT_TOL;
+    return sameDesc || sameAmt;
+  }) || null;
+}
+
+// Expenses: same business, same date, same category, same vendor (or both
+// blank), same amount. That combination essentially never happens twice on
+// purpose, so it's a strong enough signal to flag on its own without
+// needing to also match the free-text description.
+export function findDuplicateExpense(candidate, allExpenses, excludeId) {
+  const candAmt = Number(candidate.amount) || 0;
+  return allExpenses.find(e => {
+    if (excludeId && e.id === excludeId) return false;
+    if (e.business_id !== candidate.business_id) return false;
+    if (e.expense_date !== candidate.expense_date) return false;
+    if ((e.category || '') !== (candidate.category || '')) return false;
+    if ((e.vendor_id || null) !== (candidate.vendor_id || null)) return false;
+    return Math.abs(Number(e.amount) - candAmt) <= AMT_TOL;
+  }) || null;
 }
