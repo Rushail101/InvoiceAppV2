@@ -952,7 +952,7 @@ export default function App() {
               <AgingView invoices={invoices} parties={parties} payments={payments} businesses={businesses} activeBiz={activeBiz} />
             )}
             {!loading && view === 'statement' && (
-              <PartyStatementView parties={parties} invoices={invoices} payments={payments} creditNotes={creditNotes} businesses={businesses} activeBiz={activeBiz} />
+              <PartyStatementView parties={parties} invoices={invoices} payments={payments} creditNotes={creditNotes} expenses={expenses} businesses={businesses} activeBiz={activeBiz} />
             )}
             {!loading && view === 'tds' && (
               <TDSView invoices={invoices} payments={payments} parties={parties} businesses={businesses} activeBiz={activeBiz} />
