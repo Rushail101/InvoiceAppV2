@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect, useRef } from 'react';
 import { fmt, fmtDate, today, DEFAULT_ACCOUNTS } from '../lib/constants.js';
 import { saveAccount, saveJournal, deleteJournal, seedAccounts } from '../lib/db.js';
 import { Badge, ModalShell, FG, EmptyState, StatCard, AccountSelect } from '../components/ui.jsx';
+import { findDuplicateJournalEntry, jeAmount } from '../lib/tally.js';
 
 // ─── CHART OF ACCOUNTS ────────────────────────────────────────────────────────
 export function ChartOfAccountsView({ accounts, businesses, activeBiz, reload }) {
@@ -352,13 +353,14 @@ export function JournalView({ journalEntries, journalLines, accounts, businesses
           mode={modalMode}
           existing={modalEntry}
           allEntries={bizFiltered}
+          journalLines={journalLines}
         />
       )}
     </>
   );
 }
 
-function JournalModal({ onClose, onSave, accounts, businesses, activeBiz, mode = 'new', existing, allEntries = [] }) {
+function JournalModal({ onClose, onSave, accounts, businesses, activeBiz, mode = 'new', existing, allEntries = [], journalLines = [] }) {
   const isEdit = mode === 'edit';
   const isReverse = mode === 'reverse';
   const srcEntry = existing?.entry;
@@ -384,12 +386,12 @@ function JournalModal({ onClose, onSave, accounts, businesses, activeBiz, mode =
   const [dupConfirmed, setDupConfirmed] = useState(false);
   const lineRefs = useRef([]);
 
-  useEffect(() => { setDupConfirmed(false); }, [f.entry_date, f.description, f.business_id]);
-
   const filtAccs = accounts.filter(a => a.business_id === f.business_id);
   const totalDr = lines.filter(l => l.type === 'debit').reduce((s, l) => s + (Number(l.amount) || 0), 0);
   const totalCr = lines.filter(l => l.type === 'credit').reduce((s, l) => s + (Number(l.amount) || 0), 0);
   const balanced = totalDr > 0 && Math.abs(totalDr - totalCr) < 0.01;
+
+  useEffect(() => { setDupConfirmed(false); }, [f.entry_date, f.description, f.business_id, totalDr]);
 
   function updLine(idx, field, val) { setLines(prev => prev.map((l, i) => i !== idx ? l : { ...l, [field]: val })); }
 
@@ -410,14 +412,13 @@ function JournalModal({ onClose, onSave, accounts, businesses, activeBiz, mode =
   }
 
   const dupWarning = useMemo(() => {
-    if (isEdit || !f.description.trim() || !balanced) return null;
-    const desc = f.description.trim().toLowerCase();
-    return allEntries.find(e =>
-      e.business_id === f.business_id &&
-      e.entry_date === f.entry_date &&
-      (e.description || '').trim().toLowerCase() === desc
-    ) || null;
-  }, [f, allEntries, isEdit, balanced]);
+    if (isEdit || !balanced) return null;
+    return findDuplicateJournalEntry(
+      { business_id: f.business_id, entry_date: f.entry_date, description: f.description, totalAmount: totalDr },
+      allEntries,
+      journalLines,
+    );
+  }, [f, totalDr, allEntries, journalLines, isEdit, balanced]);
 
   async function save() {
     if (!f.description.trim()) { setErr('Enter a description'); return; }
@@ -425,7 +426,7 @@ function JournalModal({ onClose, onSave, accounts, businesses, activeBiz, mode =
     const validLines = lines.filter(l => l.account_id && Number(l.amount) > 0);
     if (validLines.length < 2) { setErr('Need at least one debit and one credit line'); return; }
     if (dupWarning && !dupConfirmed) {
-      setErr(`An entry on this date with the same description already exists (ref: ${dupWarning.reference || '—'}). Click "Post Entry" again to save anyway.`);
+      setErr(`An entry on ${dupWarning.entry_date} for ₹${jeAmount(dupWarning, journalLines).toFixed(2)} already exists (ref: ${dupWarning.reference || '—'}, "${dupWarning.description || ''}"). Click "Post Entry" again to save anyway.`);
       setDupConfirmed(true);
       return;
     }
