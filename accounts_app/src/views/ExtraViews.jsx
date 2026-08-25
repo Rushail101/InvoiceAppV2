@@ -123,7 +123,7 @@ export function AgingView({ invoices, parties, payments, businesses, activeBiz }
 
 // ─── PARTY STATEMENT ──────────────────────────────────────────────────────────
 
-export function PartyStatementView({ parties, invoices, payments, creditNotes, businesses, activeBiz }) {
+export function PartyStatementView({ parties, invoices, payments, creditNotes, expenses, businesses, activeBiz }) {
   const [partyId, setPartyId] = useState('');
 
   const filteredParties = activeBiz ? parties.filter(p => p.business_id === activeBiz) : parties;
@@ -135,12 +135,19 @@ export function PartyStatementView({ parties, invoices, payments, creditNotes, b
     .sort((a, b) => new Date(a.payment_date) - new Date(b.payment_date));
   const partyCNs = creditNotes.filter(c => c.party_id === partyId)
     .sort((a, b) => new Date(a.issue_date) - new Date(b.issue_date));
+  // Direct expenses billed against this party (vendors mainly) — these never
+  // go through the invoices table, so they were previously invisible here
+  // even though they post to the journal and count toward AP Ledger's
+  // "Total Owed" for the vendor. Matched straight off vendor_id.
+  const partyExps = (expenses || []).filter(e => e.vendor_id === partyId)
+    .sort((a, b) => new Date(a.expense_date) - new Date(b.expense_date));
 
   // Build ledger lines
   const lines = [];
   partyInvs.forEach(inv => lines.push({ date: inv.issue_date, type: 'invoice', ref: inv.invoice_number, desc: 'Invoice', debit: Number(inv.total), credit: 0, id: inv.id }));
   partyPayments.forEach(pay => lines.push({ date: pay.payment_date, type: 'payment', ref: pay.reference || pay.method, desc: `Payment (${pay.method || '—'})`, debit: 0, credit: Number(pay.amount), id: pay.id }));
   partyCNs.forEach(cn => lines.push({ date: cn.issue_date, type: 'cn', ref: cn.cn_number, desc: 'Credit Note', debit: 0, credit: Number(cn.amount), id: cn.id }));
+  partyExps.forEach(exp => lines.push({ date: exp.expense_date, type: 'expense', ref: exp.reference || exp.category, desc: `Expense — ${exp.category}${exp.description ? ' (' + exp.description + ')' : ''}`, debit: Number(exp.amount), credit: 0, id: exp.id }));
   lines.sort((a, b) => new Date(a.date) - new Date(b.date));
 
   let running = 0;
@@ -201,7 +208,7 @@ export function PartyStatementView({ parties, invoices, payments, creditNotes, b
         <>
           <div style={{ display: 'flex', gap: 10, marginBottom: 16 }}>
             <div className="card" style={{ flex: 1, padding: '10px 14px' }}>
-              <div style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', marginBottom: 3 }}>TOTAL INVOICED</div>
+              <div style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', marginBottom: 3 }}>TOTAL BILLED</div>
               <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--red)' }}>{fmt(totalDebit)}</div>
             </div>
             <div className="card" style={{ flex: 1, padding: '10px 14px' }}>
