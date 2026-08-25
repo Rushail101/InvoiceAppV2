@@ -1,9 +1,9 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { fmt, fmtDate, today, PAY_MODES, INDIAN_STATES, STATE_CODES, EXPENSE_CATEGORIES } from '../lib/constants.js';
 import { saveParty, deleteParty, saveExpenseWithJournal, deleteExpense, savePayment, saveBankAccount, saveBankTxn, deleteBankTxn, deletePayment, updateInvoiceStatus, saveInvoice } from '../lib/db.js';
 import { Badge, ModalShell, FG, EmptyState, StatCard, PillTabs } from '../components/ui.jsx';
 import { BankImportModal } from './BankImport.jsx';
-import { tallyExpense, tallyPayment, tallySummary } from '../lib/tally.js';
+import { tallyExpense, tallyPayment, tallySummary, findDuplicateExpense } from '../lib/tally.js';
 
 // Shared pill shown in the Journal column once a Tally check has run.
 // Before that, the column falls back to the plain existence check (✓ / —).
@@ -329,19 +329,34 @@ export function ExpensesView({ expenses, businesses, parties, activeBiz, reload,
         </table>
       </div>
       {saveErr && <p className="err-msg" style={{ marginBottom: 8 }}>{saveErr}</p>}
-      {showModal && <ExpenseModal onClose={() => setShowModal(false)} onSave={save} businesses={businesses} parties={parties} activeBiz={activeBiz} />}
+      {showModal && <ExpenseModal onClose={() => setShowModal(false)} onSave={save} businesses={businesses} parties={parties} activeBiz={activeBiz} expenses={expenses} />}
     </>
   );
 }
 
-function ExpenseModal({ onClose, onSave, businesses, parties, activeBiz }) {
+function ExpenseModal({ onClose, onSave, businesses, parties, activeBiz, expenses }) {
   const [f, setF] = useState({ business_id: activeBiz || businesses[0]?.id || '', category: '', description: '', amount: '', expense_date: today(), vendor_id: '', method: 'UPI', reference: '' });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
+  const [dupConfirmed, setDupConfirmed] = useState(false);
   const vendors = parties.filter(p => p.type === 'vendor' && p.business_id === f.business_id);
+
+  useEffect(() => { setDupConfirmed(false); }, [f.business_id, f.category, f.vendor_id, f.expense_date, f.amount]);
+
+  const dupWarning = useMemo(() => {
+    if (!f.category || !f.amount || Number(f.amount) <= 0) return null;
+    return findDuplicateExpense(f, expenses || []);
+  }, [f, expenses]);
+
   async function save() {
     if (!f.category) { setErr('Category is required'); return; }
     if (!f.amount || Number(f.amount) <= 0) { setErr('Enter a valid amount'); return; }
+    if (dupWarning && !dupConfirmed) {
+      const vendorName = parties.find(p => p.id === dupWarning.vendor_id)?.name;
+      setErr(`An expense on ${dupWarning.expense_date} for ₹${Number(dupWarning.amount).toFixed(2)} in "${dupWarning.category}"${vendorName ? ` (${vendorName})` : ''} already exists. Click Save again to add this one anyway.`);
+      setDupConfirmed(true);
+      return;
+    }
     setBusy(true); setErr('');
     try { await onSave(f); onClose(); }
     catch (e) { setErr(e.message || 'Save failed — check Supabase connection'); }
