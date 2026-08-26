@@ -995,7 +995,8 @@ export default function App() {
               <ItemsView items={items} businesses={businesses} activeBiz={activeBiz} reload={reload} />
             )}
             {!loading && view === 'pl' && (
-              <PLView invoices={invoices} expenses={expenses} payments={payments}
+              <PLView accounts={accounts} journalLines={journalLines} journalEntries={journalEntries}
+                invoices={invoices} expenses={expenses} payments={payments}
                 businesses={businesses} activeBiz={activeBiz} />
             )}
             {!loading && view === 'cashflow' && (
