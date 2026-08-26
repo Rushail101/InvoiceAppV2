@@ -17,24 +17,28 @@ import { ItemsView } from './views/Items.jsx';
 import { DeliveryChallansView } from './views/DeliveryChallans.jsx';
 import { Badge, ModalShell, FG, EmptyState } from './components/ui.jsx';
 
+// Hidden-from-nav (per simplification pass): Credit Notes, Item Master,
+// Bulk Payment, Bank, Aging Report, Recurring. Views/db functions are left
+// intact — just not linked from the sidebar — so they're one line to
+// restore if ever needed again.
 const NAV = [
   { id: 'dashboard',   label: 'Dashboard',        icon: '◈',  group: null },
   { id: 'invoices',    label: 'Invoices',          icon: '📄',  group: 'Sales' },
   { id: 'proformas',   label: 'Proforma',          icon: '📋',  group: 'Sales' },
-  { id: 'creditnotes', label: 'Credit Notes',      icon: '↩',   group: 'Sales' },
+  // { id: 'creditnotes', label: 'Credit Notes',      icon: '↩',   group: 'Sales' },
   { id: 'challans',    label: 'Delivery Challans', icon: '🚚',  group: 'Sales' },
   { id: 'parties',     label: 'Parties',           icon: '👥',  group: 'Sales' },
-  { id: 'items',       label: 'Item Master',       icon: '📦',  group: 'Sales' },
+  // { id: 'items',       label: 'Item Master',       icon: '📦',  group: 'Sales' },
   { id: 'expenses',    label: 'Expenses',          icon: '💸',  group: 'Purchases' },
   { id: 'payments',    label: 'Payments',          icon: '💳',  group: 'Purchases' },
-  { id: 'bulkpay',     label: 'Bulk Payment',      icon: '💰',  group: 'Purchases' },
-  { id: 'bank',        label: 'Bank',              icon: '🏦',  group: 'Purchases' },
+  // { id: 'bulkpay',     label: 'Bulk Payment',      icon: '💰',  group: 'Purchases' },
+  // { id: 'bank',        label: 'Bank',              icon: '🏦',  group: 'Purchases' },
   { id: 'ar',          label: 'AR Ledger',         icon: '🟢',  group: 'Ledgers' },
   { id: 'ap',          label: 'AP Ledger',         icon: '🔴',  group: 'Ledgers' },
-  { id: 'aging',       label: 'Aging Report',      icon: '📊',  group: 'Ledgers' },
+  // { id: 'aging',       label: 'Aging Report',      icon: '📊',  group: 'Ledgers' },
   { id: 'statement',   label: 'Party Statement',   icon: '📋',  group: 'Ledgers' },
   { id: 'tds',         label: 'TDS',               icon: '📑',  group: 'Ledgers' },
-  { id: 'recurring',   label: 'Recurring',         icon: '🔁',  group: 'Sales' },
+  // { id: 'recurring',   label: 'Recurring',         icon: '🔁',  group: 'Sales' },
   { id: 'accounts',    label: 'Chart of Accounts', icon: '📒',  group: 'Accounting' },
   { id: 'journal',     label: 'Journal Vouchers',  icon: '📝',  group: 'Accounting' },
   { id: 'trial',       label: 'Trial Balance',     icon: '⚖',   group: 'Accounting' },
