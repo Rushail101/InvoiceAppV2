@@ -124,8 +124,7 @@ export async function seedAccounts(bizId, defaults) {
   await supabase.from('accounts').insert(rows);
 }
 
-// ── Invoices ───────────────────────────────────────────────────────────────────
-// Safe column list — only fields that exist in the DB schema
+// ── Invoices ───────────────────────────────────────────────────────────────────// Safe column list — only fields that exist in the DB schema
 // This prevents "column not found" errors when running old schema versions
 const INV_COLS = [
   'business_id','party_id','invoice_number','type','status',
@@ -193,7 +192,11 @@ export async function savePayment(data) {
 }
 export async function deletePayment(id) { await supabase.from('payments').delete().eq('id', id); }
 
-// Auto-post a payment → journal entry. Handles both directions:
+// Auto-post a payment → journal entry. Revenue/cost is recognized here, at
+// COLLECTION time — not when the invoice is raised — since a payment can
+// trail the invoice by weeks and often arrives as a partial/advance amount;
+// each payment recognizes exactly the amount actually received, whether
+// that's a 50% advance or the final balance. Handles both directions:
 //   - Sale invoice payment (customer pays us): Dr Bank Account / Cr Sales Revenue
 //   - Purchase invoice payment (we pay a vendor bill): Dr Cost of Goods Sold / Cr Bank Account
 // `invoice_type` on the incoming data tells us which; defaults to 'sale' since
