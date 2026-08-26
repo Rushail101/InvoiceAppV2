@@ -321,7 +321,7 @@ async function findAccount(bizId, nameLike) {
   return data?.[0] || null;
 }
 
-const CATEGORY_ACCOUNT_MAP = {
+export const CATEGORY_ACCOUNT_MAP = {
   'Raw Materials': 'Raw Materials',
   'Wages & Salaries': 'Wages',
   'Rent': 'Rent',
