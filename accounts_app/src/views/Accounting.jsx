@@ -750,7 +750,7 @@ export function BalanceSheetView({ accounts, journalLines, journalEntries, invoi
 }
 
 // ─── P&L REPORT ───────────────────────────────────────────────────────────────
-export function PLView({ invoices, expenses, payments, businesses, activeBiz }) {
+export function PLView({ accounts, journalLines, journalEntries, invoices, expenses, payments, businesses, activeBiz }) {
   const [period, setPeriod] = useState('fy'); // 'fy' | 'month' | 'quarter'
   const now = new Date();
   const fyStart = now.getMonth() >= 3
@@ -784,29 +784,53 @@ export function PLView({ invoices, expenses, payments, businesses, activeBiz }) 
       </div>
 
       {bizList.map(biz => {
-        // Invoiced revenue — sent/paid invoices only (accrual basis)
+        // Revenue and expenses now come straight from journal_lines — the
+        // exact same source Trial Balance and Balance Sheet use — instead of
+        // separately totaling the raw invoices/expenses tables. That's what
+        // keeps all three reports in agreement. "Collected" / "Outstanding"
+        // below are still cash-flow stats computed from the raw
+        // invoices/payments tables — they're not part of the P&L itself,
+        // just supplementary context, so they're unaffected by this.
+        const bizAccounts = accounts.filter(a => a.business_id === biz.id);
+        const relevantJEIds = new Set(
+          journalEntries.filter(j => j.business_id === biz.id && inPeriod(j.entry_date)).map(j => j.id)
+        );
+        const acctTotal = (accountId, side) => (journalLines || [])
+          .filter(l => l.account_id === accountId && relevantJEIds.has(l.journal_id) && l.type === side)
+          .reduce((s, l) => s + Number(l.amount), 0);
+
+        const incomeAccounts = bizAccounts.filter(a => a.group === 'income');
+        const revenue = incomeAccounts.reduce((s, a) => s + (acctTotal(a.id, 'credit') - acctTotal(a.id, 'debit')), 0);
+
+        // GST isn't split out at payment time (a payment posts its full
+        // amount to Sales Revenue — see postPaymentJournal), so there's no
+        // journal account to read tax collected from. Kept as an invoice-
+        // level figure instead, same as before.
         const bi = invoices.filter(i => i.business_id === biz.id && i.type === 'sale'
           && !['draft', 'cancelled', 'proforma'].includes(i.status) && inPeriod(i.issue_date));
-        const pi = invoices.filter(i => i.business_id === biz.id && i.type === 'purchase'
-          && !['draft', 'cancelled', 'proforma'].includes(i.status) && inPeriod(i.issue_date));
-        const be = expenses.filter(e => e.business_id === biz.id && inPeriod(e.expense_date));
+        const taxCollected = bi.reduce((s, i) => s + Number(i.tax_amount || 0), 0);
+
+        // "Cost of Goods Sold" only ever gets debited by a purchase-bill
+        // payment (see postPaymentJournal) — every other expense-group
+        // account is either a direct expense or a bank-import mapping, so
+        // splitting on that one account name recreates the old
+        // Purchases-vs-Opex split, on the same cash basis as Revenue above.
+        const cogsAcct = bizAccounts.find(a => a.name === 'Cost of Goods Sold');
+        const purchases = cogsAcct ? acctTotal(cogsAcct.id, 'debit') - acctTotal(cogsAcct.id, 'credit') : 0;
+        const grossProfit = revenue - purchases;
+
+        const opexAccounts = bizAccounts.filter(a => a.group === 'expense' && a.id !== cogsAcct?.id);
+        const expByCategory = {};
+        opexAccounts.forEach(a => {
+          const amt = acctTotal(a.id, 'debit') - acctTotal(a.id, 'credit');
+          if (Math.abs(amt) > 0.005) expByCategory[a.name] = amt;
+        });
+        const totalExp = Object.values(expByCategory).reduce((s, v) => s + v, 0);
+        const netProfit = grossProfit - totalExp;
 
         // All sale invoices including proforma (for cash tracking)
         const allSaleInv = invoices.filter(i => i.business_id === biz.id && i.type === 'sale'
           && !['draft', 'cancelled'].includes(i.status) && inPeriod(i.issue_date));
-
-        const revenue = bi.reduce((s, i) => s + Number(i.subtotal || 0), 0);
-        const taxCollected = bi.reduce((s, i) => s + Number(i.tax_amount || 0), 0);
-        const purchases = pi.reduce((s, i) => s + Number(i.subtotal || 0), 0);
-        const grossProfit = revenue - purchases;
-
-        // Group expenses by category
-        const expByCategory = {};
-        be.forEach(e => {
-          expByCategory[e.category] = (expByCategory[e.category] || 0) + Number(e.amount);
-        });
-        const totalExp = be.reduce((s, e) => s + Number(e.amount), 0);
-        const netProfit = grossProfit - totalExp;
 
         // Collections (cash-basis) — include payments against proformas too
         const collected = allSaleInv.reduce((s, i) => s + (paysByInv[i.id] || []).reduce((ps, p) => ps + Number(p.amount), 0), 0);
@@ -822,7 +846,7 @@ export function PLView({ invoices, expenses, payments, businesses, activeBiz }) 
             </h3>
 
             <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(5,1fr)', marginBottom: 20 }}>
-              <div className="stat-card green"><div className="stat-label">Revenue</div><div className="stat-val green">{fmt(revenue)}</div><div className="stat-sub">invoiced (excl. GST)</div></div>
+              <div className="stat-card green"><div className="stat-label">Revenue</div><div className="stat-val green">{fmt(revenue)}</div><div className="stat-sub">collected (excl. GST)</div></div>
               <div className="stat-card blue"><div className="stat-label">Collected</div><div className="stat-val blue">{fmt(collected)}</div><div className="stat-sub">cash received</div></div>
               <div className="stat-card amber"><div className="stat-label">Outstanding</div><div className="stat-val amber">{fmt(outstanding)}</div><div className="stat-sub">unpaid</div></div>
               <div className="stat-card red"><div className="stat-label">Total Expenses</div><div className="stat-val red">{fmt(totalExp + purchases)}</div><div className="stat-sub">purchases + opex</div></div>
