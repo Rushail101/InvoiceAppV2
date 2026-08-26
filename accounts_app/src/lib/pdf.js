@@ -225,6 +225,13 @@ tbody tr:nth-child(even) td{background:#fafafa}
   const blob = new Blob([html], { type: 'text/html' });
   const burl = URL.createObjectURL(blob);
   const docNum = invoice.invoice_number || invoice.cn_number || 'doc';
+  // Downloaded filename: document number + client name, e.g. a proforma
+  // "PI-25-26/1012" for "Cayani" → "PI_25_26_1012_Cayani". Slashes/hyphens
+  // in the doc number aren't valid in filenames anyway, so they collapse to
+  // underscores along with everything else non-alphanumeric.
+  const sanitizeForFilename = (s) => String(s || '').trim().replace(/[^\w]+/g, '_').replace(/^_+|_+$/g, '');
+  const clientName = sanitizeForFilename(party?.name);
+  const fileName = `${sanitizeForFilename(docNum)}${clientName ? '_' + clientName : ''}`;
 
   const ov = document.createElement('div');
   ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.8);display:flex;align-items:center;justify-content:center;z-index:9999;font-family:sans-serif;backdrop-filter:blur(3px)';
@@ -234,7 +241,7 @@ tbody tr:nth-child(even) td{background:#fafafa}
     <div style="font-size:15px;font-weight:700;margin-bottom:3px">${docNum}</div>
     <div style="font-size:12px;color:#888;margin-bottom:20px">${docTitle} · ₹${grand.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</div>
     <div style="display:flex;flex-direction:column;gap:10px">
-      <a href="${burl}" download="${docNum}.html" style="display:block;padding:10px 20px;background:#c8f064;color:#0d0d0d;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px">⬇ Download HTML → Print to PDF</a>
+      <a href="${burl}" download="${fileName}.html" style="display:block;padding:10px 20px;background:#c8f064;color:#0d0d0d;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px">⬇ Download HTML → Print to PDF</a>
       <button id="pp" style="padding:10px 20px;background:transparent;color:#5ca0ff;border:1px solid #1a3a55;border-radius:8px;cursor:pointer;font-size:13px;width:100%">🖨 Print directly</button>
       <button id="pc" style="padding:7px;background:transparent;color:#555;border:none;cursor:pointer;font-size:12px">Close</button>
     </div>`;
