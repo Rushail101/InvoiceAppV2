@@ -1012,7 +1012,7 @@ export default function App() {
             {!loading && view === 'jhealth' && (
               <JournalHealthView
                 expenses={expenses} payments={payments} bankTransactions={bankTransactions}
-                journalEntries={journalEntries} invoices={invoices} accounts={accounts}
+                journalEntries={journalEntries} journalLines={journalLines} invoices={invoices} accounts={accounts}
                 bankAccounts={bankAccounts} {...cp} />
             )}
             {!loading && view === 'bulkimport' && (
