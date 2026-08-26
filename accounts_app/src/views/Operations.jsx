@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect } from 'react';
 import { fmt, fmtDate, today, PAY_MODES, INDIAN_STATES, STATE_CODES, EXPENSE_CATEGORIES } from '../lib/constants.js';
-import { saveParty, deleteParty, saveExpenseWithJournal, deleteExpense, savePayment, saveBankAccount, saveBankTxn, deleteBankTxn, deletePayment, updateInvoiceStatus, saveInvoice } from '../lib/db.js';
+import { saveParty, deleteParty, saveExpenseWithJournal, deleteExpense, savePayment, saveBankAccount, saveBankTxnWithJournal, deleteBankTxn, deletePayment, updateInvoiceStatus, saveInvoice } from '../lib/db.js';
 import { Badge, ModalShell, FG, EmptyState, StatCard, PillTabs } from '../components/ui.jsx';
 import { BankImportModal } from './BankImport.jsx';
 import { tallyExpense, tallyPayment, tallySummary, findDuplicateExpense } from '../lib/tally.js';
@@ -401,7 +401,23 @@ export function BankView({ bankAccounts, bankTransactions, businesses, parties, 
   const reconciledCount = bankTxns.filter(t => t.reconciled).length;
 
   async function saveBank(data, id) { await saveBankAccount(data, id); reload(); }
-  async function addTxn(data) { await saveBankTxn(data); reload(); }
+  async function addTxn(data) {
+    // Was calling the plain insert (no journal) — inconsistent with the PDF
+    // import path, which auto-posts. Route through the same posting logic so
+    // a manually-added transaction isn't silently invisible everywhere else.
+    const result = await saveBankTxnWithJournal({
+      bankAccountId: data.bank_account_id,
+      date: data.txn_date,
+      description: data.description,
+      reference: data.reference,
+      type: data.type,
+      amount: data.amount,
+    }, accounts, selBank?.business_id || activeBiz);
+    if (result.skipped) {
+      alert(`Transaction saved, but couldn't post to the journal yet — ${result.skipReason === 'account_not_found' ? 'a required account is missing from Chart of Accounts' : result.skipReason}. You can re-post it from Journal Health once that's fixed.`);
+    }
+    reload();
+  }
   async function delTxn(id) { if (!confirm('Delete?')) return; await deleteBankTxn(id); reload(); }
 
   return (
