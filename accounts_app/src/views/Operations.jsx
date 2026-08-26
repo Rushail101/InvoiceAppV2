@@ -10,7 +10,7 @@ import { tallyExpense, tallyPayment, tallySummary, findDuplicateExpense } from '
 function TallyBadge({ result }) {
   if (!result) return null;
   if (result.status === 'matched') {
-    return <span title={result.via === 'bank_import' ? 'Matched to bank-import journal entry' : 'Date and amount match the journal'}
+    return <span title={result.via === 'bank_import' ? 'Matched to bank-import journal entry' : result.via === 'manual_journal' ? 'Matched to a manually-entered journal voucher (not formally linked, but same date/amount/account)' : 'Date and amount match the journal'}
       style={{ fontSize: 10, color: 'var(--green)', fontFamily: 'var(--mono)' }}>✓ Tallied</span>;
   }
   if (result.status === 'mismatch') {
@@ -288,7 +288,7 @@ export function ExpensesView({ expenses, businesses, parties, activeBiz, reload,
 
   function runTally() {
     const results = {};
-    for (const e of filtered) results[e.id] = tallyExpense(e, journalEntries, journalLines);
+    for (const e of filtered) results[e.id] = tallyExpense(e, journalEntries, journalLines, accounts);
     setTallyResults(results);
     alert(tallyAlertText(tallySummary(results), 'Expenses'));
   }
