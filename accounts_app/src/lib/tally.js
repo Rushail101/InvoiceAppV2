@@ -11,6 +11,8 @@
 //
 // Used by the "🔎 Tally" button on the Expenses and Payments pages.
 
+import { CATEGORY_ACCOUNT_MAP } from './db.js';
+
 const AMT_TOL = 0.5; // paise/rounding tolerance
 const AUTO_IMPORT_NOTE = 'Auto-imported from bank statement';
 
@@ -35,10 +37,29 @@ function compare(recordDate, recordAmount, je, journalLines, via) {
   return { status: 'mismatch', reason: parts.join(' · '), journal: je, via };
 }
 
-export function tallyExpense(expense, journalEntries, journalLines) {
+export function tallyExpense(expense, journalEntries, journalLines, accounts = []) {
   const je = journalEntries.find(j => j.source === 'expense' && j.source_id === expense.id);
-  if (!je) return { status: 'missing', reason: 'No journal entry found for this expense' };
-  return compare(expense.expense_date, expense.amount, je, journalLines, 'expense');
+  if (je) return compare(expense.expense_date, expense.amount, je, journalLines, 'expense');
+
+  // No journal entry formally linked to this expense (source_id match).
+  // That doesn't necessarily mean nothing was posted for it — it's common
+  // for someone to enter the same real transaction as a manual Journal
+  // Voucher instead of through the expense's own auto-post, especially for
+  // expenses added before Tally existed. Same date, same amount, and a
+  // debit line on the account this expense's category would normally post
+  // to is a strong enough match to not call it "missing".
+  const acctKey = (CATEGORY_ACCOUNT_MAP[expense.category] || 'Miscellaneous').toLowerCase();
+  const candidate = journalEntries.find(j => {
+    if (j.entry_date !== expense.expense_date) return false;
+    if (Math.abs(jeAmount(j, journalLines) - Number(expense.amount)) > AMT_TOL) return false;
+    return journalLines.some(l =>
+      l.journal_id === j.id && l.type === 'debit' &&
+      accounts.find(a => a.id === l.account_id)?.name?.toLowerCase().includes(acctKey)
+    );
+  });
+  if (candidate) return { status: 'matched', journal: candidate, via: 'manual_journal' };
+
+  return { status: 'missing', reason: 'No journal entry found for this expense' };
 }
 
 export function tallyPayment(payment, journalEntries, journalLines) {
