@@ -14,6 +14,7 @@ import { useState, useMemo } from 'react';
 import { fmt, fmtDate } from '../lib/constants.js';
 import { EmptyState, StatCard } from '../components/ui.jsx';
 import { repostExpenseJournal, repostPaymentJournal, repostBankTxnJournal } from '../lib/db.js';
+import { tallyExpense, tallyPayment } from '../lib/tally.js';
 
 const AUTO_IMPORT_NOTE = 'Auto-imported from bank statement';
 
@@ -28,7 +29,7 @@ function reasonText(r) {
 }
 
 export function JournalHealthView({
-  expenses, payments, bankTransactions, journalEntries, invoices, accounts, bankAccounts,
+  expenses, payments, bankTransactions, journalEntries, journalLines = [], invoices, accounts, bankAccounts,
   businesses, activeBiz, reload,
 }) {
   const [busyId, setBusyId] = useState(null);
@@ -37,27 +38,30 @@ export function JournalHealthView({
 
   const scoped = (list) => activeBiz ? list.filter(x => x.business_id === activeBiz) : list;
 
-  // What actually has a journal entry, straight from journal_entries.source /
-  // source_id — deliberately not the journal_posted flags, which historically
-  // could be set without a real entry ever being created (see db.js notes).
-  const postedKeys = useMemo(() => {
-    return new Set(journalEntries.map(je => `${je.source}:${je.source_id}`));
-  }, [journalEntries]);
-
+  // "Missing" here means the same thing the Tally check on the Expenses/
+  // Payments pages means — not just "no journal entry formally linked by
+  // source_id", but genuinely no journal entry representing this money at
+  // all. A formally-linked entry is the normal case, but plenty of records
+  // are instead covered by a manually-entered Journal Voucher for the same
+  // date/amount/account (see tallyExpense's fallback) — those are already
+  // accounted for and must NOT show up here, because clicking Re-post on
+  // one would create a second journal entry for money that's already
+  // posted once.
   const orphanExpenses = useMemo(() => {
-    return scoped(expenses).filter(e => !postedKeys.has(`expense:${e.id}`));
-  }, [expenses, activeBiz, postedKeys]);
+    return scoped(expenses).filter(e => tallyExpense(e, journalEntries, journalLines, accounts).status === 'missing');
+  }, [expenses, activeBiz, journalEntries, journalLines, accounts]);
 
   const orphanPayments = useMemo(() => {
-    return scoped(payments).filter(p => !postedKeys.has(`payment:${p.id}`) && p.notes !== AUTO_IMPORT_NOTE);
-  }, [payments, activeBiz, postedKeys]);
+    return scoped(payments).filter(p => p.notes !== AUTO_IMPORT_NOTE && tallyPayment(p, journalEntries, journalLines).status === 'missing');
+  }, [payments, activeBiz, journalEntries, journalLines]);
 
   const orphanBankTxns = useMemo(() => {
     const bizBankAccountIds = new Set(
       (activeBiz ? bankAccounts.filter(b => b.business_id === activeBiz) : bankAccounts).map(b => b.id)
     );
+    const postedKeys = new Set(journalEntries.map(je => `${je.source}:${je.source_id}`));
     return bankTransactions.filter(t => bizBankAccountIds.has(t.bank_account_id) && !postedKeys.has(`bank_import:${t.id}`));
-  }, [bankTransactions, bankAccounts, activeBiz, postedKeys]);
+  }, [bankTransactions, bankAccounts, activeBiz, journalEntries]);
 
   const totalOrphans = orphanExpenses.length + orphanPayments.length + orphanBankTxns.length;
   const totalOrphanAmount =
@@ -121,10 +125,11 @@ export function JournalHealthView({
         <div className="card-head">What this checks</div>
         <p style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.6 }}>
           Analysis, Trial Balance, P&L, and Balance Sheet all total up <strong style={{ color: 'var(--text)' }}>journal entries</strong>,
-          not the raw Expenses / Payments / Bank tables directly. A record ends up here if it exists in its own table
-          but has no matching journal entry — usually because a required account (e.g. "Cost of Goods Sold", "Wages & Salaries")
-          didn't exist in the Chart of Accounts at the time it was saved. Until it's posted, it's real money that won't show up
-          in any of those reports.
+          not the raw Expenses / Payments / Bank tables directly. A record ends up here only if there's genuinely no journal
+          entry for it anywhere — usually because a required account (e.g. "Cost of Goods Sold", "Wages & Salaries")
+          didn't exist in the Chart of Accounts at the time it was saved. A record covered by a manually-entered Journal
+          Voucher for the same date/amount/account is <em>not</em> shown here, even without a formal link — Re-posting it
+          would create a duplicate. Until it's posted, it's real money that won't show up in any of those reports.
         </p>
         {totalOrphans > 0 && (
           <button className="btn btn-primary btn-sm" style={{ marginTop: 12 }} onClick={repostAll} disabled={bulkBusy}>
