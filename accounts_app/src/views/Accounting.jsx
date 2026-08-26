@@ -750,7 +750,7 @@ export function BalanceSheetView({ accounts, journalLines, journalEntries, invoi
 }
 
 // ─── P&L REPORT ───────────────────────────────────────────────────────────────
-export function PLView({ accounts, journalLines, journalEntries, invoices, expenses, payments, businesses, activeBiz }) {
+export function PLView({ accounts = [], journalLines = [], journalEntries = [], invoices = [], expenses = [], payments = [], businesses = [], activeBiz }) {
   const [period, setPeriod] = useState('fy'); // 'fy' | 'month' | 'quarter'
   const now = new Date();
   const fyStart = now.getMonth() >= 3
