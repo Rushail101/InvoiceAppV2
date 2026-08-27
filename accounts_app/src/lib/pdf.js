@@ -257,7 +257,16 @@ tbody tr:nth-child(even) td{background:#fafafa}
     const ifr = document.createElement('iframe');
     ifr.style.cssText = 'position:fixed;top:-9999px;left:-9999px;width:900px;height:700px;border:none';
     ifr.src = burl; document.body.appendChild(ifr);
-    ifr.onload = () => { setTimeout(() => ifr.contentWindow.print(), 600); setTimeout(() => { document.body.removeChild(ifr); URL.revokeObjectURL(burl); }, 5000); };
+    // Chrome's "Save as PDF" dialog suggests a filename from the TOP-LEVEL
+    // document's title, not the iframe's — even though it's the iframe that
+    // gets printed. Swap the app's title to the sanitized doc name for the
+    // duration of the print dialog, then restore it once the iframe is torn
+    // down (print() itself blocks until the dialog closes, so this is safe).
+    const prevTitle = document.title;
+    ifr.onload = () => {
+      setTimeout(() => { document.title = fileName; ifr.contentWindow.print(); }, 600);
+      setTimeout(() => { document.body.removeChild(ifr); URL.revokeObjectURL(burl); document.title = prevTitle; }, 5000);
+    };
     document.body.removeChild(ov);
   };
 }
@@ -509,7 +518,11 @@ tbody tr:nth-child(even) td{background:#fafafa}
     const ifr = document.createElement('iframe');
     ifr.style.cssText = 'position:fixed;top:-9999px;left:-9999px;width:900px;height:700px;border:none';
     ifr.src = burl; document.body.appendChild(ifr);
-    ifr.onload = () => { setTimeout(() => ifr.contentWindow.print(), 600); setTimeout(() => { document.body.removeChild(ifr); URL.revokeObjectURL(burl); }, 5000); };
+    const prevTitle = document.title;
+    ifr.onload = () => {
+      setTimeout(() => { document.title = challanFileName; ifr.contentWindow.print(); }, 600);
+      setTimeout(() => { document.body.removeChild(ifr); URL.revokeObjectURL(burl); document.title = prevTitle; }, 5000);
+    };
     document.body.removeChild(ov);
   };
 }
