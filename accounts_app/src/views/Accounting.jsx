@@ -142,6 +142,7 @@ export function JournalView({ journalEntries, journalLines, accounts, businesses
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [sourceFilter, setSourceFilter] = useState('');
+  const [selected, setSelected] = useState(() => new Set());
 
   const bizFiltered = activeBiz ? journalEntries.filter(j => j.business_id === activeBiz) : journalEntries;
 
@@ -173,11 +174,13 @@ export function JournalView({ journalEntries, journalLines, accounts, businesses
     else { setDateFrom(''); setDateTo(''); }
   }
 
-  // Sort by the numeric part of the reference (JV-036 → 36) so the latest
-  // voucher number is always on top — this is more reliable than date alone,
-  // since several entries can share the same date and end up in random order.
+  // Only true sequential vouchers (manually created "JV-36", "JV-036" style
+  // references) get treated as a real sequence number. Auto-posted entries
+  // from Payments/Expenses/Bank Import use references like "PAY-b5492218" —
+  // the first 8 chars of a random ID, not a counter — so their trailing
+  // digits are effectively random and must NOT be used to order them.
   function refNum(j) {
-    const m = (j.reference || '').match(/(\d+)\s*$/);
+    const m = (j.reference || '').match(/^JV-?0*(\d+)$/i);
     return m ? parseInt(m[1], 10) : null;
   }
 
@@ -195,13 +198,17 @@ export function JournalView({ journalEntries, journalLines, accounts, businesses
     }
     return true;
   }).sort((a, b) => {
+    // Primary sort is always the entry date, newest first — this is the
+    // ordering someone actually expects on a ledger. The voucher number is
+    // only used to break ties *within* the same date (e.g. several JV
+    // entries posted the same day), never to override the date itself.
+    const dcmp = (b.entry_date || '').localeCompare(a.entry_date || '');
+    if (dcmp !== 0) return dcmp;
     const na = refNum(a), nb = refNum(b);
     if (na != null && nb != null && na !== nb) return nb - na;      // both numbered → higher number first
     if (na != null && nb == null) return -1;                        // numbered before un-numbered
     if (na == null && nb != null) return 1;
-    const dcmp = (b.entry_date || '').localeCompare(a.entry_date || '');
-    if (dcmp !== 0) return dcmp;                                     // fall back to date
-    return (b.reference || '').localeCompare(a.reference || '');     // final tiebreaker
+    return (b.reference || '').localeCompare(a.reference || '');    // final tiebreaker
   });
 
   async function handleSave(entry, lines, id) {
@@ -253,6 +260,42 @@ export function JournalView({ journalEntries, journalLines, accounts, businesses
     reload();
   }
 
+  function toggleSelected(id) {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleSelectAllFiltered() {
+    setSelected(prev => {
+      const allSelected = filtered.length > 0 && filtered.every(j => prev.has(j.id));
+      if (allSelected) return new Set();
+      return new Set(filtered.map(j => j.id));
+    });
+  }
+
+  async function bulkDelete() {
+    const ids = Array.from(selected);
+    if (!ids.length) return;
+    if (!confirm(`Delete ${ids.length} journal ${ids.length === 1 ? 'entry' : 'entries'}? This can't be undone.`)) return;
+    // Sequential, not Promise.all — these are real accounting deletions and
+    // we'd rather have a clear partial result (and know exactly which ones
+    // went through) than a batch of concurrent requests fighting for the
+    // same tables.
+    const failed = [];
+    for (const id of ids) {
+      try { await deleteJournal(id); }
+      catch (e) { failed.push({ id, message: e.message }); }
+    }
+    setSelected(new Set());
+    reload();
+    if (failed.length) {
+      alert(`${ids.length - failed.length} of ${ids.length} deleted. ${failed.length} failed:\n${failed.map(f => f.message).join('\n')}`);
+    }
+  }
+
   function openNew() { setModalMode('new'); setModalEntry(null); setShowModal(true); }
   function openEdit(j) { setModalMode('edit'); setModalEntry({ entry: j, lines: linesByJournal[j.id] || [] }); setShowModal(true); }
   function openDuplicate(j) { setModalMode('duplicate'); setModalEntry({ entry: j, lines: linesByJournal[j.id] || [] }); setShowModal(true); }
@@ -286,14 +329,28 @@ export function JournalView({ journalEntries, journalLines, accounts, businesses
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 12 }}>
             <h3>{filtered.length} {filtered.length === 1 ? 'entry' : 'entries'}</h3>
             <span className="mono" style={{ fontSize: 11.5, color: 'var(--text3)' }}>Total value {fmt(filteredTotal)}</span>
+            {selected.size > 0 && (
+              <span className="mono" style={{ fontSize: 11.5, color: 'var(--amber)' }}>{selected.size} selected</span>
+            )}
           </div>
           <div style={{ display: 'flex', gap: 6 }}>
+            {selected.size > 0 && (
+              <button className="btn btn-danger btn-sm" onClick={bulkDelete}>Delete Selected ({selected.size})</button>
+            )}
             <button className="btn btn-ghost btn-sm" onClick={exportSummaryCSV} disabled={!filtered.length} title="One row per journal entry">↓ CSV (summary)</button>
             <button className="btn btn-ghost btn-sm" onClick={exportDetailCSV} disabled={!filtered.length} title="One row per ledger line — full audit detail">↓ CSV (all lines)</button>
           </div>
         </div>
         <table>
-          <thead><tr><th>Date</th><th>Reference</th><th>Source</th><th>Description</th><th className="r">Debit</th><th className="r">Credit</th><th>Actions</th></tr></thead>
+          <thead><tr>
+            <th style={{ width: 30 }}>
+              <input type="checkbox"
+                checked={filtered.length > 0 && filtered.every(j => selected.has(j.id))}
+                ref={el => { if (el) el.indeterminate = selected.size > 0 && !filtered.every(j => selected.has(j.id)); }}
+                onChange={toggleSelectAllFiltered} />
+            </th>
+            <th>Date</th><th>Reference</th><th>Source</th><th>Description</th><th className="r">Debit</th><th className="r">Credit</th><th>Actions</th>
+          </tr></thead>
           <tbody>
             {filtered.map(j => {
               const lines = linesByJournal[j.id] || [];
@@ -305,7 +362,8 @@ export function JournalView({ journalEntries, journalLines, accounts, businesses
               const reversalOf = j.source === 'reversal' && j.source_id ? byId[j.source_id] : null;
               const reversedBy = reversalByOriginal[j.id];
               return (
-                <tr key={j.id}>
+                <tr key={j.id} style={selected.has(j.id) ? { background: 'rgba(251,191,36,0.06)' } : undefined}>
+                  <td><input type="checkbox" checked={selected.has(j.id)} onChange={() => toggleSelected(j.id)} /></td>
                   <td className="mono" style={{ fontSize: 11 }}>{fmtDate(j.entry_date)}</td>
                   <td className="mono" style={{ color: 'var(--accent)', fontSize: 11 }}>{j.reference || '—'}</td>
                   <td><span className={`badge badge-${src}`}>{SOURCE_LABEL[src] || src}</span></td>
@@ -339,7 +397,7 @@ export function JournalView({ journalEntries, journalLines, accounts, businesses
                 </tr>
               );
             })}
-            {filtered.length === 0 && <tr><td colSpan={7}><EmptyState icon="📋" message="No journal entries" sub={bizFiltered.length ? 'No entries match your filters' : 'Post manual double-entry transactions here'} /></td></tr>}
+            {filtered.length === 0 && <tr><td colSpan={8}><EmptyState icon="📋" message="No journal entries" sub={bizFiltered.length ? 'No entries match your filters' : 'Post manual double-entry transactions here'} /></td></tr>}
           </tbody>
         </table>
       </div>
