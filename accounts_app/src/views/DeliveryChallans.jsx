@@ -54,6 +54,8 @@ function ChallanModal({ onClose, onSave, businesses, parties, allChallans, invoi
     linked_invoice_id: editData?.linked_invoice_id || '',
     notes: editData?.notes || '',
     status: editData?.status || 'draft',
+    price_mode: editData?.price_mode || 'exclusive',
+    round_off: editData?.round_off ?? false,
   });
 
   const [items, setItems] = useState(
@@ -70,12 +72,19 @@ function ChallanModal({ onClose, onSave, businesses, parties, allChallans, invoi
   const filteredParties = parties.filter(p => p.business_id === f.business_id);
   const filteredInvoices = invoices.filter(inv => inv.business_id === f.business_id && inv.party_id === f.party_id);
 
-  const calc = items.map(it => calcItem(it, isIntrastate));
+  const calc = items.map(it => calcItem(it, isIntrastate, f.price_mode));
   const subtotal = calc.reduce((s, i) => s + i.taxable, 0);
   const totalCGST = calc.reduce((s, i) => s + i.cgst, 0);
   const totalSGST = calc.reduce((s, i) => s + i.sgst, 0);
   const totalIGST = calc.reduce((s, i) => s + i.igst, 0);
   const grand = subtotal + totalCGST + totalSGST + totalIGST;
+
+  // Round-off — snaps the final value to the nearest whole rupee, same as
+  // on invoices. The gap between exact and rounded is broken out as its own
+  // line rather than hidden.
+  const roundedGrand = Math.round(grand);
+  const roundOffAmt = roundedGrand - grand;
+  const payableGrand = f.round_off ? roundedGrand : grand;
 
   function upd(idx, field, val) {
     setItems(prev => prev.map((it, i) => i !== idx ? it : { ...it, [field]: val }));
@@ -98,7 +107,7 @@ function ChallanModal({ onClose, onSave, businesses, parties, allChallans, invoi
         sgst_amount: totalSGST,
         igst_amount: totalIGST,
         tax_amount: totalCGST + totalSGST + totalIGST,
-        total: grand,
+        total: payableGrand,
         is_interstate: !isIntrastate,
       };
       await onSave(challanData, validItems, editData?.id);
@@ -210,9 +219,31 @@ function ChallanModal({ onClose, onSave, businesses, parties, allChallans, invoi
 
       {/* ── Line Items ── */}
       <div style={{ overflowX: 'auto', marginBottom: 12 }}>
-        <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text3)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '.05em' }}>
-          Items &nbsp; {gstLabel}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, flexWrap: 'wrap', gap: 8 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '.05em' }}>
+            Items &nbsp; {gstLabel}
+          </div>
+          <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+            <span style={{ fontSize: 10.5, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>Rates entered below are:</span>
+            <div style={{ display: 'flex', borderRadius: 6, overflow: 'hidden', border: '1px solid var(--border2)' }}>
+              <button type="button"
+                onClick={() => setF(p => ({ ...p, price_mode: 'exclusive' }))}
+                style={{ padding: '4px 10px', fontSize: 11, border: 'none', cursor: 'pointer', background: f.price_mode === 'exclusive' ? 'var(--accent)' : 'var(--bg2)', color: f.price_mode === 'exclusive' ? '#0d0d0d' : 'var(--text2)', fontWeight: f.price_mode === 'exclusive' ? 700 : 400 }}>
+                GST added on top
+              </button>
+              <button type="button"
+                onClick={() => setF(p => ({ ...p, price_mode: 'inclusive' }))}
+                style={{ padding: '4px 10px', fontSize: 11, border: 'none', cursor: 'pointer', background: f.price_mode === 'inclusive' ? 'var(--accent)' : 'var(--bg2)', color: f.price_mode === 'inclusive' ? '#0d0d0d' : 'var(--text2)', fontWeight: f.price_mode === 'inclusive' ? 700 : 400 }}>
+                GST already included
+              </button>
+            </div>
+          </div>
         </div>
+        {f.price_mode === 'inclusive' && (
+          <div style={{ fontSize: 10.5, color: 'var(--amber)', marginBottom: 6 }}>
+            Rate × Qty is treated as the final price including GST — the taxable value and tax split are backed out of it, not added on top.
+          </div>
+        )}
         <table className="inv-table">
           <thead>
             <tr>
@@ -295,8 +326,15 @@ function ChallanModal({ onClose, onSave, businesses, parties, allChallans, invoi
               <span style={{ color: 'var(--text3)' }}>IGST</span><span>{fmt(totalIGST)}</span>
             </div>
           )}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer', fontSize: 12, color: 'var(--text3)' }}>
+              <input type="checkbox" checked={f.round_off} onChange={e => setF(p => ({ ...p, round_off: e.target.checked }))} />
+              Round off to nearest ₹1
+            </label>
+            {f.round_off && <span>{roundOffAmt >= 0 ? '+' : '-'}{fmt(Math.abs(roundOffAmt))}</span>}
+          </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 700, borderTop: '1px solid var(--border)', paddingTop: 6, marginTop: 4 }}>
-            <span>Total</span><span>{fmt(grand)}</span>
+            <span>Total</span><span>{fmt(payableGrand)}</span>
           </div>
         </div>
       </div>
