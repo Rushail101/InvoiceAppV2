@@ -33,7 +33,12 @@ export function printInvoice(invoice, items, party, biz, invPayments, isCreditNo
   const lineDiscTotal = calc.reduce((s, i) => s + i.discAmt, 0);
   const invLevelDisc = Number(invoice.discount_amount || 0);
   const invLevelDiscPct = Number(invoice.discount_percent || 0);
-  const grand = preDiscGrand - invLevelDisc;
+  const grandExact = preDiscGrand - invLevelDisc;
+  // invoice.total is the authoritative payable amount (it's what was saved,
+  // and may have round-off applied) — use it for the printed total, and
+  // surface any gap from the exact figure as its own "Round Off" line.
+  const grand = invoice.total != null ? Number(invoice.total) : grandExact;
+  const roundOffAmt = grand - grandExact;
   const discTotal = lineDiscTotal; // line-item discounts (already baked into taxable)
   const totalPaid = (invPayments || []).reduce((s, p) => s + Number(p.amount), 0);
   const balance = grand - totalPaid;
@@ -211,6 +216,7 @@ tbody tr:nth-child(even) td{background:#fafafa}
           : `<tr><td>IGST @ ${r}%</td><td class="r">${g.igst.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td></tr>`
       ).join('')}
       ${invLevelDisc > 0 ? `<tr><td>Discount${invLevelDiscPct > 0 ? ` (${invLevelDiscPct.toFixed(2)}%)` : ''}</td><td class="r" style="color:#b00">-${invLevelDisc.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td></tr>` : ''}
+      ${Math.abs(roundOffAmt) > 0.004 ? `<tr><td>Round Off</td><td class="r">${roundOffAmt >= 0 ? '+' : '-'}${Math.abs(roundOffAmt).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td></tr>` : ''}
       <tr class="grand-row"><td><strong>Total</strong></td><td class="r"><strong>₹${grand.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong></td></tr>
       ${totalPaid > 0 ? `<tr><td>Paid</td><td class="r">-₹${totalPaid.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td></tr>` : ''}
       <tr class="bal-row"><td>Balance Due</td><td class="r">₹${balance.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td></tr>
@@ -289,7 +295,11 @@ export function printChallan(challan, items, party, biz, linkedInv = null) {
   const totalCGST = calc.reduce((s, i) => s + i.cgst, 0);
   const totalSGST = calc.reduce((s, i) => s + i.sgst, 0);
   const totalIGST = calc.reduce((s, i) => s + i.igst, 0);
-  const grand = subtotal + totalCGST + totalSGST + totalIGST;
+  const grandExact = subtotal + totalCGST + totalSGST + totalIGST;
+  // challan.total is the authoritative value (may include round-off) —
+  // print that, and show the gap from the exact figure as its own line.
+  const grand = challan.total != null ? Number(challan.total) : grandExact;
+  const roundOffAmt = grand - grandExact;
   const isIntrastate = totalCGST > 0;
 
   const r = n => `₹${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -472,6 +482,7 @@ tbody tr:nth-child(even) td{background:#fafafa}
       <tbody>
         <tr><td>Taxable Value</td><td class="r">${r(subtotal)}</td></tr>
         ${gstRows}
+        ${Math.abs(roundOffAmt) > 0.004 ? `<tr><td>Round Off</td><td class="r">${roundOffAmt >= 0 ? '+' : '-'}${r(Math.abs(roundOffAmt)).replace('₹', '')}</td></tr>` : ''}
         <tr class="grand"><td>Total Value</td><td class="r">${r(grand)}</td></tr>
       </tbody>
     </table>
