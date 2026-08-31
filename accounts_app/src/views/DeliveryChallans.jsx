@@ -21,12 +21,16 @@ function nextChallanNum(challans) {
 }
 
 // ─── LINE ITEM CALCULATION ─────────────────────────────────────────────────────
-function calcItem(it, isIntrastate) {
+// See Invoices.jsx for the same logic and comment — 'exclusive' adds GST on
+// top of the entered rate, 'inclusive' backs the taxable value out of it.
+function calcItem(it, isIntrastate, priceMode = 'exclusive') {
   const base = (Number(it.quantity) || 0) * (Number(it.unit_price) || 0);
   const discAmt = base * (Number(it.discount_percent || 0) / 100);
-  const taxable = base - discAmt;
-  const { cgst, sgst, igst } = calcLineTax(taxable, Number(it.tax_percent || 0), isIntrastate);
-  const lineTotal = taxable + cgst + sgst + igst;
+  const net = base - discAmt;
+  const taxPercent = Number(it.tax_percent || 0);
+  const taxable = priceMode === 'inclusive' ? net / (1 + taxPercent / 100) : net;
+  const { cgst, sgst, igst } = calcLineTax(taxable, taxPercent, isIntrastate);
+  const lineTotal = priceMode === 'inclusive' ? net : taxable + cgst + sgst + igst;
   return { ...it, base, discAmt, taxable, cgst, sgst, igst, lineTotal };
 }
 
