@@ -2,6 +2,7 @@
 import { useState, useMemo } from 'react';
 import { fmt, fmtDate, getFY, STATE_CODES } from '../lib/constants.js';
 import { EmptyState, PillTabs } from '../components/ui.jsx';
+import { markGSTFiled } from '../lib/db.js';
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 const MONTHS = [
@@ -55,7 +56,7 @@ function enrichInvoice(inv, parties) {
 
 // ─── B2B TABLE ────────────────────────────────────────────────────────────────
 // B2B: invoices to registered (GSTIN) recipients
-function B2BTable({ rows }) {
+function B2BTable({ rows, selected, onToggle, onToggleAll }) {
   if (!rows.length) return <EmptyState icon="📋" message="No B2B invoices for this period" sub="B2B = invoices raised to parties with a valid GSTIN" />;
   const totTaxable = rows.reduce((s, r) => s + r.taxable, 0);
   const totCGST = rows.reduce((s, r) => s + r.cgst, 0);
@@ -68,6 +69,12 @@ function B2BTable({ rows }) {
       <table>
         <thead>
           <tr>
+            <th style={{ width: 30 }}>
+              <input type="checkbox"
+                checked={rows.length > 0 && rows.every(r => selected.has(r.id))}
+                ref={el => { if (el) el.indeterminate = selected.size > 0 && !rows.every(r => selected.has(r.id)); }}
+                onChange={() => onToggleAll(rows)} />
+            </th>
             <th>Invoice #</th>
             <th>Date</th>
             <th>Recipient</th>
@@ -79,11 +86,13 @@ function B2BTable({ rows }) {
             <th className="r">SGST</th>
             <th className="r">IGST</th>
             <th className="r">Invoice Total</th>
+            <th>Filed</th>
           </tr>
         </thead>
         <tbody>
           {rows.map(r => (
-            <tr key={r.id}>
+            <tr key={r.id} style={r.gst_filed ? { opacity: 0.65 } : undefined}>
+              <td><input type="checkbox" checked={selected.has(r.id)} onChange={() => onToggle(r.id)} /></td>
               <td className="mono" style={{ fontSize: 11, color: 'var(--accent)' }}>{r.invoice_number}</td>
               <td className="mono" style={{ fontSize: 11 }}>{fmtDate(r.issue_date)}</td>
               <td style={{ fontWeight: 500 }}>{r.party?.name || '—'}</td>
@@ -99,12 +108,13 @@ function B2BTable({ rows }) {
               <td className="r mono" style={{ fontSize: 11, color: r.sgst > 0 ? 'var(--teal)' : 'var(--text4)' }}>{r.sgst > 0 ? fmt(r.sgst) : '—'}</td>
               <td className="r mono" style={{ fontSize: 11, color: r.igst > 0 ? 'var(--amber)' : 'var(--text4)' }}>{r.igst > 0 ? fmt(r.igst) : '—'}</td>
               <td className="r mono" style={{ fontWeight: 600 }}>{fmt(r.total)}</td>
+              <td>{r.gst_filed ? <span className="tag" style={{ color: 'var(--green)', borderColor: '#0a3a1a', fontSize: 10 }}>✓ Filed</span> : <span className="tag" style={{ color: 'var(--amber)', borderColor: '#3a2e00', fontSize: 10 }}>Pending</span>}</td>
             </tr>
           ))}
         </tbody>
         <tfoot>
           <tr style={{ fontWeight: 700, background: 'var(--bg3)', borderTop: '2px solid var(--border2)' }}>
-            <td colSpan={6} style={{ padding: '9px 16px', fontFamily: 'var(--mono)', fontSize: 11, textTransform: 'uppercase', letterSpacing: '.05em' }}>
+            <td colSpan={7} style={{ padding: '9px 16px', fontFamily: 'var(--mono)', fontSize: 11, textTransform: 'uppercase', letterSpacing: '.05em' }}>
               Total ({rows.length} invoices)
             </td>
             <td className="r mono" style={{ padding: '9px 16px' }}>{fmt(totTaxable)}</td>
@@ -112,6 +122,7 @@ function B2BTable({ rows }) {
             <td className="r mono" style={{ padding: '9px 16px', color: 'var(--teal)' }}>{fmt(totSGST)}</td>
             <td className="r mono" style={{ padding: '9px 16px', color: 'var(--amber)' }}>{fmt(totIGST)}</td>
             <td className="r mono" style={{ padding: '9px 16px' }}>{fmt(totTotal)}</td>
+            <td></td>
           </tr>
         </tfoot>
       </table>
@@ -349,13 +360,15 @@ function GSTSummaryCards({ invoices }) {
 }
 
 // ─── MAIN GSTR-1 VIEW ─────────────────────────────────────────────────────────
-export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceItems, payments = [] }) {
+export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceItems, payments = [], reload }) {
   const periods = getPeriodOptions();
   const currentMonth = new Date().toISOString().slice(0, 7);
   const defaultPeriod = periods.find(p => p.value === currentMonth)?.value || periods[0]?.value;
   const [period, setPeriod] = useState(defaultPeriod);
   const [activeTab, setActiveTab] = useState('summary');
   const [viewMode, setViewMode] = useState('invoice'); // 'invoice' | 'collections'
+  const [selected, setSelected] = useState(() => new Set());
+  const [marking, setMarking] = useState(false);
 
   // Only sale invoices that are not draft/cancelled/proforma
   const eligibleInvoices = useMemo(() =>
@@ -388,6 +401,54 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceIte
   const b2bInvoices = periodInvoices.filter(r => r.party?.gstin);
   const b2cInvoices = periodInvoices.filter(r => !r.party?.gstin);
 
+  // Every eligible invoice, any period, not yet marked GST-filed — this is
+  // the "what have I missed" view, independent of whichever month happens
+  // to be selected above, since a missed one could be from any past period.
+  const unfiledInvoices = useMemo(() =>
+    eligibleInvoices
+      .filter(inv => !inv.gst_filed)
+      .map(inv => enrichInvoice(inv, parties))
+      .sort((a, b) => new Date(a.issue_date) - new Date(b.issue_date)),
+    [eligibleInvoices, parties]
+  );
+
+  function toggleSelected(id) {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+  function toggleSelectAll(rows) {
+    setSelected(prev => {
+      const allSelected = rows.length > 0 && rows.every(r => prev.has(r.id));
+      if (allSelected) return new Set();
+      return new Set(rows.map(r => r.id));
+    });
+  }
+  async function markSelected(filed) {
+    const ids = Array.from(selected);
+    if (!ids.length) return;
+    setMarking(true);
+    try {
+      await markGSTFiled(ids, filed, filed ? period : null);
+      setSelected(new Set());
+      reload?.();
+    } catch (e) { alert(e.message); }
+    setMarking(false);
+  }
+  async function markAllInPeriod() {
+    const ids = periodInvoices.filter(r => !r.gst_filed).map(r => r.id);
+    if (!ids.length) return;
+    if (!confirm(`Mark all ${ids.length} unfiled invoice(s) in ${selectedPeriodLabel} as GST filed?`)) return;
+    setMarking(true);
+    try {
+      await markGSTFiled(ids, true, period);
+      reload?.();
+    } catch (e) { alert(e.message); }
+    setMarking(false);
+  }
+
   // Selected business name for header
   const bizName = activeBiz ? businesses.find(b => b.id === activeBiz)?.name : 'All Businesses';
   const selectedPeriodLabel = periods.find(p => p.value === period)?.label || period;
@@ -411,6 +472,7 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceIte
     { id: 'b2b', label: `📋 B2B (${b2bInvoices.length})` },
     { id: 'b2c', label: `🛒 B2C (${b2cInvoices.length})` },
     { id: 'hsn', label: '🏷️ HSN Summary' },
+    { id: 'unfiled', label: `⚠ Unfiled (${unfiledInvoices.length})` },
   ];
 
   if (!activeBiz && businesses.length === 0) {
@@ -467,6 +529,14 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceIte
           disabled={periodInvoices.length === 0}
         >
           ⬇ Export All
+        </button>
+        <button
+          className="btn btn-ghost btn-sm"
+          onClick={markAllInPeriod}
+          disabled={marking || periodInvoices.every(r => r.gst_filed)}
+          title="Mark every unfiled invoice in this period as GST filed"
+        >
+          ✓ Mark Period Filed
         </button>
       </div>
 
@@ -572,9 +642,63 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceIte
         </div>
       )}
 
-      {activeTab === 'b2b' && <B2BTable rows={b2bInvoices} />}
+      {activeTab === 'b2b' && (
+        <div>
+          {selected.size > 0 && (
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+              <span className="mono" style={{ fontSize: 11.5, color: 'var(--amber)' }}>{selected.size} selected</span>
+              <button className="btn btn-primary btn-sm" disabled={marking} onClick={() => markSelected(true)}>✓ Mark Filed</button>
+              <button className="btn btn-ghost btn-sm" disabled={marking} onClick={() => markSelected(false)}>Mark Unfiled</button>
+            </div>
+          )}
+          <B2BTable rows={b2bInvoices} selected={selected} onToggle={toggleSelected} onToggleAll={toggleSelectAll} />
+        </div>
+      )}
       {activeTab === 'b2c' && <B2CTable rows={b2cInvoices} />}
       {activeTab === 'hsn' && <HSNTable b2bInvoices={b2bInvoices} b2cInvoices={b2cInvoices} allItems={allItems} />}
+      {activeTab === 'unfiled' && (
+        <div>
+          <div style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 10 }}>
+            Every eligible invoice, across all periods, not yet marked GST filed — oldest first.
+          </div>
+          {selected.size > 0 && (
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+              <span className="mono" style={{ fontSize: 11.5, color: 'var(--amber)' }}>{selected.size} selected</span>
+              <button className="btn btn-primary btn-sm" disabled={marking} onClick={() => markSelected(true)}>✓ Mark Filed</button>
+            </div>
+          )}
+          {unfiledInvoices.length === 0 ? (
+            <EmptyState icon="✅" message="Nothing outstanding" sub="Every eligible invoice has been marked GST filed" />
+          ) : (
+            <div className="table-wrap">
+              <table>
+                <thead><tr>
+                  <th style={{ width: 30 }}>
+                    <input type="checkbox"
+                      checked={unfiledInvoices.every(r => selected.has(r.id))}
+                      ref={el => { if (el) el.indeterminate = selected.size > 0 && !unfiledInvoices.every(r => selected.has(r.id)); }}
+                      onChange={() => toggleSelectAll(unfiledInvoices)} />
+                  </th>
+                  <th>Invoice #</th><th>Date</th><th>Period</th><th>Party</th><th className="r">Total</th><th>Actions</th>
+                </tr></thead>
+                <tbody>
+                  {unfiledInvoices.map(r => (
+                    <tr key={r.id}>
+                      <td><input type="checkbox" checked={selected.has(r.id)} onChange={() => toggleSelected(r.id)} /></td>
+                      <td className="mono" style={{ fontSize: 11, color: 'var(--accent)' }}>{r.invoice_number}</td>
+                      <td className="mono" style={{ fontSize: 11 }}>{fmtDate(r.issue_date)}</td>
+                      <td className="mono" style={{ fontSize: 11, color: 'var(--text3)' }}>{r.issue_date?.slice(0, 7)}</td>
+                      <td style={{ fontWeight: 500 }}>{r.party?.name || '—'}</td>
+                      <td className="r mono" style={{ fontWeight: 600 }}>{fmt(r.total)}</td>
+                      <td><button className="btn btn-ghost btn-sm" disabled={marking} onClick={() => markGSTFiled([r.id], true, r.issue_date?.slice(0, 7)).then(() => reload?.())}>✓ Mark Filed</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Filing reminder */}
       <div style={{ marginTop: 20, padding: '10px 14px', background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 'var(--r)', fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
