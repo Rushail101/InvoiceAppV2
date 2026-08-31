@@ -38,6 +38,7 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
     discount_amount: editData?.discount_amount || 0,
     tds_amount: editData?.tds_amount || 0,
     price_mode: editData?.price_mode || 'exclusive',
+    round_off: editData?.round_off ?? false,
   });
 
   const [items, setItems] = useState(
@@ -67,6 +68,14 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
   const invDiscPctDisplay = grand > 0 ? (invDiscAmt / grand) * 100 : 0;
   const finalTotal = grand - invDiscAmt;
 
+  // Round-off — snaps the final payable amount to the nearest whole rupee
+  // (standard practice on Indian tax invoices). The difference between the
+  // exact and rounded figure is shown as its own "Round Off" line so nothing
+  // is silently hidden.
+  const roundedTotal = Math.round(finalTotal);
+  const roundOffAmt = roundedTotal - finalTotal;
+  const payableTotal = f.round_off ? roundedTotal : finalTotal;
+
   function upd(idx, field, val) { setItems(prev => prev.map((it, i) => i !== idx ? it : { ...it, [field]: val })); }
   function addRow() { setItems(p => [...p, { description: '', hsn_code: '', quantity: 1, unit_price: 0, discount_percent: 0, tax_percent: 5 }]); }
   function remRow(idx) { setItems(p => p.filter((_, i) => i !== idx)); }
@@ -86,7 +95,7 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
         tax_amount: totalTax,
         discount_amount: invDiscAmt,
         discount_percent: invDiscPctDisplay,
-        total: finalTotal,
+        total: payableTotal,
         is_interstate: !isIntrastate,
       };
       await onSave(invData, validItems, editData?.id);
@@ -264,7 +273,16 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
           <p><span>IGST</span><span>{fmt(totalIGST)}</span></p>
         )}
         {invDiscAmt > 0 && <p><span>Invoice Discount ({f.discount_percent}%)</span><span>-{fmt(invDiscAmt)}</span></p>}
-        <p className="grand"><span>Total</span><span>{fmt(finalTotal)}</span></p>
+        <p style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer', fontSize: 12, color: 'var(--text2)' }}>
+              <input type="checkbox" checked={f.round_off} onChange={e => setF(x => ({ ...x, round_off: e.target.checked }))} />
+              Round off to nearest ₹1
+            </label>
+          </span>
+          {f.round_off && <span>{roundOffAmt >= 0 ? '+' : '-'}{fmt(Math.abs(roundOffAmt))}</span>}
+        </p>
+        <p className="grand"><span>Total</span><span>{fmt(payableTotal)}</span></p>
       </div>
 
       {err && <p className="err-msg">{err}</p>}
