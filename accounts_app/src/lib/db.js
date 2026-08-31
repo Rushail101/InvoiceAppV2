@@ -211,6 +211,18 @@ export async function updateInvoiceStatus(id, status) {
   await supabase.from('invoices').update({ status }).eq('id', id);
 }
 
+// Mark one or more invoices as GST-filed (or un-mark them). `period` is the
+// GSTR-1 return period they were filed under, e.g. "2026-07" — optional,
+// mainly useful when bulk-marking a whole month from the GSTR-1 screen.
+export async function markGSTFiled(ids, filed = true, period = null) {
+  if (!ids?.length) return;
+  const payload = filed
+    ? { gst_filed: true, gst_filed_at: new Date().toISOString(), gst_filed_period: period }
+    : { gst_filed: false, gst_filed_at: null, gst_filed_period: null };
+  const { error } = await supabase.from('invoices').update(payload).in('id', ids);
+  if (error) throw new Error(`GST filed update failed: ${error.message}`);
+}
+
 export async function deleteInvoice(id) {
   await supabase.from('invoices').delete().eq('id', id);
 }
