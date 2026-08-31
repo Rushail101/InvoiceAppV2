@@ -5,12 +5,19 @@ import { printInvoice } from '../lib/pdf.js';
 import { Badge, ModalShell, FG, PayHistory, EmptyState } from '../components/ui.jsx';
 
 // ─── LINE ITEM CALCULATION ─────────────────────────────────────────────────────
-function calcItem(it, isIntrastate) {
+// priceMode: 'exclusive' (default) — unit_price is the pre-tax rate, GST is
+// added on top. 'inclusive' — unit_price already has GST baked in, so the
+// taxable value is backed out of it instead. Either way taxable/cgst/sgst/
+// igst/lineTotal end up as real numbers stored per line, so nothing else
+// downstream (PDF, ledgers, GSTR-1) needs to know which mode was used.
+function calcItem(it, isIntrastate, priceMode = 'exclusive') {
   const base = (Number(it.quantity) || 0) * (Number(it.unit_price) || 0);
   const discAmt = base * (Number(it.discount_percent || 0) / 100);
-  const taxable = base - discAmt;
-  const { cgst, sgst, igst } = calcLineTax(taxable, Number(it.tax_percent || 0), isIntrastate);
-  const lineTotal = taxable + cgst + sgst + igst;
+  const net = base - discAmt;
+  const taxPercent = Number(it.tax_percent || 0);
+  const taxable = priceMode === 'inclusive' ? net / (1 + taxPercent / 100) : net;
+  const { cgst, sgst, igst } = calcLineTax(taxable, taxPercent, isIntrastate);
+  const lineTotal = priceMode === 'inclusive' ? net : taxable + cgst + sgst + igst;
   return { ...it, base, discAmt, taxable, cgst, sgst, igst, lineTotal };
 }
 
@@ -30,6 +37,7 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
     discount_percent: editData?.discount_percent || 0,
     discount_amount: editData?.discount_amount || 0,
     tds_amount: editData?.tds_amount || 0,
+    price_mode: editData?.price_mode || 'exclusive',
   });
 
   const [items, setItems] = useState(
@@ -44,7 +52,7 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
   const isIntrastate = gstType(bizObj.state, partyObj.state) === 'intrastate';
   const filteredParties = parties.filter(p => p.business_id === f.business_id);
 
-  const calc = items.map(it => calcItem(it, isIntrastate));
+  const calc = items.map(it => calcItem(it, isIntrastate, f.price_mode));
   const subtotal = calc.reduce((s, i) => s + i.taxable, 0);
   const totalCGST = calc.reduce((s, i) => s + i.cgst, 0);
   const totalSGST = calc.reduce((s, i) => s + i.sgst, 0);
@@ -175,13 +183,35 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
       )}
 
       {/* Line items */}
-      <div className="section-title">Line Items</div>
+      <div className="section-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span>Line Items</span>
+        <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+          <span style={{ fontSize: 10.5, color: 'var(--text3)', fontFamily: 'var(--mono)', textTransform: 'none', fontWeight: 400 }}>Rates entered below are:</span>
+          <div style={{ display: 'flex', borderRadius: 6, overflow: 'hidden', border: '1px solid var(--border2)' }}>
+            <button type="button"
+              onClick={() => setF(p => ({ ...p, price_mode: 'exclusive' }))}
+              style={{ padding: '4px 10px', fontSize: 11, border: 'none', cursor: 'pointer', background: f.price_mode === 'exclusive' ? 'var(--accent)' : 'var(--bg2)', color: f.price_mode === 'exclusive' ? '#0d0d0d' : 'var(--text2)', fontWeight: f.price_mode === 'exclusive' ? 700 : 400 }}>
+              GST added on top
+            </button>
+            <button type="button"
+              onClick={() => setF(p => ({ ...p, price_mode: 'inclusive' }))}
+              style={{ padding: '4px 10px', fontSize: 11, border: 'none', cursor: 'pointer', background: f.price_mode === 'inclusive' ? 'var(--accent)' : 'var(--bg2)', color: f.price_mode === 'inclusive' ? '#0d0d0d' : 'var(--text2)', fontWeight: f.price_mode === 'inclusive' ? 700 : 400 }}>
+              GST already included
+            </button>
+          </div>
+        </div>
+      </div>
+      {f.price_mode === 'inclusive' && (
+        <div style={{ fontSize: 10.5, color: 'var(--amber)', marginBottom: 6 }}>
+          Rate × Qty is treated as the final price including GST — the taxable value and tax split are backed out of it, not added on top.
+        </div>
+      )}
       <div className="line-items-head" style={{ gridTemplateColumns: '2fr 90px 70px 100px 72px 60px 100px 28px' }}>
         <span>Description</span><span>HSN</span><span>Qty</span><span>Rate</span><span>Disc%</span><span>GST%</span><span style={{ textAlign: 'right' }}>Amount</span><span></span>
       </div>
 
       {items.map((it, idx) => {
-        const c = calcItem(it, isIntrastate);
+        const c = calcItem(it, isIntrastate, f.price_mode);
         return (
           <div className="line-item-row" key={idx} style={{ gridTemplateColumns: '2fr 90px 70px 100px 72px 60px 100px 28px' }}>
             <div style={{ position: 'relative', display: 'flex', gap: 3 }}>
