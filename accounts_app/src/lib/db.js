@@ -359,6 +359,30 @@ export async function deleteExpense(id) {
   if (error) throw error;
 }
 
+// Upload a bill/receipt file for an expense. Path is namespaced by business
+// so files from different businesses never collide, with a timestamp prefix
+// so re-uploading a same-named file doesn't overwrite the original.
+export async function uploadExpenseAttachment(file, businessId) {
+  const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+  const path = `${businessId}/${Date.now()}_${safeName}`;
+  const { error } = await supabase.storage.from('expense-attachments').upload(path, file);
+  if (error) throw error;
+  return path;
+}
+
+// Bucket is private, so viewing an attachment goes through a short-lived
+// signed URL generated on demand rather than a permanent public link.
+export async function getExpenseAttachmentUrl(path) {
+  const { data, error } = await supabase.storage.from('expense-attachments').createSignedUrl(path, 3600);
+  if (error) throw error;
+  return data.signedUrl;
+}
+
+export async function deleteExpenseAttachment(path) {
+  if (!path) return;
+  await supabase.storage.from('expense-attachments').remove([path]);
+}
+
 // Auto-post expense → journal entry
 async function findAccount(bizId, nameLike) {
   const { data } = await supabase.from('accounts')
@@ -368,7 +392,6 @@ async function findAccount(bizId, nameLike) {
 
 export const CATEGORY_ACCOUNT_MAP = {
   'Raw Materials': 'Raw Materials',
-  'Job Work': 'Job Work',
   'Wages & Salaries': 'Wages',
   'Rent': 'Rent',
   'Utilities': 'Utilities',
@@ -455,7 +478,6 @@ const BANK_TXN_RULES = [
   // Debits (money OUT) — credit Bank, debit the expense account
   { match: ['rent', 'rental'], type: 'debit', debitAcct: 'Rent', creditAcct: 'Bank Account' },
   { match: ['electricity', 'bijli', 'power', 'msed', 'bses', 'tata power'], type: 'debit', debitAcct: 'Utilities', creditAcct: 'Bank Account' },
-  { match: ['buttons', 'job work', 'outsource', 'third party'], type: 'debit', debitAcct: 'Job work', creditAcct: 'Bank Account' },
   { match: ['freight', 'courier', 'dtdc', 'bluedart', 'fedex', 'delhivery', 'xpressbees', 'shipping'], type: 'debit', debitAcct: 'Shipping & Freight', creditAcct: 'Bank Account' },
   { match: ['gst', 'igst', 'cgst', 'sgst', 'tax challan', 'gstn', 'gst challan'], type: 'debit', debitAcct: 'GST Payable (Output)', creditAcct: 'Bank Account' },
   { match: ['tds', 'tcs', 'income tax', 'itr', 'advance tax'], type: 'debit', debitAcct: 'TDS Payable', creditAcct: 'Bank Account' },
