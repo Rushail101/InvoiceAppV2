@@ -16,7 +16,11 @@ export function printInvoice(invoice, items, party, biz, invPayments, isCreditNo
   const calc = items.map(it => {
     const base = Number(it.quantity) * Number(it.unit_price);
     const discAmt = base * (Number(it.discount_percent || 0) / 100);
-    const taxable = base - discAmt;
+    // Use the taxable value that was actually saved with the line (it.taxable_amount).
+    // For "GST already included" lines this is the rate backed out of the
+    // gross price, not base - discAmt — falling back to base - discAmt only
+    // covers old rows saved before that column existed.
+    const taxable = it.taxable_amount != null ? Number(it.taxable_amount) : (base - discAmt);
     const cgst = Number(it.cgst_amount || 0);
     const sgst = Number(it.sgst_amount || 0);
     const igst = Number(it.igst_amount || 0);
@@ -284,7 +288,9 @@ export function printChallan(challan, items, party, biz, linkedInv = null) {
   const calc = items.map(it => {
     const base = Number(it.quantity) * Number(it.unit_price);
     const discAmt = base * (Number(it.discount_percent || 0) / 100);
-    const taxable = base - discAmt;
+    // Same fix as printInvoice — use the saved taxable value, which is
+    // already correctly backed out for "GST already included" lines.
+    const taxable = it.taxable_amount != null ? Number(it.taxable_amount) : (base - discAmt);
     const cgst = Number(it.cgst_amount || 0);
     const sgst = Number(it.sgst_amount || 0);
     const igst = Number(it.igst_amount || 0);
