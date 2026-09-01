@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect } from 'react';
 import { fmt, fmtDate, today, PAY_MODES, INDIAN_STATES, STATE_CODES, EXPENSE_CATEGORIES } from '../lib/constants.js';
-import { saveParty, deleteParty, saveExpenseWithJournal, deleteExpense, savePayment, saveBankAccount, saveBankTxnWithJournal, deleteBankTxn, deletePayment, updateInvoiceStatus, saveInvoice } from '../lib/db.js';
+import { saveParty, deleteParty, saveExpenseWithJournal, deleteExpense, savePayment, saveBankAccount, saveBankTxnWithJournal, deleteBankTxn, deletePayment, updateInvoiceStatus, saveInvoice, uploadExpenseAttachment, getExpenseAttachmentUrl } from '../lib/db.js';
 import { Badge, ModalShell, FG, EmptyState, StatCard, PillTabs } from '../components/ui.jsx';
 import { BankImportModal } from './BankImport.jsx';
 import { tallyExpense, tallyPayment, tallySummary, findDuplicateExpense } from '../lib/tally.js';
@@ -48,7 +48,7 @@ export function PartiesView({ parties, businesses, activeBiz, reload }) {
       <div className="filter-bar">
         <input placeholder="Search name, GSTIN…" value={search} onChange={e => setSearch(e.target.value)} />
         <select value={typeFilter} onChange={e => setTypeFilter(e.target.value)}>
-          <option value="">All Types</option><option value="client">Clients</option><option value="vendor">Vendors</option>
+          <option value="">All Types</option><option value="client">Clients</option><option value="vendor">Vendors</option><option value="employee">Employees</option>
         </select>
         <button className="btn btn-primary" onClick={() => { setEditData(null); setShowModal(true); }}>+ Add Party</button>
       </div>
@@ -99,7 +99,7 @@ function PartyModal({ onClose, onSave, businesses, editData }) {
       foot={<><button className="btn btn-ghost" onClick={onClose}>Cancel</button><button className="btn btn-primary" onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button></>}>
       <div className="form-row cols-2">
         <FG label="Business"><select value={f.business_id} onChange={e => setF(x => ({ ...x, business_id: e.target.value }))}>{businesses.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></FG>
-        <FG label="Type"><select value={f.type} onChange={e => setF(x => ({ ...x, type: e.target.value }))}><option value="client">Client</option><option value="vendor">Vendor</option></select></FG>
+        <FG label="Type"><select value={f.type} onChange={e => setF(x => ({ ...x, type: e.target.value }))}><option value="client">Client</option><option value="vendor">Vendor</option><option value="employee">Employee</option></select></FG>
       </div>
       <div className="form-row"><FG label="Name *"><input value={f.name} onChange={e => setF(x => ({ ...x, name: e.target.value }))} /></FG></div>
       <div className="form-row cols-2">
@@ -306,6 +306,15 @@ export function ExpensesView({ expenses, businesses, parties, activeBiz, reload,
     alert(tallyAlertText(tallySummary(results), 'Expenses'));
   }
 
+  async function viewAttachment(path) {
+    try {
+      const url = await getExpenseAttachmentUrl(path);
+      window.open(url, '_blank', 'noopener');
+    } catch (e) {
+      alert('Could not open attachment: ' + (e.message || 'unknown error'));
+    }
+  }
+
   return (
     <>
       <div className="filter-bar">
@@ -316,7 +325,7 @@ export function ExpensesView({ expenses, businesses, parties, activeBiz, reload,
       </div>
       <div className="table-wrap">
         <table>
-          <thead><tr><th>Date</th><th>Category</th><th>Description</th><th>Vendor</th><th>Method</th><th>Ref</th><th className="r">Amount</th><th>Journal</th><th></th></tr></thead>
+          <thead><tr><th>Date</th><th>Category</th><th>Description</th><th>Payee</th><th>Method</th><th>Ref</th><th className="r">Amount</th><th>Bill</th><th>Journal</th><th></th></tr></thead>
           <tbody>
             {filtered.map(e => (
               <tr key={e.id}>
@@ -328,6 +337,11 @@ export function ExpensesView({ expenses, businesses, parties, activeBiz, reload,
                 <td className="mono" style={{ fontSize: 10, color: 'var(--text3)' }}>{e.reference || '—'}</td>
                 <td className="r mono" style={{ color: 'var(--red)' }}>{fmt(e.amount)}</td>
                 <td style={{ textAlign: 'center' }}>
+                  {e.attachment_path
+                    ? <button className="btn btn-ghost btn-sm" onClick={() => viewAttachment(e.attachment_path)} title={e.attachment_name || 'View attachment'}>📎</button>
+                    : <span style={{ fontSize: 10, color: 'var(--text4)' }}>—</span>}
+                </td>
+                <td style={{ textAlign: 'center' }}>
                   {tallyResults[e.id]
                     ? <TallyBadge result={tallyResults[e.id]} />
                     : journalEntries.some(je => je.source === 'expense' && je.source_id === e.id)
@@ -337,7 +351,7 @@ export function ExpensesView({ expenses, businesses, parties, activeBiz, reload,
                 <td><button className="btn btn-danger btn-sm" onClick={() => del(e.id)}>Del</button></td>
               </tr>
             ))}
-            {filtered.length === 0 && <tr><td colSpan={9}><EmptyState icon="💸" message="No expenses" /></td></tr>}
+            {filtered.length === 0 && <tr><td colSpan={10}><EmptyState icon="💸" message="No expenses" /></td></tr>}
           </tbody>
         </table>
       </div>
@@ -349,10 +363,12 @@ export function ExpensesView({ expenses, businesses, parties, activeBiz, reload,
 
 function ExpenseModal({ onClose, onSave, businesses, parties, activeBiz, expenses }) {
   const [f, setF] = useState({ business_id: activeBiz || businesses[0]?.id || '', category: '', description: '', amount: '', expense_date: today(), vendor_id: '', method: 'UPI', reference: '' });
+  const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [dupConfirmed, setDupConfirmed] = useState(false);
   const vendors = parties.filter(p => p.type === 'vendor' && p.business_id === f.business_id);
+  const employees = parties.filter(p => p.type === 'employee' && p.business_id === f.business_id);
 
   useEffect(() => { setDupConfirmed(false); }, [f.business_id, f.category, f.vendor_id, f.expense_date, f.amount]);
 
@@ -371,7 +387,15 @@ function ExpenseModal({ onClose, onSave, businesses, parties, activeBiz, expense
       return;
     }
     setBusy(true); setErr('');
-    try { await onSave(f); onClose(); }
+    try {
+      let attachment_path = null, attachment_name = null;
+      if (file) {
+        attachment_path = await uploadExpenseAttachment(file, f.business_id);
+        attachment_name = file.name;
+      }
+      await onSave({ ...f, attachment_path, attachment_name });
+      onClose();
+    }
     catch (e) { setErr(e.message || 'Save failed — check Supabase connection'); }
     setBusy(false);
   }
@@ -387,13 +411,22 @@ function ExpenseModal({ onClose, onSave, businesses, parties, activeBiz, expense
         <FG label="Date *"><input type="date" value={f.expense_date} onChange={e => setF(x => ({ ...x, expense_date: e.target.value }))} /></FG>
       </div>
       <div className="form-row cols-2">
-        <FG label="Vendor"><select value={f.vendor_id} onChange={e => setF(x => ({ ...x, vendor_id: e.target.value }))}><option value="">None</option>{vendors.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}</select></FG>
+        <FG label="Payee (Vendor / Employee)">
+          <select value={f.vendor_id} onChange={e => setF(x => ({ ...x, vendor_id: e.target.value }))}>
+            <option value="">None</option>
+            {vendors.length > 0 && <optgroup label="Vendors">{vendors.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}</optgroup>}
+            {employees.length > 0 && <optgroup label="Employees">{employees.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}</optgroup>}
+          </select>
+        </FG>
         <FG label="Method"><select value={f.method} onChange={e => setF(x => ({ ...x, method: e.target.value }))}>{PAY_MODES.map(m => <option key={m} value={m}>{m}</option>)}</select></FG>
       </div>
       <div className="form-row cols-2">
         <FG label="Reference / UTR"><input value={f.reference} onChange={e => setF(x => ({ ...x, reference: e.target.value }))} /></FG>
         <FG label="Description"><input value={f.description} onChange={e => setF(x => ({ ...x, description: e.target.value }))} /></FG>
       </div>
+      <FG label="Attach Bill / Receipt (image or PDF)">
+        <input type="file" accept="image/*,.pdf" onChange={e => setFile(e.target.files?.[0] || null)} />
+      </FG>
       {err && <p className="err-msg">{err}</p>}
     </ModalShell>
   );
