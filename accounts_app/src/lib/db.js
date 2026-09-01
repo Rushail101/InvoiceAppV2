@@ -455,6 +455,7 @@ const BANK_TXN_RULES = [
   // Debits (money OUT) — credit Bank, debit the expense account
   { match: ['rent', 'rental'], type: 'debit', debitAcct: 'Rent', creditAcct: 'Bank Account' },
   { match: ['electricity', 'bijli', 'power', 'msed', 'bses', 'tata power'], type: 'debit', debitAcct: 'Utilities', creditAcct: 'Bank Account' },
+  { match: ['buttons', 'job work', 'outsource', 'third party'], type: 'debit', debitAcct: 'Job work and Sampling', creditAcct: 'Bank Account' },
   { match: ['freight', 'courier', 'dtdc', 'bluedart', 'fedex', 'delhivery', 'xpressbees', 'shipping'], type: 'debit', debitAcct: 'Shipping & Freight', creditAcct: 'Bank Account' },
   { match: ['gst', 'igst', 'cgst', 'sgst', 'tax challan', 'gstn', 'gst challan'], type: 'debit', debitAcct: 'GST Payable (Output)', creditAcct: 'Bank Account' },
   { match: ['tds', 'tcs', 'income tax', 'itr', 'advance tax'], type: 'debit', debitAcct: 'TDS Payable', creditAcct: 'Bank Account' },
