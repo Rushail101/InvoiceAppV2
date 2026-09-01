@@ -332,7 +332,7 @@ export const DEFAULT_ACCOUNTS = [
   { code: '4200', name: 'Other Income', group: 'income', sub_group: 'Indirect Income', description: 'Interest, misc.' },
   // Expenses
   { code: '5000', name: 'Cost of Goods Sold', group: 'expense', sub_group: 'Direct Expenses', description: 'Raw materials, production' },
-  { code: '5010', name: 'Job work and Sampling', group: 'expense', sub_group: 'Indirect Expenses', description: 'Job Work, Outsource' },
+  { code: '5010', name: 'Job Work', group: 'expense', sub_group: 'Direct Expenses', description: 'Job Work, Outsource' },
   { code: '5100', name: 'Raw Materials', group: 'expense', sub_group: 'Direct Expenses', description: 'Fabric, yarn, materials' },
   { code: '5200', name: 'Wages & Salaries', group: 'expense', sub_group: 'Direct Expenses', description: 'Labour costs' },
   { code: '6000', name: 'Rent', group: 'expense', sub_group: 'Indirect Expenses', description: 'Office/factory rent' },
@@ -346,7 +346,7 @@ export const DEFAULT_ACCOUNTS = [
 ];
 
 export const EXPENSE_CATEGORIES = [
-  'Raw Materials','Job work and Sampling', 'Wages & Salaries', 'Rent', 'Utilities', 'Shipping & Freight',
+  'Raw Materials','Job work', 'Wages & Salaries', 'Rent', 'Utilities', 'Shipping & Freight',
   'Marketing', 'Software', 'Travel', 'Printing & Packaging', 'Equipment', 'Miscellaneous'
 ];
 
