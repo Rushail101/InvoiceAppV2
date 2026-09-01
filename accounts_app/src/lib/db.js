@@ -371,6 +371,7 @@ export const CATEGORY_ACCOUNT_MAP = {
   'Wages & Salaries': 'Wages',
   'Rent': 'Rent',
   'Utilities': 'Utilities',
+  'Job Work': 'Job Work',
   'Shipping & Freight': 'Shipping',
   'Marketing': 'Marketing',
   'Software': 'Software',
