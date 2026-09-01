@@ -368,10 +368,10 @@ async function findAccount(bizId, nameLike) {
 
 export const CATEGORY_ACCOUNT_MAP = {
   'Raw Materials': 'Raw Materials',
+  'Job Work': 'Job Work',
   'Wages & Salaries': 'Wages',
   'Rent': 'Rent',
   'Utilities': 'Utilities',
-  'Job Work': 'Job Work',
   'Shipping & Freight': 'Shipping',
   'Marketing': 'Marketing',
   'Software': 'Software',
