@@ -208,7 +208,12 @@ export function JournalView({ journalEntries, journalLines, accounts, businesses
     if (na != null && nb != null && na !== nb) return nb - na;      // both numbered → higher number first
     if (na != null && nb == null) return -1;                        // numbered before un-numbered
     if (na == null && nb != null) return 1;
-    return (b.reference || '').localeCompare(a.reference || '');    // final tiebreaker
+    // Neither has a real voucher number (the normal case for auto-posted
+    // expense/payment/bank-import entries, whose "reference" is a random
+    // hex suffix like EXP-edda0efd — sorting by that string alphabetically
+    // is indistinguishable from random order). Fall back to created_at,
+    // i.e. actual order of entry, instead.
+    return (b.created_at || '').localeCompare(a.created_at || '');
   });
 
   async function handleSave(entry, lines, id) {
