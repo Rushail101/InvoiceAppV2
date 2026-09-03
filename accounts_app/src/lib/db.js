@@ -25,7 +25,12 @@ async function fetchAll(table, { order, select } = {}) {
   let all = [];
   for (;;) {
     let query = supabase.from(table).select(select || '*');
-    if (order) query = query.order(order.column, { ascending: order.ascending !== false });
+    // order can be a single {column, ascending} or an array of them, applied
+    // in sequence — e.g. [dateColumn, createdAtColumn] sorts by date first
+    // and breaks ties by actual entry order.
+    for (const o of (Array.isArray(order) ? order : (order ? [order] : []))) {
+      query = query.order(o.column, { ascending: o.ascending !== false });
+    }
     const { data, error } = await query.range(from, from + pageSize - 1);
     if (error) throw error;
     all = all.concat(data || []);
@@ -41,10 +46,10 @@ export async function loadAll() {
     fetchAll('businesses', { order: { column: 'name', ascending: true } }),
     fetchAll('invoices', { order: { column: 'created_at', ascending: false } }),
     fetchAll('parties', { order: { column: 'name', ascending: true } }),
-    fetchAll('expenses', { order: { column: 'expense_date', ascending: false } }),
-    fetchAll('payments', { order: { column: 'payment_date', ascending: false } }),
+    fetchAll('expenses', { order: [{ column: 'expense_date', ascending: false }, { column: 'created_at', ascending: false }] }),
+    fetchAll('payments', { order: [{ column: 'payment_date', ascending: false }, { column: 'created_at', ascending: false }] }),
     fetchAll('accounts', { order: { column: 'code', ascending: true } }),
-    fetchAll('journal_entries', { order: { column: 'entry_date', ascending: false } }),
+    fetchAll('journal_entries', { order: [{ column: 'entry_date', ascending: false }, { column: 'created_at', ascending: false }] }),
     fetchAll('journal_lines'),
     fetchAll('credit_notes', { order: { column: 'created_at', ascending: false } }),
     fetchAll('bank_accounts', { order: { column: 'name', ascending: true } }),
