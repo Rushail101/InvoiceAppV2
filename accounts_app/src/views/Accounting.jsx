@@ -133,7 +133,7 @@ function AccountModal({ onClose, onSave, editData, businesses, activeBiz }) {
 // ─── JOURNAL VOUCHERS ────────────────────────────────────────────────────────
 const SOURCE_LABEL = { manual: 'Manual', bank_import: 'Bank import', expense: 'Expense', reversal: 'Reversal', payment: 'Payment' };
 
-export function JournalView({ journalEntries, journalLines, accounts, businesses, activeBiz, reload }) {
+export function JournalView({ journalEntries, journalLines, accounts, businesses, activeBiz, reload, expenses, payments }) {
   const [showModal, setShowModal] = useState(false);
   const [modalMode, setModalMode] = useState('new'); // 'new' | 'edit' | 'duplicate'
   const [modalEntry, setModalEntry] = useState(null);
@@ -150,6 +150,19 @@ export function JournalView({ journalEntries, journalLines, accounts, businesses
   (journalLines || []).forEach(l => { (linesByJournal[l.journal_id] ??= []).push(l); });
 
   const acctName = id => accounts.find(a => a.id === id)?.name || id;
+
+  // An auto-posted journal entry's own created_at can lag behind when the
+  // expense/payment was actually entered — e.g. if the entry was created
+  // later by the "Re-post" tool on Journal Health. The expense/payment row
+  // itself is the reliable timestamp (it's never touched by a repost), so
+  // look it up by source_id and prefer that for ordering when available.
+  const expenseById = {}; (expenses || []).forEach(e => { expenseById[e.id] = e; });
+  const paymentById = {}; (payments || []).forEach(p => { paymentById[p.id] = p; });
+  function entryOrderKey(j) {
+    if (j.source === 'expense' && expenseById[j.source_id]) return expenseById[j.source_id].created_at || j.created_at;
+    if (j.source === 'payment' && paymentById[j.source_id]) return paymentById[j.source_id].created_at || j.created_at;
+    return j.created_at;
+  }
 
   // Link each entry to the reversal that reverses it (if any), so both
   // sides of a cancel-each-other-out pair can show a badge pointing at
@@ -211,9 +224,9 @@ export function JournalView({ journalEntries, journalLines, accounts, businesses
     // Neither has a real voucher number (the normal case for auto-posted
     // expense/payment/bank-import entries, whose "reference" is a random
     // hex suffix like EXP-edda0efd — sorting by that string alphabetically
-    // is indistinguishable from random order). Fall back to created_at,
-    // i.e. actual order of entry, instead.
-    return (b.created_at || '').localeCompare(a.created_at || '');
+    // is indistinguishable from random order). Use the true entry-order key
+    // (source record's created_at when we have one) instead.
+    return (entryOrderKey(b) || '').localeCompare(entryOrderKey(a) || '');
   });
 
   async function handleSave(entry, lines, id) {
