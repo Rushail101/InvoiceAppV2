@@ -969,7 +969,8 @@ export default function App() {
             )}
             {!loading && view === 'accounts' && <ChartOfAccountsView accounts={accounts} {...cp} />}
             {!loading && view === 'journal' && (
-              <JournalView journalEntries={journalEntries} journalLines={journalLines} accounts={accounts} {...cp} />
+              <JournalView journalEntries={journalEntries} journalLines={journalLines} accounts={accounts}
+                expenses={expenses} payments={payments} {...cp} />
             )}
             {!loading && view === 'analysis' && (
               <AnalysisView journalEntries={journalEntries} journalLines={journalLines} accounts={accounts}
