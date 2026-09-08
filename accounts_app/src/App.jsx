@@ -505,7 +505,63 @@ ALTER TABLE invoices ADD COLUMN IF NOT EXISTS tds_amount numeric(12,2) DEFAULT 0
 ALTER TABLE parties ADD COLUMN IF NOT EXISTS pan text;
 
 CREATE INDEX IF NOT EXISTS idx_jentries_source ON journal_entries(source, source_id);
-CREATE INDEX IF NOT EXISTS idx_expenses_journal ON expenses(journal_posted);`
+CREATE INDEX IF NOT EXISTS idx_expenses_journal ON expenses(journal_posted);
+
+-- ── STEP 6: v7 Migration — accrual accounting, period locking, DB-driven bank rules ──
+-- Invoices/credit notes now post their own journal entry at issue time
+-- (accrual), same journal_posted tracking pattern as expenses above.
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS journal_posted boolean DEFAULT false;
+ALTER TABLE credit_notes ADD COLUMN IF NOT EXISTS journal_posted boolean DEFAULT false;
+CREATE INDEX IF NOT EXISTS idx_invoices_journal ON invoices(journal_posted);
+CREATE INDEX IF NOT EXISTS idx_cn_journal ON credit_notes(journal_posted);
+
+-- Historical Period Locking — one row per (business, fiscal-year-start-year)
+-- that's been locked. Presence of a row = that FY is frozen against new
+-- postings, edits, and deletes touching a date inside it.
+CREATE TABLE IF NOT EXISTS period_locks (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id uuid NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  fy_start_year int NOT NULL,
+  note text,
+  locked_at timestamptz DEFAULT now(),
+  UNIQUE(business_id, fy_start_year)
+);
+
+-- Bank statement categorization rules, per business — replaces the hardcoded
+-- keyword list that used to live only in db.js. "Seed Default Rules" on the
+-- Bank Import → Rules screen inserts the same starting set into this table
+-- so existing behaviour is unchanged until you actually edit/add rules.
+CREATE TABLE IF NOT EXISTS bank_rules (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id uuid NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  keywords text NOT NULL,              -- comma-separated match substrings
+  txn_type text NOT NULL,              -- 'credit' | 'debit'
+  debit_account_name text NOT NULL,    -- substring matched against accounts.name
+  credit_account_name text NOT NULL,
+  priority int DEFAULT 0,
+  created_at timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_bank_rules_biz ON bank_rules(business_id, priority);
+
+-- GSTR-2B import rows, for cross-checking claimed Input Tax Credit against
+-- what your suppliers actually filed (Analysis → ITC Reconciliation).
+CREATE TABLE IF NOT EXISTS gstr2b_entries (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id uuid NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  return_period text NOT NULL,         -- e.g. '2026-08'
+  supplier_gstin text,
+  supplier_name text,
+  invoice_number text,
+  invoice_date date,
+  taxable_value numeric(12,2) DEFAULT 0,
+  igst numeric(12,2) DEFAULT 0,
+  cgst numeric(12,2) DEFAULT 0,
+  sgst numeric(12,2) DEFAULT 0,
+  itc_available numeric(12,2) DEFAULT 0,
+  matched_vendor_bill_id uuid REFERENCES invoices(id),
+  created_at timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_gstr2b_biz_period ON gstr2b_entries(business_id, return_period);`
 
 function SqlSetupView({ invoices = [], payments = [] }) {
   const [copied, setCopied] = useState(false);
