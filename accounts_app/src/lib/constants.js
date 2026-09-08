@@ -247,6 +247,31 @@ export const getFY = () => {
   return `${String(sy).slice(-2)}-${String(sy + 1).slice(-2)}`;
 };
 
+// India's fiscal year runs Apr 1 – Mar 31. These helpers back the FY-aware
+// Balance Sheet (retained earnings vs. current-year P&L, see item on
+// multi-year profit leaking into equity) and the period-bounded Trial
+// Balance (opening / period movement / closing).
+export function fyStartYearOfDate(dateStr) {
+  const d = new Date(dateStr);
+  return d.getMonth() >= 3 ? d.getFullYear() : d.getFullYear() - 1;
+}
+export function currentFyStartYear() {
+  return fyStartYearOfDate(today());
+}
+export function fyBounds(startYear) {
+  return { start: `${startYear}-04-01`, end: `${startYear + 1}-03-31` };
+}
+export function fyLabel(startYear) {
+  return `FY ${startYear}-${String(startYear + 1).slice(-2)}`;
+}
+// Every fiscal year that has at least one journal entry, newest first —
+// used to populate the FY picker on Balance Sheet / Trial Balance.
+export function fyOptionsFromEntries(journalEntries) {
+  const years = new Set([currentFyStartYear()]);
+  (journalEntries || []).forEach(j => { if (j.entry_date) years.add(fyStartYearOfDate(j.entry_date)); });
+  return [...years].sort((a, b) => b - a);
+}
+
 export function nextInvNum(invoices, isProforma) {
   const fy = getFY();
   if (isProforma) {
