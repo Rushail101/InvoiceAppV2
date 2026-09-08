@@ -432,6 +432,7 @@ export function InvoicesView({ invoices, businesses, parties, activeBiz, reload,
 
   async function handleSave(invData, items, id) {
     await saveInvoice(invData, items, id);
+    await postInvoiceAccrualJournal(invData, items, accounts);
     reload();
   }
 
