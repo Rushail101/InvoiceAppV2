@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
-import { fmt, fmtDate, today, DEFAULT_ACCOUNTS, fyBounds, fyLabel, fyOptionsFromEntries, currentFyStartYear } from '../lib/constants.js';
+import { fmt, fmtDate, today, DEFAULT_ACCOUNTS } from '../lib/constants.js';
 import { saveAccount, saveJournal, deleteJournal, seedAccounts } from '../lib/db.js';
 import { Badge, ModalShell, FG, EmptyState, StatCard, AccountSelect } from '../components/ui.jsx';
 import { findDuplicateJournalEntry, jeAmount } from '../lib/tally.js';
@@ -12,7 +12,6 @@ export function ChartOfAccountsView({ accounts, businesses, activeBiz, reload })
 
   const filtered = activeBiz ? accounts.filter(a => a.business_id === activeBiz) : accounts;
   const groups = ['asset', 'liability', 'equity', 'income', 'expense'];
-  const unclassified = filtered.filter(a => !a.sub_group && (a.group === 'asset' || a.group === 'liability'));
 
   async function handleSeed() {
     if (!activeBiz) { alert('Select a business first'); return; }
@@ -34,14 +33,6 @@ export function ChartOfAccountsView({ accounts, businesses, activeBiz, reload })
         <button className="btn btn-ghost btn-sm" onClick={handleSeed} disabled={seeding}>{seeding ? 'Seeding…' : '⚡ Seed Default Accounts'}</button>
         <button className="btn btn-primary" onClick={() => { setEditAcc(null); setShowModal(true); }}>+ Add Account</button>
       </div>
-
-      {unclassified.length > 0 && (
-        <div className="cn-banner" style={{ marginBottom: 14, borderColor: 'var(--amber)', color: 'var(--amber)' }}>
-          ⚠ {unclassified.length} account{unclassified.length !== 1 ? 's' : ''} without a Sub-Group — they're currently being
-          counted as Current Assets/Liabilities on the Balance Sheet by default, which will overstate/understate working
-          capital if any of them are actually long-term. Click Edit and pick the correct sub-group.
-        </div>
-      )}
 
       {groups.map(grp => {
         const grpAccs = filtered.filter(a => a.group === grp);
@@ -100,17 +91,9 @@ function AccountModal({ onClose, onSave, editData, businesses, activeBiz }) {
     expense: ['Direct Expenses', 'Indirect Expenses'],
   };
 
-  const [err, setErr] = useState('');
   async function save() {
-    if (!f.name.trim() || !f.code.trim()) { setErr('Code and name are required'); return; }
-    // Sub-group used to be optional, which meant an account created quickly
-    // (e.g. mid-transaction via "+ Add Account") could silently fall back to
-    // the Current bucket on the Balance Sheet even if it was really a
-    // long-term loan or fixed asset — distorting working-capital ratios
-    // without any visible warning. Now it's required at creation time
-    // instead, so that fallback never has to happen quietly.
-    if (!f.sub_group) { setErr('Sub-group is required — pick the correct bucket so this account lands in the right place on the Balance Sheet'); return; }
-    setErr(''); setBusy(true);
+    if (!f.name.trim() || !f.code.trim()) return;
+    setBusy(true);
     await onSave(f, editData?.id);
     setBusy(false); onClose();
   }
@@ -130,7 +113,7 @@ function AccountModal({ onClose, onSave, editData, businesses, activeBiz }) {
         <FG label="Account Name *"><input value={f.name} onChange={e => setF(x => ({ ...x, name: e.target.value }))} /></FG>
       </div>
       <div className="form-row cols-2">
-        <FG label="Sub-Group *">
+        <FG label="Sub-Group">
           <select value={f.sub_group} onChange={e => setF(x => ({ ...x, sub_group: e.target.value }))}>
             <option value="">Select…</option>
             {(subGroups[f.group] || []).map(s => <option key={s} value={s}>{s}</option>)}
@@ -143,7 +126,6 @@ function AccountModal({ onClose, onSave, editData, businesses, activeBiz }) {
         </FG>
       </div>
       <FG label="Description"><textarea value={f.description} onChange={e => setF(x => ({ ...x, description: e.target.value }))} /></FG>
-      {err && <p className="err-msg">{err}</p>}
     </ModalShell>
   );
 }
