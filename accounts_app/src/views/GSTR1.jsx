@@ -1,4 +1,4 @@
-// views/GSTR1.jsx — GSTR-1 Summary Report
+// views/GSTR1.jsx — GSTR-1 Summary Report with 5% & 18% Tax Rate Separation
 import { useState, useMemo } from 'react';
 import { fmt, fmtDate, getFY, STATE_CODES } from '../lib/constants.js';
 import { EmptyState, PillTabs } from '../components/ui.jsx';
@@ -14,8 +14,8 @@ function getPeriodOptions() {
   const fy = getFY();
   const [sy, ey] = fy.split('-').map(y => parseInt('20' + y, 10));
   return MONTHS.map((m, i) => {
-    const year = i < 9 ? sy : ey; // Apr-Dec = start year, Jan-Mar = end year
-    const month = i < 9 ? i + 4 : i - 8; // Apr=4..Dec=12, Jan=1..Mar=3
+    const year = i < 9 ? sy : ey;
+    const month = i < 9 ? i + 4 : i - 8;
     const val = `${year}-${String(month).padStart(2, '0')}`;
     return { label: `${m} ${year}`, value: val };
   });
@@ -29,10 +29,8 @@ function filterByPeriod(invoices, period) {
   });
 }
 
-// Filter invoices by payment date — for collections view
 function filterByPaymentDate(invoices, payments, period) {
   if (!period) return invoices;
-  // Get invoice IDs that have a payment in this period
   const paidInvIds = new Set(
     payments
       .filter(p => p.payment_date && p.payment_date.startsWith(period))
@@ -41,8 +39,8 @@ function filterByPaymentDate(invoices, payments, period) {
   return invoices.filter(inv => paidInvIds.has(inv.id));
 }
 
-// Enrich invoices with computed GST amounts from stored fields
-function enrichInvoice(inv, parties) {
+// Enrich invoice with computed GST amounts and 5% vs 18% rate buckets
+function enrichInvoice(inv, parties, itemsMap = {}) {
   const party = parties.find(p => p.id === inv.party_id) || {};
   const isIntra = inv.is_interstate === false;
   const taxable = Number(inv.subtotal || 0);
@@ -51,14 +49,65 @@ function enrichInvoice(inv, parties) {
   const igst = Number(inv.igst_amount || 0);
   const totalTax = cgst + sgst + igst;
   const total = Number(inv.total || 0);
-  return { ...inv, party, isIntra, taxable, cgst, sgst, igst, totalTax, total };
+
+  const items = itemsMap[inv.id] || [];
+
+  // Break down into 5%, 18%, and other rate buckets
+  const rateBreakdown = {
+    r5: { taxable: 0, cgst: 0, sgst: 0, igst: 0, tax: 0 },
+    r18: { taxable: 0, cgst: 0, sgst: 0, igst: 0, tax: 0 },
+    other: { taxable: 0, cgst: 0, sgst: 0, igst: 0, tax: 0 }
+  };
+
+  if (items.length > 0) {
+    items.forEach(it => {
+      const rate = Math.round(Number(it.tax_percent || 0));
+      const target = rate === 5 ? rateBreakdown.r5 : rate === 18 ? rateBreakdown.r18 : rateBreakdown.other;
+      const itTaxable = Number(it.taxable_amount || 0);
+      const itCgst = Number(it.cgst_amount || 0);
+      const itSgst = Number(it.sgst_amount || 0);
+      const itIgst = Number(it.igst_amount || 0);
+
+      target.taxable += itTaxable;
+      target.cgst += itCgst;
+      target.sgst += itSgst;
+      target.igst += itIgst;
+      target.tax += (itCgst + itSgst + itIgst);
+    });
+  } else {
+    // If line items are missing, deduce from total amounts
+    const inferredRate = taxable > 0 ? Math.round((totalTax / taxable) * 100) : 0;
+    const target = inferredRate === 5 ? rateBreakdown.r5 : inferredRate === 18 ? rateBreakdown.r18 : rateBreakdown.other;
+    target.taxable = taxable;
+    target.cgst = cgst;
+    target.sgst = sgst;
+    target.igst = igst;
+    target.tax = totalTax;
+  }
+
+  return {
+    ...inv,
+    party,
+    isIntra,
+    taxable,
+    cgst,
+    sgst,
+    igst,
+    totalTax,
+    total,
+    rateBreakdown
+  };
 }
 
 // ─── B2B TABLE ────────────────────────────────────────────────────────────────
-// B2B: invoices to registered (GSTIN) recipients
 function B2BTable({ rows, selected, onToggle, onToggleAll }) {
   if (!rows.length) return <EmptyState icon="📋" message="No B2B invoices for this period" sub="B2B = invoices raised to parties with a valid GSTIN" />;
+
   const totTaxable = rows.reduce((s, r) => s + r.taxable, 0);
+  const totTaxable5 = rows.reduce((s, r) => s + r.rateBreakdown.r5.taxable, 0);
+  const totTax5 = rows.reduce((s, r) => s + r.rateBreakdown.r5.tax, 0);
+  const totTaxable18 = rows.reduce((s, r) => s + r.rateBreakdown.r18.taxable, 0);
+  const totTax18 = rows.reduce((s, r) => s + r.rateBreakdown.r18.tax, 0);
   const totCGST = rows.reduce((s, r) => s + r.cgst, 0);
   const totSGST = rows.reduce((s, r) => s + r.sgst, 0);
   const totIGST = rows.reduce((s, r) => s + r.igst, 0);
@@ -70,18 +119,23 @@ function B2BTable({ rows, selected, onToggle, onToggleAll }) {
         <thead>
           <tr>
             <th style={{ width: 30 }}>
-              <input type="checkbox"
+              <input
+                type="checkbox"
                 checked={rows.length > 0 && rows.every(r => selected.has(r.id))}
                 ref={el => { if (el) el.indeterminate = selected.size > 0 && !rows.every(r => selected.has(r.id)); }}
-                onChange={() => onToggleAll(rows)} />
+                onChange={() => onToggleAll(rows)}
+              />
             </th>
             <th>Invoice #</th>
             <th>Date</th>
             <th>Recipient</th>
             <th>GSTIN</th>
-            <th>State</th>
             <th>Type</th>
-            <th className="r">Taxable (₹)</th>
+            <th className="r">Total Taxable (₹)</th>
+            <th className="r" style={{ color: 'var(--blue)' }}>5% Taxable</th>
+            <th className="r" style={{ color: 'var(--blue)' }}>5% Tax</th>
+            <th className="r" style={{ color: 'var(--teal)' }}>18% Taxable</th>
+            <th className="r" style={{ color: 'var(--teal)' }}>18% Tax</th>
             <th className="r">CGST</th>
             <th className="r">SGST</th>
             <th className="r">IGST</th>
@@ -97,27 +151,48 @@ function B2BTable({ rows, selected, onToggle, onToggleAll }) {
               <td className="mono" style={{ fontSize: 11 }}>{fmtDate(r.issue_date)}</td>
               <td style={{ fontWeight: 500 }}>{r.party?.name || '—'}</td>
               <td className="mono" style={{ fontSize: 10, color: 'var(--text3)' }}>{r.party?.gstin || '—'}</td>
-              <td style={{ fontSize: 11 }}>{r.party?.state || '—'}</td>
               <td>
                 <span className={`gst-chip ${r.isIntra ? 'cgst' : 'igst'}`} style={{ fontSize: 9 }}>
                   {r.isIntra ? 'Intra' : 'Inter'}
                 </span>
               </td>
               <td className="r mono" style={{ fontSize: 11 }}>{fmt(r.taxable)}</td>
+              <td className="r mono" style={{ fontSize: 11, color: r.rateBreakdown.r5.taxable > 0 ? 'var(--blue)' : 'var(--text4)' }}>
+                {r.rateBreakdown.r5.taxable > 0 ? fmt(r.rateBreakdown.r5.taxable) : '—'}
+              </td>
+              <td className="r mono" style={{ fontSize: 11, color: r.rateBreakdown.r5.tax > 0 ? 'var(--blue)' : 'var(--text4)' }}>
+                {r.rateBreakdown.r5.tax > 0 ? fmt(r.rateBreakdown.r5.tax) : '—'}
+              </td>
+              <td className="r mono" style={{ fontSize: 11, color: r.rateBreakdown.r18.taxable > 0 ? 'var(--teal)' : 'var(--text4)' }}>
+                {r.rateBreakdown.r18.taxable > 0 ? fmt(r.rateBreakdown.r18.taxable) : '—'}
+              </td>
+              <td className="r mono" style={{ fontSize: 11, color: r.rateBreakdown.r18.tax > 0 ? 'var(--teal)' : 'var(--text4)' }}>
+                {r.rateBreakdown.r18.tax > 0 ? fmt(r.rateBreakdown.r18.tax) : '—'}
+              </td>
               <td className="r mono" style={{ fontSize: 11, color: r.cgst > 0 ? 'var(--blue)' : 'var(--text4)' }}>{r.cgst > 0 ? fmt(r.cgst) : '—'}</td>
               <td className="r mono" style={{ fontSize: 11, color: r.sgst > 0 ? 'var(--teal)' : 'var(--text4)' }}>{r.sgst > 0 ? fmt(r.sgst) : '—'}</td>
               <td className="r mono" style={{ fontSize: 11, color: r.igst > 0 ? 'var(--amber)' : 'var(--text4)' }}>{r.igst > 0 ? fmt(r.igst) : '—'}</td>
               <td className="r mono" style={{ fontWeight: 600 }}>{fmt(r.total)}</td>
-              <td>{r.gst_filed ? <span className="tag" style={{ color: 'var(--green)', borderColor: '#0a3a1a', fontSize: 10 }}>✓ Filed</span> : <span className="tag" style={{ color: 'var(--amber)', borderColor: '#3a2e00', fontSize: 10 }}>Pending</span>}</td>
+              <td>
+                {r.gst_filed ? (
+                  <span className="tag" style={{ color: 'var(--green)', borderColor: '#0a3a1a', fontSize: 10 }}>✓ Filed</span>
+                ) : (
+                  <span className="tag" style={{ color: 'var(--amber)', borderColor: '#3a2e00', fontSize: 10 }}>Pending</span>
+                )}
+              </td>
             </tr>
           ))}
         </tbody>
         <tfoot>
           <tr style={{ fontWeight: 700, background: 'var(--bg3)', borderTop: '2px solid var(--border2)' }}>
-            <td colSpan={7} style={{ padding: '9px 16px', fontFamily: 'var(--mono)', fontSize: 11, textTransform: 'uppercase', letterSpacing: '.05em' }}>
+            <td colSpan={6} style={{ padding: '9px 16px', fontFamily: 'var(--mono)', fontSize: 11, textTransform: 'uppercase', letterSpacing: '.05em' }}>
               Total ({rows.length} invoices)
             </td>
             <td className="r mono" style={{ padding: '9px 16px' }}>{fmt(totTaxable)}</td>
+            <td className="r mono" style={{ padding: '9px 16px', color: 'var(--blue)' }}>{fmt(totTaxable5)}</td>
+            <td className="r mono" style={{ padding: '9px 16px', color: 'var(--blue)' }}>{fmt(totTax5)}</td>
+            <td className="r mono" style={{ padding: '9px 16px', color: 'var(--teal)' }}>{fmt(totTaxable18)}</td>
+            <td className="r mono" style={{ padding: '9px 16px', color: 'var(--teal)' }}>{fmt(totTax18)}</td>
             <td className="r mono" style={{ padding: '9px 16px', color: 'var(--blue)' }}>{fmt(totCGST)}</td>
             <td className="r mono" style={{ padding: '9px 16px', color: 'var(--teal)' }}>{fmt(totSGST)}</td>
             <td className="r mono" style={{ padding: '9px 16px', color: 'var(--amber)' }}>{fmt(totIGST)}</td>
@@ -131,25 +206,52 @@ function B2BTable({ rows, selected, onToggle, onToggleAll }) {
 }
 
 // ─── B2C TABLE ────────────────────────────────────────────────────────────────
-// B2C: invoices to unregistered (no GSTIN) or consumers
-function B2CTable({ rows }) {
+function B2CTable({ rows, allItems }) {
   if (!rows.length) return <EmptyState icon="🛒" message="No B2C invoices for this period" sub="B2C = invoices raised to parties without a GSTIN" />;
 
-  // B2C Large (>2.5L inter-state) goes to B2CL; rest to B2CS grouped by state+rate
   const b2cl = rows.filter(r => !r.isIntra && r.total > 250000);
-  const b2cs = rows.filter(r => r.isIntra || r.total <= 250000);
+  const b2csInvoices = rows.filter(r => r.isIntra || r.total <= 250000);
 
-  // Group B2CS by state + supply type
+  // Group B2C Small by State + Supply Type + Tax Rate (Standard GSTR-1 format)
   const b2csGroups = {};
-  b2cs.forEach(r => {
-    const key = `${r.party?.state || 'Unknown'}|${r.isIntra ? 'Intra' : 'Inter'}`;
-    if (!b2csGroups[key]) b2csGroups[key] = { state: r.party?.state || 'Unknown', type: r.isIntra ? 'Intra' : 'Inter', taxable: 0, cgst: 0, sgst: 0, igst: 0, total: 0, count: 0 };
-    b2csGroups[key].taxable += r.taxable;
-    b2csGroups[key].cgst += r.cgst;
-    b2csGroups[key].sgst += r.sgst;
-    b2csGroups[key].igst += r.igst;
-    b2csGroups[key].total += r.total;
-    b2csGroups[key].count += 1;
+
+  b2csInvoices.forEach(inv => {
+    const items = allItems[inv.id] || [];
+    const state = inv.party?.state || 'Unknown';
+    const type = inv.isIntra ? 'Intra' : 'Inter';
+
+    if (items.length > 0) {
+      items.forEach(it => {
+        const rate = Math.round(Number(it.tax_percent || 0));
+        const key = `${state}|${type}|${rate}`;
+        if (!b2csGroups[key]) {
+          b2csGroups[key] = { state, type, rate, taxable: 0, cgst: 0, sgst: 0, igst: 0, total: 0, count: 0 };
+        }
+        b2csGroups[key].taxable += Number(it.taxable_amount || 0);
+        b2csGroups[key].cgst += Number(it.cgst_amount || 0);
+        b2csGroups[key].sgst += Number(it.sgst_amount || 0);
+        b2csGroups[key].igst += Number(it.igst_amount || 0);
+        b2csGroups[key].total += Number(it.amount || 0);
+        b2csGroups[key].count += 1;
+      });
+    } else {
+      ['r5', 'r18', 'other'].forEach(bucketKey => {
+        const bucket = inv.rateBreakdown[bucketKey];
+        if (bucket.taxable > 0) {
+          const rate = bucketKey === 'r5' ? 5 : bucketKey === 'r18' ? 18 : 'Mixed';
+          const key = `${state}|${type}|${rate}`;
+          if (!b2csGroups[key]) {
+            b2csGroups[key] = { state, type, rate, taxable: 0, cgst: 0, sgst: 0, igst: 0, total: 0, count: 0 };
+          }
+          b2csGroups[key].taxable += bucket.taxable;
+          b2csGroups[key].cgst += bucket.cgst;
+          b2csGroups[key].sgst += bucket.sgst;
+          b2csGroups[key].igst += bucket.igst;
+          b2csGroups[key].total += (bucket.taxable + bucket.tax);
+          b2csGroups[key].count += 1;
+        }
+      });
+    }
   });
 
   return (
@@ -159,10 +261,15 @@ function B2CTable({ rows }) {
           <div className="section-title">B2C Large (Inter-state invoices &gt; ₹2.5 Lakh)</div>
           <div className="table-wrap">
             <table>
-              <thead><tr>
-                <th>Invoice #</th><th>Date</th><th>Party</th><th>State</th>
-                <th className="r">Taxable</th><th className="r">IGST</th><th className="r">Total</th>
-              </tr></thead>
+              <thead>
+                <tr>
+                  <th>Invoice #</th><th>Date</th><th>Party</th><th>State</th>
+                  <th className="r">Taxable</th>
+                  <th className="r" style={{ color: 'var(--blue)' }}>5% Taxable</th>
+                  <th className="r" style={{ color: 'var(--teal)' }}>18% Taxable</th>
+                  <th className="r">IGST</th><th className="r">Total</th>
+                </tr>
+              </thead>
               <tbody>
                 {b2cl.map(r => (
                   <tr key={r.id}>
@@ -171,6 +278,12 @@ function B2CTable({ rows }) {
                     <td style={{ fontWeight: 500 }}>{r.party?.name || '—'}</td>
                     <td style={{ fontSize: 11 }}>{r.party?.state || '—'}</td>
                     <td className="r mono" style={{ fontSize: 11 }}>{fmt(r.taxable)}</td>
+                    <td className="r mono" style={{ fontSize: 11, color: r.rateBreakdown.r5.taxable > 0 ? 'var(--blue)' : 'var(--text4)' }}>
+                      {r.rateBreakdown.r5.taxable > 0 ? fmt(r.rateBreakdown.r5.taxable) : '—'}
+                    </td>
+                    <td className="r mono" style={{ fontSize: 11, color: r.rateBreakdown.r18.taxable > 0 ? 'var(--teal)' : 'var(--text4)' }}>
+                      {r.rateBreakdown.r18.taxable > 0 ? fmt(r.rateBreakdown.r18.taxable) : '—'}
+                    </td>
                     <td className="r mono" style={{ fontSize: 11, color: 'var(--amber)' }}>{fmt(r.igst)}</td>
                     <td className="r mono" style={{ fontWeight: 600 }}>{fmt(r.total)}</td>
                   </tr>
@@ -181,24 +294,34 @@ function B2CTable({ rows }) {
         </div>
       )}
 
-      <div className="section-title">B2C Small (Consolidated by State)</div>
+      <div className="section-title">B2C Small (Consolidated by State &amp; Rate)</div>
       <div className="table-wrap">
         <table>
-          <thead><tr>
-            <th>State</th><th>Supply Type</th><th className="r">Count</th>
-            <th className="r">Taxable</th><th className="r">CGST</th><th className="r">SGST</th><th className="r">IGST</th><th className="r">Total</th>
-          </tr></thead>
+          <thead>
+            <tr>
+              <th>State</th>
+              <th>Supply Type</th>
+              <th className="r">Rate</th>
+              <th className="r">Taxable Value</th>
+              <th className="r">CGST</th>
+              <th className="r">SGST</th>
+              <th className="r">IGST</th>
+              <th className="r">Total Tax</th>
+            </tr>
+          </thead>
           <tbody>
-            {Object.values(b2csGroups).map((g, i) => (
+            {Object.values(b2csGroups).sort((a, b) => a.state.localeCompare(b.state) || (Number(a.rate) || 0) - (Number(b.rate) || 0)).map((g, i) => (
               <tr key={i}>
                 <td style={{ fontWeight: 500 }}>{g.state}</td>
                 <td><span className={`gst-chip ${g.type === 'Intra' ? 'cgst' : 'igst'}`} style={{ fontSize: 9 }}>{g.type}</span></td>
-                <td className="r mono" style={{ fontSize: 11 }}>{g.count}</td>
+                <td className="r mono" style={{ fontWeight: 600, color: g.rate === 5 ? 'var(--blue)' : g.rate === 18 ? 'var(--teal)' : 'inherit' }}>
+                  {g.rate !== 'Mixed' ? `${g.rate}%` : 'Mixed'}
+                </td>
                 <td className="r mono" style={{ fontSize: 11 }}>{fmt(g.taxable)}</td>
-                <td className="r mono" style={{ fontSize: 11, color: 'var(--blue)' }}>{g.cgst > 0 ? fmt(g.cgst) : '—'}</td>
-                <td className="r mono" style={{ fontSize: 11, color: 'var(--teal)' }}>{g.sgst > 0 ? fmt(g.sgst) : '—'}</td>
-                <td className="r mono" style={{ fontSize: 11, color: 'var(--amber)' }}>{g.igst > 0 ? fmt(g.igst) : '—'}</td>
-                <td className="r mono" style={{ fontWeight: 600 }}>{fmt(g.total)}</td>
+                <td className="r mono" style={{ fontSize: 11, color: g.cgst > 0 ? 'var(--blue)' : 'var(--text4)' }}>{g.cgst > 0 ? fmt(g.cgst) : '—'}</td>
+                <td className="r mono" style={{ fontSize: 11, color: g.sgst > 0 ? 'var(--teal)' : 'var(--text4)' }}>{g.sgst > 0 ? fmt(g.sgst) : '—'}</td>
+                <td className="r mono" style={{ fontSize: 11, color: g.igst > 0 ? 'var(--amber)' : 'var(--text4)' }}>{g.igst > 0 ? fmt(g.igst) : '—'}</td>
+                <td className="r mono" style={{ fontWeight: 600 }}>{fmt(g.cgst + g.sgst + g.igst)}</td>
               </tr>
             ))}
             {Object.keys(b2csGroups).length === 0 && (
@@ -218,13 +341,18 @@ function buildHSNRows(invoices, allItems) {
     const items = allItems[inv.id] || [];
     items.forEach(it => {
       const hsn = it.hsn_code || 'Unspecified';
-      if (!hsnMap[hsn]) hsnMap[hsn] = { hsn, qty: 0, taxable: 0, cgst: 0, sgst: 0, igst: 0, total: 0 };
-      hsnMap[hsn].qty      += Number(it.quantity || 0);
-      hsnMap[hsn].taxable  += Number(it.taxable_amount || 0);
-      hsnMap[hsn].cgst     += Number(it.cgst_amount || 0);
-      hsnMap[hsn].sgst     += Number(it.sgst_amount || 0);
-      hsnMap[hsn].igst     += Number(it.igst_amount || 0);
-      hsnMap[hsn].total    += Number(it.amount || 0);
+      const rate = Math.round(Number(it.tax_percent || 0));
+      const key = `${hsn}|${rate}`;
+
+      if (!hsnMap[key]) {
+        hsnMap[key] = { hsn, rate, qty: 0, taxable: 0, cgst: 0, sgst: 0, igst: 0, total: 0 };
+      }
+      hsnMap[key].qty += Number(it.quantity || 0);
+      hsnMap[key].taxable += Number(it.taxable_amount || 0);
+      hsnMap[key].cgst += Number(it.cgst_amount || 0);
+      hsnMap[key].sgst += Number(it.sgst_amount || 0);
+      hsnMap[key].igst += Number(it.igst_amount || 0);
+      hsnMap[key].total += Number(it.amount || 0);
     });
   });
   return Object.values(hsnMap).sort((a, b) => b.taxable - a.taxable);
@@ -237,26 +365,37 @@ function HSNGrid({ rows, label, accent }) {
   return (
     <div className="table-wrap">
       <table>
-        <thead><tr>
-          <th>HSN / SAC</th><th className="r">Qty</th><th className="r">Taxable Value</th>
-          <th className="r">CGST</th><th className="r">SGST</th><th className="r">IGST</th><th className="r">Total Tax</th>
-        </tr></thead>
+        <thead>
+          <tr>
+            <th>HSN / SAC</th>
+            <th className="r">Rate</th>
+            <th className="r">Qty</th>
+            <th className="r">Taxable Value</th>
+            <th className="r">CGST</th>
+            <th className="r">SGST</th>
+            <th className="r">IGST</th>
+            <th className="r">Total Tax</th>
+          </tr>
+        </thead>
         <tbody>
           {rows.map((r, i) => (
             <tr key={i}>
               <td className="mono" style={{ fontWeight: 500, color: accent }}>{r.hsn}</td>
+              <td className="r mono" style={{ fontWeight: 600, color: r.rate === 5 ? 'var(--blue)' : r.rate === 18 ? 'var(--teal)' : 'inherit' }}>
+                {r.rate}%
+              </td>
               <td className="r mono" style={{ fontSize: 11 }}>{r.qty.toFixed(2)}</td>
               <td className="r mono" style={{ fontSize: 11 }}>{fmt(r.taxable)}</td>
-              <td className="r mono" style={{ fontSize: 11, color: 'var(--blue)' }}>{r.cgst > 0 ? fmt(r.cgst) : '—'}</td>
-              <td className="r mono" style={{ fontSize: 11, color: 'var(--teal)' }}>{r.sgst > 0 ? fmt(r.sgst) : '—'}</td>
-              <td className="r mono" style={{ fontSize: 11, color: 'var(--amber)' }}>{r.igst > 0 ? fmt(r.igst) : '—'}</td>
+              <td className="r mono" style={{ fontSize: 11, color: r.cgst > 0 ? 'var(--blue)' : 'var(--text4)' }}>{r.cgst > 0 ? fmt(r.cgst) : '—'}</td>
+              <td className="r mono" style={{ fontSize: 11, color: r.sgst > 0 ? 'var(--teal)' : 'var(--text4)' }}>{r.sgst > 0 ? fmt(r.sgst) : '—'}</td>
+              <td className="r mono" style={{ fontSize: 11, color: r.igst > 0 ? 'var(--amber)' : 'var(--text4)' }}>{r.igst > 0 ? fmt(r.igst) : '—'}</td>
               <td className="r mono" style={{ fontWeight: 600 }}>{fmt(r.cgst + r.sgst + r.igst)}</td>
             </tr>
           ))}
         </tbody>
         <tfoot>
           <tr style={{ fontWeight: 700, background: 'var(--bg3)', borderTop: '2px solid var(--border2)' }}>
-            <td colSpan={2} style={{ padding: '9px 16px', fontFamily: 'var(--mono)', fontSize: 11 }}>TOTAL</td>
+            <td colSpan={3} style={{ padding: '9px 16px', fontFamily: 'var(--mono)', fontSize: 11 }}>TOTAL</td>
             <td className="r mono" style={{ padding: '9px 16px' }}>{fmt(rows.reduce((s, r) => s + r.taxable, 0))}</td>
             <td className="r mono" style={{ padding: '9px 16px', color: 'var(--blue)' }}>{fmt(rows.reduce((s, r) => s + r.cgst, 0))}</td>
             <td className="r mono" style={{ padding: '9px 16px', color: 'var(--teal)' }}>{fmt(rows.reduce((s, r) => s + r.sgst, 0))}</td>
@@ -279,14 +418,15 @@ function HSNTable({ b2bInvoices, b2cInvoices, allItems }) {
 
   return (
     <div>
-      {/* Sub-toggle */}
       <div style={{ display: 'flex', gap: 4, marginBottom: 14 }}>
         {[
-          { id: 'b2b', label: `📋 B2B (${b2bRows.length} HSN${b2bRows.length !== 1 ? 's' : ''})`, accent: 'var(--accent)' },
-          { id: 'b2c', label: `🛒 B2C (${b2cRows.length} HSN${b2cRows.length !== 1 ? 's' : ''})`, accent: 'var(--green)' },
+          { id: 'b2b', label: `📋 B2B (${b2bRows.length} Items)`, accent: 'var(--accent)' },
+          { id: 'b2c', label: `🛒 B2C (${b2cRows.length} Items)`, accent: 'var(--green)' },
           { id: 'combined', label: `∑ Combined`, accent: 'var(--text2)' },
         ].map(m => (
-          <button key={m.id} onClick={() => setHsnMode(m.id)}
+          <button
+            key={m.id}
+            onClick={() => setHsnMode(m.id)}
             style={{
               padding: '5px 14px', borderRadius: 'var(--r)', border: '1px solid',
               borderColor: hsnMode === m.id ? 'var(--accent)' : 'var(--border2)',
@@ -294,7 +434,8 @@ function HSNTable({ b2bInvoices, b2cInvoices, allItems }) {
               color: hsnMode === m.id ? '#fff' : 'var(--text2)',
               cursor: 'pointer', fontSize: 12, fontFamily: 'var(--font)',
               fontWeight: hsnMode === m.id ? 600 : 400,
-            }}>
+            }}
+          >
             {m.label}
           </button>
         ))}
@@ -303,7 +444,7 @@ function HSNTable({ b2bInvoices, b2cInvoices, allItems }) {
       {hsnMode === 'b2b' && (
         <>
           <div style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 8 }}>
-            HSN-wise breakdown for <strong style={{ color: 'var(--accent)' }}>B2B invoices</strong> (parties with GSTIN) — {b2bInvoices.length} invoices
+            HSN-wise breakdown for <strong style={{ color: 'var(--accent)' }}>B2B invoices</strong>
           </div>
           <HSNGrid rows={b2bRows} label="B2B" accent="var(--accent)" />
         </>
@@ -311,7 +452,7 @@ function HSNTable({ b2bInvoices, b2cInvoices, allItems }) {
       {hsnMode === 'b2c' && (
         <>
           <div style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 8 }}>
-            HSN-wise breakdown for <strong style={{ color: 'var(--green)' }}>B2C invoices</strong> (unregistered parties) — {b2cInvoices.length} invoices
+            HSN-wise breakdown for <strong style={{ color: 'var(--green)' }}>B2C invoices</strong>
           </div>
           <HSNGrid rows={b2cRows} label="B2C" accent="var(--green)" />
         </>
@@ -319,7 +460,7 @@ function HSNTable({ b2bInvoices, b2cInvoices, allItems }) {
       {hsnMode === 'combined' && (
         <>
           <div style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 8 }}>
-            Combined HSN summary across all invoices — {b2bInvoices.length + b2cInvoices.length} invoices total
+            Combined HSN summary across all invoices
           </div>
           <HSNGrid rows={buildHSNRows([...b2bInvoices, ...b2cInvoices], allItems)} label="Combined" accent="var(--text1)" />
         </>
@@ -328,26 +469,29 @@ function HSNTable({ b2bInvoices, b2cInvoices, allItems }) {
   );
 }
 
-// ─── GST SUMMARY CARD ─────────────────────────────────────────────────────────
+// ─── GST SUMMARY CARDS ────────────────────────────────────────────────────────
 function GSTSummaryCards({ invoices }) {
   const totTaxable = invoices.reduce((s, r) => s + r.taxable, 0);
+  const totTaxable5 = invoices.reduce((s, r) => s + r.rateBreakdown.r5.taxable, 0);
+  const totTax5 = invoices.reduce((s, r) => s + r.rateBreakdown.r5.tax, 0);
+  const totTaxable18 = invoices.reduce((s, r) => s + r.rateBreakdown.r18.taxable, 0);
+  const totTax18 = invoices.reduce((s, r) => s + r.rateBreakdown.r18.tax, 0);
+
   const totCGST = invoices.reduce((s, r) => s + r.cgst, 0);
   const totSGST = invoices.reduce((s, r) => s + r.sgst, 0);
   const totIGST = invoices.reduce((s, r) => s + r.igst, 0);
   const totTax = totCGST + totSGST + totIGST;
-  const totInvoiced = invoices.reduce((s, r) => s + r.total, 0);
-  const b2bCount = invoices.filter(r => r.party?.gstin).length;
-  const b2cCount = invoices.filter(r => !r.party?.gstin).length;
 
   return (
     <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(6,1fr)', marginBottom: 20 }}>
       {[
-        { label: 'Total Invoices', value: invoices.length, sub: `B2B: ${b2bCount} · B2C: ${b2cCount}`, color: 'blue' },
-        { label: 'Taxable Value', value: fmt(totTaxable), color: 'blue' },
-        { label: 'CGST', value: fmt(totCGST), sub: 'Central GST', color: 'blue' },
-        { label: 'SGST', value: fmt(totSGST), sub: 'State GST', color: 'green' },
-        { label: 'IGST', value: fmt(totIGST), sub: 'Inter-state', color: 'amber' },
-        { label: 'Total Tax Liability', value: fmt(totTax), color: 'red' },
+        { label: 'Total Taxable', value: fmt(totTaxable), sub: `${invoices.length} invoices`, color: 'blue' },
+        { label: '5% Taxable Value', value: fmt(totTaxable5), sub: `Tax: ${fmt(totTax5)}`, color: 'blue' },
+        { label: '18% Taxable Value', value: fmt(totTaxable18), sub: `Tax: ${fmt(totTax18)}`, color: 'green' },
+        { label: 'Total CGST', value: fmt(totCGST), sub: 'Central GST', color: 'blue' },
+        { label: 'Total SGST', value: fmt(totSGST), sub: 'State GST', color: 'green' },
+        { label: 'Total IGST', value: fmt(totIGST), sub: 'Inter-state', color: 'amber' },
+        { label: 'Total Tax Liability', value: fmt(totTax), sub: 'CGST + SGST + IGST', color: 'red' },
       ].map((c, i) => (
         <div key={i} className={`stat-card ${c.color}`}>
           <div className="stat-label">{c.label}</div>
@@ -366,11 +510,21 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceIte
   const defaultPeriod = periods.find(p => p.value === currentMonth)?.value || periods[0]?.value;
   const [period, setPeriod] = useState(defaultPeriod);
   const [activeTab, setActiveTab] = useState('summary');
-  const [viewMode, setViewMode] = useState('invoice'); // 'invoice' | 'collections'
+  const [viewMode, setViewMode] = useState('invoice');
   const [selected, setSelected] = useState(() => new Set());
   const [marking, setMarking] = useState(false);
 
-  // Only sale invoices that are not draft/cancelled/proforma
+  // Pre-build items lookup: invoice_id -> items[]
+  const allItems = useMemo(() => {
+    const map = {};
+    (invoiceItems || []).forEach(it => {
+      if (!map[it.invoice_id]) map[it.invoice_id] = [];
+      map[it.invoice_id].push(it);
+    });
+    return map;
+  }, [invoiceItems]);
+
+  // Eligible sales invoices
   const eligibleInvoices = useMemo(() =>
     invoices.filter(inv => {
       const bizMatch = activeBiz ? inv.business_id === activeBiz : true;
@@ -384,32 +538,18 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceIte
     const filtered = viewMode === 'collections'
       ? filterByPaymentDate(eligibleInvoices, payments, period)
       : filterByPeriod(eligibleInvoices, period);
-    return filtered.map(inv => enrichInvoice(inv, parties));
-  }, [eligibleInvoices, period, parties, viewMode, payments]);
+    return filtered.map(inv => enrichInvoice(inv, parties, allItems));
+  }, [eligibleInvoices, period, parties, viewMode, payments, allItems]);
 
-  // Build items lookup: invoice_id -> items[]
-  const allItems = useMemo(() => {
-    const map = {};
-    (invoiceItems || []).forEach(it => {
-      if (!map[it.invoice_id]) map[it.invoice_id] = [];
-      map[it.invoice_id].push(it);
-    });
-    return map;
-  }, [invoiceItems]);
-
-  // Split into B2B and B2C
   const b2bInvoices = periodInvoices.filter(r => r.party?.gstin);
   const b2cInvoices = periodInvoices.filter(r => !r.party?.gstin);
 
-  // Every eligible invoice, any period, not yet marked GST-filed — this is
-  // the "what have I missed" view, independent of whichever month happens
-  // to be selected above, since a missed one could be from any past period.
   const unfiledInvoices = useMemo(() =>
     eligibleInvoices
       .filter(inv => !inv.gst_filed)
-      .map(inv => enrichInvoice(inv, parties))
+      .map(inv => enrichInvoice(inv, parties, allItems))
       .sort((a, b) => new Date(a.issue_date) - new Date(b.issue_date)),
-    [eligibleInvoices, parties]
+    [eligibleInvoices, parties, allItems]
   );
 
   function toggleSelected(id) {
@@ -419,6 +559,7 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceIte
       return next;
     });
   }
+
   function toggleSelectAll(rows) {
     setSelected(prev => {
       const allSelected = rows.length > 0 && rows.every(r => prev.has(r.id));
@@ -426,6 +567,7 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceIte
       return new Set(rows.map(r => r.id));
     });
   }
+
   async function markSelected(filed) {
     const ids = Array.from(selected);
     if (!ids.length) return;
@@ -437,6 +579,7 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceIte
     } catch (e) { alert(e.message); }
     setMarking(false);
   }
+
   async function markAllInPeriod() {
     const ids = periodInvoices.filter(r => !r.gst_filed).map(r => r.id);
     if (!ids.length) return;
@@ -449,16 +592,31 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceIte
     setMarking(false);
   }
 
-  // Selected business name for header
   const bizName = activeBiz ? businesses.find(b => b.id === activeBiz)?.name : 'All Businesses';
   const selectedPeriodLabel = periods.find(p => p.value === period)?.label || period;
 
   function exportCSV(rows, filename) {
-    const headers = ['Invoice #', 'Date', 'Party', 'GSTIN', 'State', 'Taxable', 'CGST', 'SGST', 'IGST', 'Total'];
+    const headers = [
+      'Invoice #', 'Date', 'Party', 'GSTIN', 'State', 'Type',
+      'Total Taxable', '5% Taxable', '5% Tax', '18% Taxable', '18% Tax',
+      'CGST', 'SGST', 'IGST', 'Total'
+    ];
     const lines = rows.map(r => [
-      r.invoice_number, r.issue_date, r.party?.name || '', r.party?.gstin || '',
-      r.party?.state || '', r.taxable.toFixed(2), r.cgst.toFixed(2),
-      r.sgst.toFixed(2), r.igst.toFixed(2), r.total.toFixed(2)
+      r.invoice_number,
+      r.issue_date,
+      r.party?.name || '',
+      r.party?.gstin || '',
+      r.party?.state || '',
+      r.isIntra ? 'Intra' : 'Inter',
+      r.taxable.toFixed(2),
+      r.rateBreakdown.r5.taxable.toFixed(2),
+      r.rateBreakdown.r5.tax.toFixed(2),
+      r.rateBreakdown.r18.taxable.toFixed(2),
+      r.rateBreakdown.r18.tax.toFixed(2),
+      r.cgst.toFixed(2),
+      r.sgst.toFixed(2),
+      r.igst.toFixed(2),
+      r.total.toFixed(2)
     ]);
     const csv = [headers, ...lines].map(row => row.map(v => `"${v}"`).join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
@@ -492,23 +650,28 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceIte
             </div>
           )}
         </div>
-        {/* Mode toggle */}
+
         <div style={{ display: 'flex', borderRadius: 'var(--r)', border: '1px solid var(--border2)', overflow: 'hidden', fontSize: 12 }}>
           {[
             { id: 'invoice', label: '📄 Invoice Date', title: 'GST compliance view — invoices raised in this period' },
             { id: 'collections', label: '💰 Collected', title: 'Cash flow view — invoices paid in this period' },
           ].map(m => (
-            <button key={m.id} onClick={() => setViewMode(m.id)} title={m.title}
+            <button
+              key={m.id}
+              onClick={() => setViewMode(m.id)}
+              title={m.title}
               style={{
                 padding: '6px 12px', border: 'none', cursor: 'pointer', fontFamily: 'var(--font)',
                 background: viewMode === m.id ? 'var(--accent)' : 'var(--bg2)',
                 color: viewMode === m.id ? '#fff' : 'var(--text2)',
                 fontWeight: viewMode === m.id ? 600 : 400,
-              }}>
+              }}
+            >
               {m.label}
             </button>
           ))}
         </div>
+
         <select
           value={period}
           onChange={e => setPeriod(e.target.value)}
@@ -516,6 +679,7 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceIte
         >
           {periods.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
         </select>
+
         <button
           className="btn btn-ghost btn-sm"
           onClick={() => exportCSV(b2bInvoices, `GSTR1-B2B-${period}.csv`)}
@@ -549,38 +713,72 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceIte
       {activeTab === 'summary' && (
         <div>
           {periodInvoices.length === 0 ? (
-            <EmptyState icon="📊" message={viewMode === 'collections' ? `No payments received in ${selectedPeriodLabel}` : `No invoices for ${selectedPeriodLabel}`} sub={viewMode === 'collections' ? 'Payments recorded against invoices in this period will appear here' : 'Ensure invoices are saved with status sent/paid/partially_paid — drafts are excluded'} />
+            <EmptyState
+              icon="📊"
+              message={viewMode === 'collections' ? `No payments received in ${selectedPeriodLabel}` : `No invoices for ${selectedPeriodLabel}`}
+              sub={viewMode === 'collections' ? 'Payments recorded against invoices in this period will appear here' : 'Ensure invoices are saved with status sent/paid/partially_paid — drafts are excluded'}
+            />
           ) : (
             <div>
-              {/* State-wise breakdown */}
-              <div className="section-title" style={{ marginTop: 0 }}>State-wise GST Breakdown</div>
+              {/* State-wise breakdown with 5% and 18% splits */}
+              <div className="section-title" style={{ marginTop: 0 }}>State-wise GST Breakdown (with 5% &amp; 18% splits)</div>
               <div className="table-wrap" style={{ marginBottom: 16 }}>
                 <table>
-                  <thead><tr>
-                    <th>State</th><th>State Code</th><th className="r">Invoices</th>
-                    <th className="r">Taxable</th><th className="r">CGST</th><th className="r">SGST</th><th className="r">IGST</th><th className="r">Total Tax</th>
-                  </tr></thead>
+                  <thead>
+                    <tr>
+                      <th>State</th>
+                      <th>Code</th>
+                      <th className="r">Invoices</th>
+                      <th className="r">Total Taxable</th>
+                      <th className="r" style={{ color: 'var(--blue)' }}>5% Taxable</th>
+                      <th className="r" style={{ color: 'var(--teal)' }}>18% Taxable</th>
+                      <th className="r">CGST</th>
+                      <th className="r">SGST</th>
+                      <th className="r">IGST</th>
+                      <th className="r">Total Tax</th>
+                    </tr>
+                  </thead>
                   <tbody>
                     {(() => {
                       const stateMap = {};
                       periodInvoices.forEach(r => {
                         const state = r.party?.state || 'Unknown';
-                        if (!stateMap[state]) stateMap[state] = { state, count: 0, taxable: 0, cgst: 0, sgst: 0, igst: 0 };
+                        if (!stateMap[state]) {
+                          stateMap[state] = {
+                            state,
+                            count: 0,
+                            taxable: 0,
+                            taxable5: 0,
+                            taxable18: 0,
+                            cgst: 0,
+                            sgst: 0,
+                            igst: 0
+                          };
+                        }
                         stateMap[state].count++;
                         stateMap[state].taxable += r.taxable;
+                        stateMap[state].taxable5 += r.rateBreakdown.r5.taxable;
+                        stateMap[state].taxable18 += r.rateBreakdown.r18.taxable;
                         stateMap[state].cgst += r.cgst;
                         stateMap[state].sgst += r.sgst;
                         stateMap[state].igst += r.igst;
                       });
+
                       return Object.values(stateMap).sort((a, b) => b.taxable - a.taxable).map((g, i) => (
                         <tr key={i}>
                           <td style={{ fontWeight: 500 }}>{g.state}</td>
                           <td className="mono" style={{ fontSize: 11, color: 'var(--text3)' }}>{STATE_CODES[g.state] || '—'}</td>
                           <td className="r mono" style={{ fontSize: 11 }}>{g.count}</td>
                           <td className="r mono" style={{ fontSize: 11 }}>{fmt(g.taxable)}</td>
-                          <td className="r mono" style={{ fontSize: 11, color: 'var(--blue)' }}>{g.cgst > 0 ? fmt(g.cgst) : '—'}</td>
-                          <td className="r mono" style={{ fontSize: 11, color: 'var(--teal)' }}>{g.sgst > 0 ? fmt(g.sgst) : '—'}</td>
-                          <td className="r mono" style={{ fontSize: 11, color: 'var(--amber)' }}>{g.igst > 0 ? fmt(g.igst) : '—'}</td>
+                          <td className="r mono" style={{ fontSize: 11, color: g.taxable5 > 0 ? 'var(--blue)' : 'var(--text4)' }}>
+                            {g.taxable5 > 0 ? fmt(g.taxable5) : '—'}
+                          </td>
+                          <td className="r mono" style={{ fontSize: 11, color: g.taxable18 > 0 ? 'var(--teal)' : 'var(--text4)' }}>
+                            {g.taxable18 > 0 ? fmt(g.taxable18) : '—'}
+                          </td>
+                          <td className="r mono" style={{ fontSize: 11, color: g.cgst > 0 ? 'var(--blue)' : 'var(--text4)' }}>{g.cgst > 0 ? fmt(g.cgst) : '—'}</td>
+                          <td className="r mono" style={{ fontSize: 11, color: g.sgst > 0 ? 'var(--teal)' : 'var(--text4)' }}>{g.sgst > 0 ? fmt(g.sgst) : '—'}</td>
+                          <td className="r mono" style={{ fontSize: 11, color: g.igst > 0 ? 'var(--amber)' : 'var(--text4)' }}>{g.igst > 0 ? fmt(g.igst) : '—'}</td>
                           <td className="r mono" style={{ fontWeight: 600 }}>{fmt(g.cgst + g.sgst + g.igst)}</td>
                         </tr>
                       ));
@@ -593,13 +791,18 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceIte
               <div className="section-title">Rate-wise GST Breakdown</div>
               <div className="table-wrap">
                 <table>
-                  <thead><tr>
-                    <th>GST Rate</th><th className="r">Taxable Value</th>
-                    <th className="r">CGST</th><th className="r">SGST</th><th className="r">IGST</th><th className="r">Total Tax</th>
-                  </tr></thead>
+                  <thead>
+                    <tr>
+                      <th>GST Rate</th>
+                      <th className="r">Taxable Value</th>
+                      <th className="r">CGST</th>
+                      <th className="r">SGST</th>
+                      <th className="r">IGST</th>
+                      <th className="r">Total Tax</th>
+                    </tr>
+                  </thead>
                   <tbody>
                     {(() => {
-                      // We need invoice items to get rate-wise breakdown
                       const rateMap = {};
                       periodInvoices.forEach(inv => {
                         const items = allItems[inv.id] || [];
@@ -614,22 +817,30 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceIte
                             rateMap[key].igst += Number(it.igst_amount || 0);
                           });
                         } else {
-                          // Fallback: use invoice-level amounts
-                          const key = 'Mixed';
-                          if (!rateMap[key]) rateMap[key] = { rate: null, taxable: 0, cgst: 0, sgst: 0, igst: 0 };
-                          rateMap[key].taxable += inv.taxable;
-                          rateMap[key].cgst += inv.cgst;
-                          rateMap[key].sgst += inv.sgst;
-                          rateMap[key].igst += inv.igst;
+                          ['r5', 'r18', 'other'].forEach(bucketKey => {
+                            const bucket = inv.rateBreakdown[bucketKey];
+                            if (bucket.taxable > 0) {
+                              const rate = bucketKey === 'r5' ? 5 : bucketKey === 'r18' ? 18 : null;
+                              const key = rate !== null ? `${rate}%` : 'Mixed';
+                              if (!rateMap[key]) rateMap[key] = { rate, taxable: 0, cgst: 0, sgst: 0, igst: 0 };
+                              rateMap[key].taxable += bucket.taxable;
+                              rateMap[key].cgst += bucket.cgst;
+                              rateMap[key].sgst += bucket.sgst;
+                              rateMap[key].igst += bucket.igst;
+                            }
+                          });
                         }
                       });
+
                       return Object.values(rateMap).sort((a, b) => (a.rate || 0) - (b.rate || 0)).map((g, i) => (
                         <tr key={i}>
-                          <td style={{ fontWeight: 600 }}>{g.rate !== null ? `${g.rate}%` : 'Mixed'}</td>
+                          <td style={{ fontWeight: 600, color: g.rate === 5 ? 'var(--blue)' : g.rate === 18 ? 'var(--teal)' : 'inherit' }}>
+                            {g.rate !== null ? `${g.rate}%` : 'Mixed'}
+                          </td>
                           <td className="r mono" style={{ fontSize: 11 }}>{fmt(g.taxable)}</td>
-                          <td className="r mono" style={{ fontSize: 11, color: 'var(--blue)' }}>{g.cgst > 0 ? fmt(g.cgst) : '—'}</td>
-                          <td className="r mono" style={{ fontSize: 11, color: 'var(--teal)' }}>{g.sgst > 0 ? fmt(g.sgst) : '—'}</td>
-                          <td className="r mono" style={{ fontSize: 11, color: 'var(--amber)' }}>{g.igst > 0 ? fmt(g.igst) : '—'}</td>
+                          <td className="r mono" style={{ fontSize: 11, color: g.cgst > 0 ? 'var(--blue)' : 'var(--text4)' }}>{g.cgst > 0 ? fmt(g.cgst) : '—'}</td>
+                          <td className="r mono" style={{ fontSize: 11, color: g.sgst > 0 ? 'var(--teal)' : 'var(--text4)' }}>{g.sgst > 0 ? fmt(g.sgst) : '—'}</td>
+                          <td className="r mono" style={{ fontSize: 11, color: g.igst > 0 ? 'var(--amber)' : 'var(--text4)' }}>{g.igst > 0 ? fmt(g.igst) : '—'}</td>
                           <td className="r mono" style={{ fontWeight: 600 }}>{fmt(g.cgst + g.sgst + g.igst)}</td>
                         </tr>
                       ));
@@ -654,8 +865,10 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceIte
           <B2BTable rows={b2bInvoices} selected={selected} onToggle={toggleSelected} onToggleAll={toggleSelectAll} />
         </div>
       )}
-      {activeTab === 'b2c' && <B2CTable rows={b2cInvoices} />}
+
+      {activeTab === 'b2c' && <B2CTable rows={b2cInvoices} allItems={allItems} />}
       {activeTab === 'hsn' && <HSNTable b2bInvoices={b2bInvoices} b2cInvoices={b2cInvoices} allItems={allItems} />}
+
       {activeTab === 'unfiled' && (
         <div>
           <div style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 10 }}>
@@ -672,15 +885,22 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceIte
           ) : (
             <div className="table-wrap">
               <table>
-                <thead><tr>
-                  <th style={{ width: 30 }}>
-                    <input type="checkbox"
-                      checked={unfiledInvoices.every(r => selected.has(r.id))}
-                      ref={el => { if (el) el.indeterminate = selected.size > 0 && !unfiledInvoices.every(r => selected.has(r.id)); }}
-                      onChange={() => toggleSelectAll(unfiledInvoices)} />
-                  </th>
-                  <th>Invoice #</th><th>Date</th><th>Period</th><th>Party</th><th className="r">Total</th><th>Actions</th>
-                </tr></thead>
+                <thead>
+                  <tr>
+                    <th style={{ width: 30 }}>
+                      <input
+                        type="checkbox"
+                        checked={unfiledInvoices.every(r => selected.has(r.id))}
+                        ref={el => { if (el) el.indeterminate = selected.size > 0 && !unfiledInvoices.every(r => selected.has(r.id)); }}
+                        onChange={() => toggleSelectAll(unfiledInvoices)}
+                      />
+                    </th>
+                    <th>Invoice #</th><th>Date</th><th>Period</th><th>Party</th>
+                    <th className="r">5% Taxable</th>
+                    <th className="r">18% Taxable</th>
+                    <th className="r">Total</th><th>Actions</th>
+                  </tr>
+                </thead>
                 <tbody>
                   {unfiledInvoices.map(r => (
                     <tr key={r.id}>
@@ -689,8 +909,22 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceIte
                       <td className="mono" style={{ fontSize: 11 }}>{fmtDate(r.issue_date)}</td>
                       <td className="mono" style={{ fontSize: 11, color: 'var(--text3)' }}>{r.issue_date?.slice(0, 7)}</td>
                       <td style={{ fontWeight: 500 }}>{r.party?.name || '—'}</td>
+                      <td className="r mono" style={{ fontSize: 11, color: 'var(--blue)' }}>
+                        {r.rateBreakdown.r5.taxable > 0 ? fmt(r.rateBreakdown.r5.taxable) : '—'}
+                      </td>
+                      <td className="r mono" style={{ fontSize: 11, color: 'var(--teal)' }}>
+                        {r.rateBreakdown.r18.taxable > 0 ? fmt(r.rateBreakdown.r18.taxable) : '—'}
+                      </td>
                       <td className="r mono" style={{ fontWeight: 600 }}>{fmt(r.total)}</td>
-                      <td><button className="btn btn-ghost btn-sm" disabled={marking} onClick={() => markGSTFiled([r.id], true, r.issue_date?.slice(0, 7)).then(() => reload?.())}>✓ Mark Filed</button></td>
+                      <td>
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          disabled={marking}
+                          onClick={() => markGSTFiled([r.id], true, r.issue_date?.slice(0, 7)).then(() => reload?.())}
+                        >
+                          ✓ Mark Filed
+                        </button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
