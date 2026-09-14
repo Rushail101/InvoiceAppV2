@@ -16,7 +16,7 @@ import { GSTR1View } from './views/GSTR1.jsx';
 import { ItemsView } from './views/Items.jsx';
 import { DeliveryChallansView } from './views/DeliveryChallans.jsx';
 import { DebitNotesView } from './views/DebitNotes.jsx';
-import { GSTR2BView, GSTR3BView, InventoryView, WarehousesView, OrdersView, QuotationsView, GRNView, AuditTrailView, UsersRolesView, ProductionView, CostCentresView, KPIDashboard } from './views/EnterpriseViews.jsx';
+import { GSTR2BView, GSTR3BView, InventoryView, WarehousesView, OrdersView, QuotationsView, GRNView, AuditTrailView, UsersRolesView, ProductionView, CostCentresView, GSTAmendmentsView, AutomationExceptionsView, KPIDashboard } from './views/EnterpriseViews.jsx';
 import { Badge, ModalShell, FG, EmptyState } from './components/ui.jsx';
 
 // Optional/advanced screens remain hidden from nav; core sales documents
@@ -54,6 +54,7 @@ const NAV = [
   { id: 'gstr1',       label: 'GSTR-1',            icon: '🧾',  group: 'GST' },
   { id: 'gstr2b',      label: 'GSTR-2B',           icon: '🔗',  group: 'GST' },
   { id: 'gstr3b',      label: 'GSTR-3B',           icon: '🧮',  group: 'GST' },
+  { id: 'gstramend',   label: 'GST Amendments',     icon: '✎',   group: 'GST' },
   { id: 'inventory',   label: 'Inventory',          icon: '📦',  group: 'Operations' },
   { id: 'warehouses',  label: 'Warehouses',         icon: '🏭',  group: 'Operations' },
   { id: 'quotations',  label: 'Quotations',         icon: '📝',  group: 'Sales' },
@@ -65,6 +66,7 @@ const NAV = [
   { id: 'audit',       label: 'Audit Trail',        icon: '🛡',  group: 'Settings' },
   { id: 'users',       label: 'Users & Roles',      icon: '👤',  group: 'Settings' },
   { id: 'kpis',        label: 'Management KPIs',    icon: '📊',  group: 'Analysis' },
+  { id: 'exceptions',  label: 'Automation Exceptions', icon: '⚠', group: 'Analysis' },
   { id: 'businesses',  label: 'Businesses',        icon: '🏢',  group: 'Settings' },
   { id: 'export',      label: 'Export Data',       icon: '↓',   group: 'Settings' },
   { id: 'sqlsetup',    label: 'SQL Setup',         icon: '⚙',   group: 'Settings' },
@@ -1270,17 +1272,19 @@ export default function App() {
             )}
             {!loading && view === 'gstr2b' && <GSTR2BView activeBiz={activeBiz} invoices={invoices} parties={parties} reload={reload} />}
             {!loading && view === 'gstr3b' && <GSTR3BView activeBiz={activeBiz} invoices={invoices} creditNotes={creditNotes} reload={reload} />}
+            {!loading && view === 'gstramend' && <GSTAmendmentsView activeBiz={activeBiz} invoices={invoices} reload={reload} />}
             {!loading && view === 'inventory' && <InventoryView activeBiz={activeBiz} items={items} reload={reload} />}
             {!loading && view === 'warehouses' && <WarehousesView activeBiz={activeBiz} reload={reload} />}
             {!loading && view === 'quotations' && <QuotationsView activeBiz={activeBiz} parties={parties} items={items} reload={reload} />}
             {!loading && view === 'salesorders' && <OrdersView activeBiz={activeBiz} parties={parties} items={items} type="sales" reload={reload} />}
             {!loading && view === 'purchaseorders' && <OrdersView activeBiz={activeBiz} parties={parties} items={items} type="purchase" reload={reload} />}
-            {!loading && view === 'grn' && <GRNView activeBiz={activeBiz} parties={parties} reload={reload} />}
+            {!loading && view === 'grn' && <GRNView activeBiz={activeBiz} parties={parties} items={items} reload={reload} />}
             {!loading && view === 'production' && <ProductionView activeBiz={activeBiz} items={items} reload={reload} />}
             {!loading && view === 'costcentres' && <CostCentresView activeBiz={activeBiz} reload={reload} />}
             {!loading && view === 'audit' && <AuditTrailView activeBiz={activeBiz} />}
             {!loading && view === 'users' && <UsersRolesView activeBiz={activeBiz} businesses={businesses} />}
             {!loading && view === 'kpis' && <KPIDashboard activeBiz={activeBiz} invoices={invoices} expenses={expenses} payments={payments} parties={parties} />}
+            {!loading && view === 'exceptions' && <AutomationExceptionsView activeBiz={activeBiz} reload={reload} />}
             {!loading && view === 'businesses' && <BusinessesView businesses={businesses} reload={reload} />}
             {!loading && view === 'sqlsetup' && <SqlSetupView invoices={invoices} payments={payments} />}
           </div>

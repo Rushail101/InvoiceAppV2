@@ -47,3 +47,10 @@ For a production deployment, enable Supabase Auth and run `auth_rls_phase12.sql`
 
 ## Phase completion
 Phases 1–16 are represented in this build: accounting/automation, purchase GST/ITC, GSTR-2B/3B review, inventory/item master, PO/GRN, quotations/sales orders, GST amendments staging, audit trail, Auth/RLS hardening, warehouses, production, cost centres/projects, and management KPIs. GST filing remains a human review/submission step; the ERP does not call paid AI or external filing APIs.
+
+## Final 16-phase implementation
+
+The final source bundle includes the application wiring for the enterprise phases and the deterministic automation layer. `FINAL_ACCOUNTS_ERP_PATCH.sql` is the small incremental SQL patch intended for the already-migrated `accounts_erp` database; it does not drop tables, truncate data, or delete records.
+
+### GitHub
+Do **not** commit `node_modules/` or `dist/`. Run `npm install` after cloning and use `npm run build` for a production build. A `.gitignore` is included for this.
