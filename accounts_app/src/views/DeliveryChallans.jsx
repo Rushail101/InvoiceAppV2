@@ -34,7 +34,12 @@ function calcItem(it, isIntrastate, priceMode = 'exclusive') {
   return { ...it, base, discAmt, taxable, cgst, sgst, igst, lineTotal };
 }
 
-const PURPOSES = ['Supply of Goods', 'Job Work', 'Loan / Exhibition', 'Return of Goods', 'Others'];
+// "Supply of Goods" is a genuinely narrow exception under Rule 55 — a
+// challan is a goods-movement document, not a tax document, and normal
+// sales must be covered by a tax invoice (Sec 31 CGST Act). Labelled
+// explicitly so it isn't reached for as a default/easy option in place of
+// raising an invoice.
+const PURPOSES = ['Job Work', 'Loan / Exhibition', 'Return of Goods', 'Sale — tax invoice not yet raised (reconcile ASAP)', 'Others'];
 const TRANSPORT_MODES = ['Road', 'Rail', 'Air', 'Ship / Waterways'];
 
 // ─── CHALLAN MODAL ─────────────────────────────────────────────────────────────
@@ -44,10 +49,11 @@ function ChallanModal({ onClose, onSave, businesses, parties, allChallans, invoi
     party_id: editData?.party_id || '',
     challan_number: editData?.challan_number || nextChallanNum(allChallans),
     challan_date: editData?.challan_date || today(),
-    purpose: editData?.purpose || 'Supply of Goods',
+    purpose: editData?.purpose || 'Job Work',
     vehicle_number: editData?.vehicle_number || '',
     transport_mode: editData?.transport_mode || 'Road',
     lr_number: editData?.lr_number || '',
+    eway_bill_number: editData?.eway_bill_number || '',
     driver_name: editData?.driver_name || '',
     dispatch_from: editData?.dispatch_from || '',
     dispatch_to: editData?.dispatch_to || '',
@@ -157,10 +163,16 @@ function ChallanModal({ onClose, onSave, businesses, parties, allChallans, invoi
         </FG>
         <FG label="Purpose">
           <select value={f.purpose} onChange={e => setF(p => ({ ...p, purpose: e.target.value }))}>
+            {!PURPOSES.includes(f.purpose) && <option value={f.purpose}>{f.purpose} (legacy)</option>}
             {PURPOSES.map(pu => <option key={pu} value={pu}>{pu}</option>)}
           </select>
         </FG>
       </div>
+      {(f.purpose === 'Sale — tax invoice not yet raised (reconcile ASAP)' || f.purpose === 'Supply of Goods') && (
+        <div style={{ fontSize: 11, color: 'var(--amber)', marginBottom: 12, background: '#1e1400', border: '1px solid #3a2e00', borderRadius: 6, padding: '8px 10px' }}>
+          ⚠ A delivery challan isn't a tax document — this goods movement isn't reported to GSTN until a tax invoice is raised. If this is an actual sale, raise the invoice now (or right after) and link it below.
+        </div>
+      )}
 
       {/* ── Transport Details ── */}
       <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 8, padding: '12px 14px', marginBottom: 14 }}>
@@ -193,6 +205,12 @@ function ChallanModal({ onClose, onSave, businesses, parties, allChallans, invoi
           <FG label="Dispatch To">
             <input placeholder="City / Place" value={f.dispatch_to}
               onChange={e => setF(p => ({ ...p, dispatch_to: e.target.value }))} />
+          </FG>
+        </div>
+        <div className="form-row cols-3">
+          <FG label="E-Way Bill Number">
+            <input placeholder="Generated on the e-way bill portal" value={f.eway_bill_number}
+              onChange={e => setF(p => ({ ...p, eway_bill_number: e.target.value }))} />
           </FG>
         </div>
       </div>
