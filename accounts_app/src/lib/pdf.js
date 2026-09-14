@@ -142,6 +142,7 @@ tbody tr:nth-child(even) td{background:#fafafa}
     ${isPF ? '<div class="sub">Not valid for GST input credit</div>' : ''}
     ${isCN ? '<div class="sub">Credit Note</div>' : ''}
     ${isIntrastate ? '<div class="sub" style="color:#1a3a8a">Intra-state supply · CGST + SGST</div>' : '<div class="sub" style="color:#7a4500">Inter-state supply · IGST</div>'}
+    ${invoice.reverse_charge ? '<div class="sub" style="color:#b00;font-weight:700">Tax Payable on Reverse Charge Basis</div>' : ''}
   </div>
 </div>
 
@@ -457,6 +458,7 @@ tbody tr:nth-child(even) td{background:#fafafa}
     <div class="tf"><div class="lbl">Driver Name</div><div class="val">${challan.driver_name || '—'}</div></div>
     <div class="tf"><div class="lbl">Dispatched From</div><div class="val">${challan.dispatch_from || '—'}</div></div>
     <div class="tf"><div class="lbl">Dispatch To</div><div class="val">${challan.dispatch_to || '—'}</div></div>
+    <div class="tf"><div class="lbl">E-Way Bill No.</div><div class="val">${challan.eway_bill_number || '—'}</div></div>
   </div>
 </div>
 
