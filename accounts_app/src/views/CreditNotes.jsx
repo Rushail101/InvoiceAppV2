@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { fmt, fmtDate, today, GST_RATES, gstType, calcLineTax, nextCNNum } from '../lib/constants.js';
+import { fmt, fmtDate, today, GST_RATES, gstType, calcLineTax, nextCNNum, getFYForDate, creditNoteDeadline } from '../lib/constants.js';
 import { saveCreditNote } from '../lib/db.js';
 import { printInvoice } from '../lib/pdf.js';
 import { Badge, ModalShell, FG, EmptyState } from '../components/ui.jsx';
@@ -19,6 +19,7 @@ export function CreditNoteModal({ onClose, onSave, businesses, parties, invoices
     cn_date: today(),
     reason: '',
     notes: '',
+    note_type: 'tax',
   });
   const [items, setItems] = useState([{ description: '', hsn_code: '', quantity: 1, unit_price: 0, tax_percent: 5 }]);
   const [busy, setBusy] = useState(false);
@@ -39,19 +40,38 @@ export function CreditNoteModal({ onClose, onSave, businesses, parties, invoices
 
   function upd(idx, field, val) { setItems(prev => prev.map((it, i) => i !== idx ? it : { ...it, [field]: val })); }
 
+  const linkedInvoice = invoices.find(i => i.id === f.invoice_id) || null;
+  const deadline = linkedInvoice?.issue_date
+    ? creditNoteDeadline(getFYForDate(linkedInvoice.issue_date))
+    : null;
+  const pastDeadline = deadline && f.cn_date > deadline;
+
   async function save() {
     if (!f.party_id) { setErr('Select a party'); return; }
+    if (f.note_type === 'tax' && !f.invoice_id) {
+      setErr('A tax credit note must reference the original invoice (Rule 53) — pick one, or switch to "Commercial / goodwill" if this isn\'t adjusting GST liability.');
+      return;
+    }
+    if (f.note_type === 'tax' && pastDeadline) {
+      setErr(`This is past the ${deadline} deadline to adjust GST liability for an invoice from FY ${getFYForDate(linkedInvoice.issue_date)} (Sec 34(2)) — it can still be issued, but won't be valid for reducing output tax. Switch to "Commercial / goodwill" instead.`);
+      return;
+    }
     const validItems = calc.filter(i => i.description?.trim());
     if (!validItems.length) { setErr('Add at least one item'); return; }
     setErr(''); setBusy(true);
     try {
+      const isTax = f.note_type === 'tax';
       const cnData = {
         ...f,
         subtotal,
-        cgst_amount: totalCGST,
-        sgst_amount: totalSGST,
-        igst_amount: totalIGST,
-        total: grand,
+        // A commercial/goodwill note doesn't adjust GST output liability —
+        // only a genuine reduction in the value of the original supply does
+        // (Sec 15(3)(b)). Save it with zero tax so it never gets picked up
+        // as a GST-reducing adjustment downstream.
+        cgst_amount: isTax ? totalCGST : 0,
+        sgst_amount: isTax ? totalSGST : 0,
+        igst_amount: isTax ? totalIGST : 0,
+        total: isTax ? grand : subtotal,
         is_interstate: !isIntrastate,
         status: 'issued',
       };
@@ -61,10 +81,10 @@ export function CreditNoteModal({ onClose, onSave, businesses, parties, invoices
         quantity: Number(it.quantity),
         unit_price: Number(it.unit_price),
         tax_percent: Number(it.tax_percent),
-        cgst_amount: it.cgst,
-        sgst_amount: it.sgst,
-        igst_amount: it.igst,
-        amount: it.lineTotal,
+        cgst_amount: isTax ? it.cgst : 0,
+        sgst_amount: isTax ? it.sgst : 0,
+        igst_amount: isTax ? it.igst : 0,
+        amount: isTax ? it.lineTotal : it.taxable,
       }));
       await onSave(cnData, itemRows);
       onClose();
@@ -85,10 +105,29 @@ export function CreditNoteModal({ onClose, onSave, businesses, parties, invoices
       </div>
 
       <div className="form-row cols-3">
+        <FG label="Type">
+          <select value={f.note_type} onChange={e => setF(x => ({ ...x, note_type: e.target.value }))}>
+            <option value="tax">Tax — reduces GST liability</option>
+            <option value="commercial">Commercial / goodwill — no GST impact</option>
+          </select>
+        </FG>
         <FG label="Party *"><select value={f.party_id} onChange={e => setF(x => ({ ...x, party_id: e.target.value, invoice_id: '' }))}><option value="">Select…</option>{filteredParties.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></FG>
-        <FG label="Against Invoice (optional)"><select value={f.invoice_id} onChange={e => setF(x => ({ ...x, invoice_id: e.target.value }))}><option value="">None</option>{filteredInvoices.map(i => <option key={i.id} value={i.id}>{i.invoice_number} — {fmt(i.total)}</option>)}</select></FG>
+        <FG label={f.note_type === 'tax' ? 'Against Invoice *' : 'Against Invoice (optional)'}>
+          <select value={f.invoice_id} onChange={e => setF(x => ({ ...x, invoice_id: e.target.value }))}>
+            <option value="">{f.note_type === 'tax' ? 'Select…' : 'None'}</option>
+            {filteredInvoices.map(i => <option key={i.id} value={i.id}>{i.invoice_number} — {fmt(i.total)}</option>)}
+          </select>
+        </FG>
+      </div>
+      <div className="form-row cols-3">
         <FG label="Reason"><select value={f.reason} onChange={e => setF(x => ({ ...x, reason: e.target.value }))}><option value="">Select…</option>{['Goods returned', 'Price correction', 'Defective goods', 'Duplicate invoice', 'Discount post-sale', 'Other'].map(r => <option key={r} value={r}>{r}</option>)}</select></FG>
       </div>
+      {f.note_type === 'tax' && deadline && (
+        <div style={{ fontSize: 11, color: pastDeadline ? 'var(--red)' : 'var(--text3)', marginBottom: 10 }}>
+          {pastDeadline ? '⚠ ' : ''}Deadline to adjust GST liability for FY {getFYForDate(linkedInvoice.issue_date)} invoices: {deadline} (Sec 34(2)).
+          {pastDeadline ? ' This note is past that date — switch to "Commercial / goodwill" instead.' : ''}
+        </div>
+      )}
 
       <div className="section-title">Items Being Credited</div>
       <div className="line-items-head" style={{ gridTemplateColumns: '2fr 90px 70px 100px 60px 110px 28px' }}>
@@ -112,8 +151,17 @@ export function CreditNoteModal({ onClose, onSave, businesses, parties, invoices
 
       <div className="inv-totals">
         <p><span>Subtotal</span><span>{fmt(subtotal)}</span></p>
-        {isIntrastate ? <><p><span>CGST</span><span>{fmt(totalCGST)}</span></p><p><span>SGST</span><span>{fmt(totalSGST)}</span></p></> : <p><span>IGST</span><span>{fmt(totalIGST)}</span></p>}
-        <p className="grand"><span>Credit Total</span><span>{fmt(grand)}</span></p>
+        {f.note_type === 'tax' ? (
+          <>
+            {isIntrastate ? <><p><span>CGST</span><span>{fmt(totalCGST)}</span></p><p><span>SGST</span><span>{fmt(totalSGST)}</span></p></> : <p><span>IGST</span><span>{fmt(totalIGST)}</span></p>}
+            <p className="grand"><span>Credit Total</span><span>{fmt(grand)}</span></p>
+          </>
+        ) : (
+          <>
+            <p style={{ fontSize: 11, color: 'var(--text3)' }}><span>GST (not adjusted — commercial note)</span><span>—</span></p>
+            <p className="grand"><span>Credit Total</span><span>{fmt(subtotal)}</span></p>
+          </>
+        )}
       </div>
       {err && <p className="err-msg">{err}</p>}
     </ModalShell>
