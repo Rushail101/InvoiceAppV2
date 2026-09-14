@@ -164,7 +164,7 @@ const INV_COLS = [
   'business_id','party_id','invoice_number','type','status',
   'issue_date','due_date','notes','discount_percent','discount_amount',
   'subtotal','cgst_amount','sgst_amount','igst_amount','tax_amount',
-  'total','is_interstate','tds_amount','reverse_charge',
+  'total','is_interstate','tds_amount','reverse_charge','ship_to_address',
 ];
 
 function pickInvCols(data) {
