@@ -445,6 +445,77 @@ CREATE TABLE IF NOT EXISTS bank_transactions (
   created_at      timestamptz DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS delivery_challans (
+  id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id       uuid NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  party_id          uuid NOT NULL REFERENCES parties(id),
+  linked_invoice_id uuid REFERENCES invoices(id) ON DELETE SET NULL,
+  challan_number    text NOT NULL,
+  challan_date      date NOT NULL,
+  status            text NOT NULL DEFAULT 'draft'
+                    CHECK (status IN ('draft','dispatched','delivered','cancelled')),
+  purpose           text NOT NULL DEFAULT 'Supply of Goods',
+  transport_mode    text,
+  vehicle_number    text,
+  lr_number         text,
+  driver_name       text,
+  dispatch_from     text,
+  dispatch_to       text,
+  eway_bill_number  text,
+  subtotal          numeric(14,2) NOT NULL DEFAULT 0,
+  cgst_amount       numeric(14,2) NOT NULL DEFAULT 0,
+  sgst_amount       numeric(14,2) NOT NULL DEFAULT 0,
+  igst_amount       numeric(14,2) NOT NULL DEFAULT 0,
+  tax_amount        numeric(14,2) NOT NULL DEFAULT 0,
+  total             numeric(14,2) NOT NULL DEFAULT 0,
+  is_interstate     boolean NOT NULL DEFAULT false,
+  notes             text,
+  created_at        timestamptz NOT NULL DEFAULT now(),
+  updated_at        timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS delivery_challan_items (
+  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  challan_id       uuid NOT NULL REFERENCES delivery_challans(id) ON DELETE CASCADE,
+  description      text NOT NULL,
+  hsn_code         text,
+  unit             text NOT NULL DEFAULT 'Nos',
+  quantity         numeric(12,3) NOT NULL DEFAULT 0,
+  unit_price       numeric(14,2) NOT NULL DEFAULT 0,
+  discount_percent numeric(5,2)  NOT NULL DEFAULT 0,
+  tax_percent      numeric(5,2)  NOT NULL DEFAULT 0,
+  taxable_amount   numeric(14,2) NOT NULL DEFAULT 0,
+  cgst_amount      numeric(14,2) NOT NULL DEFAULT 0,
+  sgst_amount      numeric(14,2) NOT NULL DEFAULT 0,
+  igst_amount      numeric(14,2) NOT NULL DEFAULT 0,
+  amount           numeric(14,2) NOT NULL DEFAULT 0,
+  created_at       timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE OR REPLACE FUNCTION trg_set_updated_at()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS set_updated_at_delivery_challans ON delivery_challans;
+CREATE TRIGGER set_updated_at_delivery_challans
+  BEFORE UPDATE ON delivery_challans
+  FOR EACH ROW EXECUTE FUNCTION trg_set_updated_at();
+
+ALTER TABLE delivery_challans      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE delivery_challan_items ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "challans_all" ON delivery_challans;
+CREATE POLICY "challans_all" ON delivery_challans
+  FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "challan_items_all" ON delivery_challan_items;
+CREATE POLICY "challan_items_all" ON delivery_challan_items
+  FOR ALL USING (true) WITH CHECK (true);
+
 -- ── STEP 2: Migration — add missing columns to existing tables ─────────────────
 -- Safe to run on both new and old databases
 ALTER TABLE bank_transactions ADD COLUMN IF NOT EXISTS reconciled boolean DEFAULT false;
@@ -465,6 +536,11 @@ ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS cgst_amount      numeric(12,2
 ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS sgst_amount      numeric(12,2) DEFAULT 0;
 ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS igst_amount      numeric(12,2) DEFAULT 0;
 
+-- GST-filed tracking, so you can mark an invoice as filed and catch ones you miss
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS gst_filed        boolean DEFAULT false;
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS gst_filed_at     timestamptz;
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS gst_filed_period text;
+
 -- ── STEP 3: Indexes ────────────────────────────────────────────────────────────
 
 CREATE INDEX IF NOT EXISTS idx_invoices_business ON invoices(business_id);
@@ -481,6 +557,11 @@ CREATE INDEX IF NOT EXISTS idx_jlines_journal    ON journal_lines(journal_id);
 CREATE INDEX IF NOT EXISTS idx_jlines_account    ON journal_lines(account_id);
 CREATE INDEX IF NOT EXISTS idx_cn_invoice        ON credit_notes(invoice_id);
 CREATE INDEX IF NOT EXISTS idx_items_biz         ON items(business_id);
+CREATE INDEX IF NOT EXISTS idx_challans_party    ON delivery_challans(party_id);
+CREATE INDEX IF NOT EXISTS idx_challans_date     ON delivery_challans(challan_date DESC);
+CREATE INDEX IF NOT EXISTS idx_challans_linked_inv ON delivery_challans(linked_invoice_id) WHERE linked_invoice_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_challan_items_challan ON delivery_challan_items(challan_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uidx_challan_number ON delivery_challans(business_id, challan_number);
 
 -- ── STEP 4: Seed your first business (edit values, then uncomment & run) ───────
 
@@ -505,7 +586,18 @@ ALTER TABLE invoices ADD COLUMN IF NOT EXISTS tds_amount numeric(12,2) DEFAULT 0
 ALTER TABLE parties ADD COLUMN IF NOT EXISTS pan text;
 
 CREATE INDEX IF NOT EXISTS idx_jentries_source ON journal_entries(source, source_id);
-CREATE INDEX IF NOT EXISTS idx_expenses_journal ON expenses(journal_posted);`
+CREATE INDEX IF NOT EXISTS idx_expenses_journal ON expenses(journal_posted);
+
+-- ── STEP 6: Compliance fixes ──────────────────────────────────────────────────
+-- Before running the unique indexes below, check for existing duplicate
+-- invoice/CN numbers — see compliance_fixes_migration.sql for the check queries.
+
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS reverse_charge boolean DEFAULT false;
+ALTER TABLE credit_notes ADD COLUMN IF NOT EXISTS note_type text DEFAULT 'tax';
+ALTER TABLE delivery_challans ADD COLUMN IF NOT EXISTS eway_bill_number text;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uidx_invoices_number ON invoices(business_id, invoice_number);
+CREATE UNIQUE INDEX IF NOT EXISTS uidx_credit_notes_number ON credit_notes(business_id, cn_number);`
 
 function SqlSetupView({ invoices = [], payments = [] }) {
   const [copied, setCopied] = useState(false);
