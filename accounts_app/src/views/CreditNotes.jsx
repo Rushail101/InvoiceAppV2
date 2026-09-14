@@ -10,8 +10,8 @@ function calcCNItem(it, isIntrastate) {
   return { ...it, taxable, cgst, sgst, igst, lineTotal: taxable + cgst + sgst + igst };
 }
 
-export function CreditNoteModal({ onClose, onSave, businesses, parties, invoices, creditNotes, preInvoice }) {
-  const initialBizId = preInvoice?.business_id || businesses[0]?.id || '';
+export function CreditNoteModal({ onClose, onSave, businesses, parties, invoices, creditNotes, preInvoice, activeBiz }) {
+  const initialBizId = preInvoice?.business_id || activeBiz || businesses[0]?.id || '';
   const [f, setF] = useState({
     business_id: initialBizId,
     party_id: preInvoice?.party_id || '',
@@ -40,7 +40,7 @@ export function CreditNoteModal({ onClose, onSave, businesses, parties, invoices
   const partyObj = parties.find(p => p.id === f.party_id) || {};
   const isIntrastate = gstType(bizObj.state, partyObj.state) === 'intrastate';
   const filteredParties = parties.filter(p => p.business_id === f.business_id);
-  const filteredInvoices = invoices.filter(i => i.party_id === f.party_id && !['proforma', 'cancelled'].includes(i.status));
+  const filteredInvoices = invoices.filter(i => i.business_id === f.business_id && i.party_id === f.party_id && i.type === 'sale' && !['proforma', 'cancelled'].includes(i.status));
 
   const calc = items.map(it => calcCNItem(it, isIntrastate));
   const subtotal = calc.reduce((s, i) => s + i.taxable, 0);
@@ -112,6 +112,8 @@ export function CreditNoteModal({ onClose, onSave, businesses, parties, invoices
         quantity: Number(it.quantity),
         unit_price: Number(it.unit_price),
         tax_percent: Number(it.tax_percent),
+        taxable_amount: Number(it.taxable || 0),
+        tax_amount: isTax ? (it.cgst + it.sgst + it.igst) : 0,
         cgst_amount: isTax ? it.cgst : 0,
         sgst_amount: isTax ? it.sgst : 0,
         igst_amount: isTax ? it.igst : 0,
@@ -242,7 +244,7 @@ export function CreditNotesView({ creditNotes, invoices, businesses, parties, ac
                   <td className="mono" style={{ fontSize: 11, color: 'var(--text3)' }}>{linkedInv?.invoice_number || '—'}</td>
                   <td style={{ fontSize: 11, color: 'var(--text2)' }}>{cn.reason || '—'}</td>
                   <td className="r mono" style={{ color: '#ff8cc8' }}>{fmt(cn.total)}</td>
-                  <td><span className={`gst-chip ${gstMode === 'intra' ? 'cgst' : 'igst'}`} style={{ fontSize: 9 }}>{gstMode === 'intra' ? 'C+S' : 'IGST'}</span></td>
+                  <td>{cn.note_type === 'commercial' ? <span className="badge badge-manual" style={{ fontSize: 9 }}>NO GST</span> : <span className={`gst-chip ${gstMode === 'intra' ? 'cgst' : 'igst'}`} style={{ fontSize: 9 }}>{gstMode === 'intra' ? 'C+S' : 'IGST'}</span>}</td>
                   <td><button className="btn btn-ghost btn-sm" onClick={() => dlPDF(cn)}>⬇ PDF</button></td>
                 </tr>
               );
@@ -251,7 +253,7 @@ export function CreditNotesView({ creditNotes, invoices, businesses, parties, ac
           </tbody>
         </table>
       </div>
-      {showModal && <CreditNoteModal onClose={() => setShowModal(false)} onSave={handleSave} businesses={businesses} parties={parties} invoices={invoices} creditNotes={creditNotes} />}
+      {showModal && <CreditNoteModal onClose={() => setShowModal(false)} onSave={handleSave} businesses={businesses} parties={parties} invoices={invoices} creditNotes={creditNotes} activeBiz={activeBiz} />}
     </>
   );
 }
