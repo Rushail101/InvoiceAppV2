@@ -53,7 +53,6 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
     tds_amount: editData?.tds_amount || 0,
     price_mode: editData?.price_mode || 'exclusive',
     round_off: editData?.round_off ?? false,
-    reverse_charge: editData?.reverse_charge ?? false,
     ship_to_address: editData?.ship_to_address || '',
   });
 
@@ -264,12 +263,6 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
         </FG>
         <FG label="Notes / Terms"><input value={f.notes} onChange={e => setF(x => ({ ...x, notes: e.target.value }))} placeholder="Due on Receipt" /></FG>
         <FG label="TDS Deducted (₹)"><input type="number" value={f.tds_amount} onChange={e => setF(x => ({ ...x, tds_amount: e.target.value }))} placeholder="0" /></FG>
-        <FG label="Reverse Charge">
-          <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 12, color: 'var(--text2)', marginTop: 6 }}>
-            <input type="checkbox" checked={f.reverse_charge} onChange={e => setF(x => ({ ...x, reverse_charge: e.target.checked }))} />
-            Tax payable on reverse charge
-          </label>
-        </FG>
       </div>
       <div className="form-row">
         <FG label="Ship To (if different from billing address)">
