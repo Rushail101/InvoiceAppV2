@@ -1,4 +1,5 @@
 // db.js — all Supabase queries in one place
+import { classifyBankTransaction } from './automation.js';
 
 export let supabase = null;
 
@@ -167,6 +168,7 @@ const INV_COLS = [
   'issue_date','due_date','notes','discount_percent','discount_amount',
   'subtotal','cgst_amount','sgst_amount','igst_amount','tax_amount',
   'total','is_interstate','tds_amount','reverse_charge','ship_to_address',
+  'itc_eligible','itc_ineligible_reason','purchase_order_ref','grn_ref','journal_posted',
 ];
 
 function pickInvCols(data) {
@@ -206,7 +208,110 @@ export async function saveInvoice(inv, items, id) {
     if (error) throw new Error(`Invoice items save failed: ${error.message}`);
   }
   autoSaveCatalogItems(items, inv.business_id).catch(() => {});
+
+  // Purchase bills are accrual documents: book the supplier liability and
+  // input GST when the bill is recorded. Payments later clear Accounts Payable.
+  // Sales accounting is intentionally left unchanged here until the separate
+  // sales accrual migration is enabled, so this phase does not double-count
+  // existing sales revenue.
+  if (inv.type === 'purchase') {
+    await postPurchaseBillJournal({ ...inv, id: rid, subtotal: inv.subtotal, cgst_amount: inv.cgst_amount, sgst_amount: inv.sgst_amount, igst_amount: inv.igst_amount, total: inv.total, itc_eligible: inv.itc_eligible !== false });
+  }
   return rid;
+}
+
+// ── Purchase Bill → Journal Entry ────────────────────────────────────────────
+// Dr Raw Materials / Purchases (taxable + blocked ITC)
+// Dr GST Input Credit (eligible GST)
+//     Cr Accounts Payable (supplier bill total)
+// RCM remains an explicit purchase-side exception and is not silently treated
+// as normal supplier GST.
+async function postPurchaseBillJournal(invRow) {
+  if (!invRow?.business_id || !invRow?.id) return { skipped: true, skipReason: 'missing_invoice_identity' };
+
+  const apAcct = await findAccount(invRow.business_id, 'Accounts Payable');
+  const purchaseAcct = await findAccount(invRow.business_id, 'Raw Materials') || await findAccount(invRow.business_id, 'Cost of Goods Sold');
+  if (!purchaseAcct || !apAcct) return { skipped: true, skipReason: 'account_not_found' };
+
+  const gst = Number(invRow.cgst_amount || 0) + Number(invRow.sgst_amount || 0) + Number(invRow.igst_amount || 0);
+  const subtotal = Number(invRow.subtotal || 0);
+  const total = Number(invRow.total || subtotal + gst);
+  const itcEligible = invRow.itc_eligible !== false;
+  const eligibleCgst = itcEligible ? Number(invRow.cgst_amount || 0) : 0;
+  const eligibleSgst = itcEligible ? Number(invRow.sgst_amount || 0) : 0;
+  const eligibleIgst = itcEligible ? Number(invRow.igst_amount || 0) : 0;
+  const eligibleGst = eligibleCgst + eligibleSgst + eligibleIgst;
+  const blockedGst = gst - eligibleGst;
+  const isRCM = !!invRow.reverse_charge;
+
+  const [inputGeneric, inputCgst, inputSgst, inputIgst, rcmPayable] = await Promise.all([
+    findAccount(invRow.business_id, 'GST Input Credit'),
+    findAccount(invRow.business_id, 'Input CGST'),
+    findAccount(invRow.business_id, 'Input SGST'),
+    findAccount(invRow.business_id, 'Input IGST'),
+    findAccount(invRow.business_id, 'GST Payable (RCM)'),
+  ]);
+  if (eligibleGst > 0 && !inputGeneric && !inputCgst && !inputSgst && !inputIgst) {
+    return { skipped: true, skipReason: 'input_gst_account_not_found' };
+  }
+  if (isRCM && gst > 0 && !rcmPayable) return { skipped: true, skipReason: 'rcm_account_not_found' };
+
+  const { data: existing } = await supabase.from('journal_entries')
+    .select('id').eq('source', 'purchase_bill').eq('source_id', invRow.id).limit(1).maybeSingle();
+
+  const entry = {
+    business_id: invRow.business_id,
+    entry_date: invRow.issue_date,
+    reference: invRow.invoice_number || `PUR-${String(invRow.id).slice(0, 8)}`,
+    description: `Purchase Bill${invRow.purchase_order_ref ? ` — PO ${invRow.purchase_order_ref}` : ''}`,
+    narration: isRCM
+      ? `Reverse charge${itcEligible ? ' — input GST eligible' : ` — ITC blocked${invRow.itc_ineligible_reason ? `: ${invRow.itc_ineligible_reason}` : ''}`}`
+      : (itcEligible ? 'Supplier purchase bill — input GST eligible' : `ITC blocked${invRow.itc_ineligible_reason ? `: ${invRow.itc_ineligible_reason}` : ''}`),
+    source: 'purchase_bill',
+    source_id: invRow.id,
+  };
+
+  let journalId = existing?.id;
+  if (journalId) {
+    const { error } = await supabase.from('journal_entries').update(entry).eq('id', journalId);
+    if (error) return { journalId, skipped: true, skipReason: error.message };
+    await supabase.from('journal_lines').delete().eq('journal_id', journalId);
+  } else {
+    const { data, error } = await supabase.from('journal_entries').insert(entry).select().single();
+    if (error) return { journalId: null, skipped: true, skipReason: error.message };
+    journalId = data.id;
+  }
+
+  const lines = [];
+  // Blocked GST becomes part of the purchase cost.
+  const purchaseDebit = subtotal + blockedGst;
+  if (purchaseDebit > 0) lines.push({ journal_id: journalId, account_id: purchaseAcct.id, type: 'debit', amount: purchaseDebit, narration: 'Purchase / raw materials' });
+
+  if (eligibleCgst > 0) lines.push({ journal_id: journalId, account_id: (inputCgst || inputGeneric).id, type: 'debit', amount: eligibleCgst, narration: 'Input CGST' });
+  if (eligibleSgst > 0) lines.push({ journal_id: journalId, account_id: (inputSgst || inputGeneric).id, type: 'debit', amount: eligibleSgst, narration: 'Input SGST' });
+  if (eligibleIgst > 0) lines.push({ journal_id: journalId, account_id: (inputIgst || inputGeneric).id, type: 'debit', amount: eligibleIgst, narration: 'Input IGST' });
+
+  if (isRCM && gst > 0) {
+    // Under RCM the supplier payable remains taxable value; GST is self-assessed
+    // as a liability. Eligible ITC is booked separately above.
+    lines.push({ journal_id: journalId, account_id: rcmPayable.id, type: 'credit', amount: gst, narration: 'RCM GST payable' });
+    if (subtotal > 0) lines.push({ journal_id: journalId, account_id: apAcct.id, type: 'credit', amount: subtotal, narration: 'Supplier payable' });
+  } else if (total > 0) {
+    lines.push({ journal_id: journalId, account_id: apAcct.id, type: 'credit', amount: total, narration: 'Supplier payable' });
+  }
+
+  const debitTotal = lines.filter(l => l.type === 'debit').reduce((s, l) => s + Number(l.amount), 0);
+  const creditTotal = lines.filter(l => l.type === 'credit').reduce((s, l) => s + Number(l.amount), 0);
+  if (Math.abs(debitTotal - creditTotal) > 0.01) return { journalId, skipped: true, skipReason: 'journal_not_balanced' };
+
+  const { error: lineErr } = await supabase.from('journal_lines').insert(lines);
+  if (lineErr) return { journalId, skipped: true, skipReason: lineErr.message };
+  await supabase.from('invoices').update({ journal_posted: true }).eq('id', invRow.id);
+  return { journalId, skipped: false };
+}
+
+export async function repostPurchaseBillJournal(invRow) {
+  return postPurchaseBillJournal(invRow);
 }
 
 export async function getInvoiceItems(invoiceId) {
@@ -273,7 +378,7 @@ async function postPaymentJournal(payRow, isPurchase) {
 
   const bankAcct = await findAccount(payRow.business_id, 'Bank Account');
   const otherAcct = isPurchase
-    ? (await findAccount(payRow.business_id, 'Cost of Goods Sold')) || (await findAccount(payRow.business_id, 'Raw Materials'))
+    ? await findAccount(payRow.business_id, 'Accounts Payable')
     : await findAccount(payRow.business_id, 'Sales Revenue');
   if (!bankAcct || !otherAcct) return { journalId: null, skipped: true, skipReason: 'account_not_found' };
 
@@ -538,47 +643,8 @@ export async function repostExpenseJournal(expRow) {
 
 // ── Bank Transaction → Journal Entry (Auto-post) ───────────────────────────────
 //
-// ACCOUNT MAPPING RULES (rule engine — no AI needed for known patterns)
-// Key = substring to match in txn description (lowercase)
-// Value = { debit, credit } account name substrings (looked up in accounts table)
-//
-const BANK_TXN_RULES = [
-  // Credits (money IN) — debit Bank, credit the source account
-  { match: ['salary', 'sal credit', 'sal '], type: 'credit', debitAcct: 'Bank Account', creditAcct: 'Wages & Salaries' },
-  { match: ['refund', 'reversal', 'ref credit'], type: 'credit', debitAcct: 'Bank Account', creditAcct: 'Miscellaneous Expenses' },
-  { match: ['interest credit', 'int credit', 'int pd'], type: 'credit', debitAcct: 'Bank Account', creditAcct: 'Other Income' },
-  { match: ['loan', 'borrowing', 'credit facility'], type: 'credit', debitAcct: 'Bank Account', creditAcct: 'Loans & Borrowings' },
-  { match: ['capital', 'proprietor', 'owner', 'drawings return'], type: 'credit', debitAcct: 'Bank Account', creditAcct: "Owner's Capital" },
-  // Generic credit (customer payment) — debit Bank, credit AR
-  // Debits (money OUT) — credit Bank, debit the expense account
-  { match: ['rent', 'rental'], type: 'debit', debitAcct: 'Rent', creditAcct: 'Bank Account' },
-  { match: ['electricity', 'bijli', 'power', 'msed', 'bses', 'tata power'], type: 'debit', debitAcct: 'Utilities', creditAcct: 'Bank Account' },
-  { match: ['freight', 'courier', 'dtdc', 'bluedart', 'fedex', 'delhivery', 'xpressbees', 'shipping'], type: 'debit', debitAcct: 'Shipping & Freight', creditAcct: 'Bank Account' },
-  { match: ['gst', 'igst', 'cgst', 'sgst', 'tax challan', 'gstn', 'gst challan'], type: 'debit', debitAcct: 'GST Payable (Output)', creditAcct: 'Bank Account' },
-  { match: ['tds', 'tcs', 'income tax', 'itr', 'advance tax'], type: 'debit', debitAcct: 'TDS Payable', creditAcct: 'Bank Account' },
-  { match: ['salary', 'wages', 'labour', 'worker', 'tailor', 'stitching'], type: 'debit', debitAcct: 'Wages & Salaries', creditAcct: 'Bank Account' },
-  { match: ['fabric', 'yarn', 'thread', 'cloth', 'material', 'raw material', 'lining', 'button', 'zip'], type: 'debit', debitAcct: 'Raw Materials', creditAcct: 'Bank Account' },
-  { match: ['loan repay', 'emi', 'loan emi', 'instalment'], type: 'debit', debitAcct: 'Loans & Borrowings', creditAcct: 'Bank Account' },
-  { match: ['drawings', 'personal', 'self', 'proprietor draw'], type: 'debit', debitAcct: 'Drawings', creditAcct: 'Bank Account' },
-  { match: ['marketing', 'advertis', 'meta ads', 'google ads', 'facebook'], type: 'debit', debitAcct: 'Marketing & Advertising', creditAcct: 'Bank Account' },
-  { match: ['software', 'subscription', 'saas', 'tally', 'zoho', 'microsoft', 'adobe'], type: 'debit', debitAcct: 'Software & Subscriptions', creditAcct: 'Bank Account' },
-  { match: ['travel', 'uber', 'ola', 'petrol', 'diesel', 'cab', 'auto', 'conveyance'], type: 'debit', debitAcct: 'Travel & Conveyance', creditAcct: 'Bank Account' },
-  { match: ['equipment', 'machine', 'sewing', 'machinery', 'tool', 'overlock'], type: 'debit', debitAcct: 'Fixed Assets', creditAcct: 'Bank Account' },
-];
-
-// Try rule-engine first; return { debitAcct, creditAcct, confidence, method } or null
-function applyRuleEngine(txn) {
-  const desc = (txn.description + ' ' + (txn.reference || '')).toLowerCase();
-  for (const rule of BANK_TXN_RULES) {
-    if (rule.type !== txn.type) continue;
-    for (const keyword of rule.match) {
-      if (desc.includes(keyword)) {
-        return { debitAcct: rule.debitAcct, creditAcct: rule.creditAcct, confidence: 'high', method: 'rule' };
-      }
-    }
-  }
-  return null;
-}
+// Bank transaction classification is centralized in src/lib/automation.js.
+// This keeps import preview and actual journal posting on the exact same rules.
 
 // Shared by saveBankTxnWithJournal (new import) and repostBankTxnJournal
 // (retroactively posting an existing bank_transactions row). Never throws —
@@ -587,12 +653,7 @@ function applyRuleEngine(txn) {
 // a row that never actually got an entry.
 async function postBankTxnJournal(txnRow, accounts, bizId, overrideMapping) {
   let mapping = overrideMapping;
-  if (!mapping) mapping = applyRuleEngine(txnRow);
-  if (!mapping) {
-    mapping = txnRow.type === 'credit'
-      ? { debitAcct: 'Bank Account', creditAcct: 'Other Income', confidence: 'low', method: 'fallback' }
-      : { debitAcct: 'Miscellaneous Expenses', creditAcct: 'Bank Account', confidence: 'low', method: 'fallback' };
-  }
+  if (!mapping) mapping = classifyBankTransaction(txnRow, bizId);
 
   if (!bizId) {
     console.warn('JE skipped: no business_id resolvable for bank txn', txnRow);

@@ -32,7 +32,7 @@ function calcItem(it, isIntrastate, priceMode = 'exclusive', invDiscRatio = 0) {
 }
 
 // ─── INVOICE MODAL ─────────────────────────────────────────────────────────────
-export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItems = [], editData, allInvoices, isProforma = false, activeBiz }) {
+export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItems = [], editData, allInvoices, isProforma = false, activeBiz, purchaseMode = false }) {
   const isPF = isProforma || (editData?.status === 'proforma');
   const initialBizId = editData?.business_id || activeBiz || businesses[0]?.id || '';
 
@@ -43,7 +43,7 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
     // business only, not every business's invoices, or numbers will skip
     // around whenever another business creates a document in between.
     invoice_number: editData?.invoice_number || nextInvNum(allInvoices.filter(i => i.business_id === initialBizId), isPF),
-    type: editData?.type || 'sale',
+    type: editData?.type || (purchaseMode ? 'purchase' : 'sale'),
     issue_date: editData?.issue_date || today(),
     due_date: editData?.due_date || '',
     status: editData?.status || (isPF ? 'proforma' : 'draft'),
@@ -54,6 +54,11 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
     price_mode: editData?.price_mode || 'exclusive',
     round_off: editData?.round_off ?? false,
     ship_to_address: editData?.ship_to_address || '',
+    itc_eligible: editData?.itc_eligible ?? true,
+    itc_ineligible_reason: editData?.itc_ineligible_reason || '',
+    purchase_order_ref: editData?.purchase_order_ref || '',
+    grn_ref: editData?.grn_ref || '',
+    reverse_charge: editData?.reverse_charge || false,
   });
 
   const [items, setItems] = useState(
@@ -189,7 +194,7 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
     : <span>GST type: <span className="gst-chip igst">IGST</span> (inter-state)</span>;
 
   return (
-    <ModalShell title={editData ? 'Edit Invoice' : (isPF ? 'New Proforma Invoice' : 'New Tax Invoice')} onClose={onClose} size="modal-xl"
+    <ModalShell title={editData ? (f.type === 'purchase' ? 'Edit Purchase Bill' : 'Edit Invoice') : (isPF ? 'New Proforma Invoice' : (purchaseMode ? 'New Purchase Bill' : 'New Tax Invoice'))} onClose={onClose} size="modal-xl"
       foot={<><button className="btn btn-ghost" onClick={onClose}>Cancel</button><button className="btn btn-primary" onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save Invoice'}</button></>}>
 
       {isPF && <div className="pf-banner">⚡ Proforma Invoice — numbered PI-… Use "→ Invoice" to convert when approved.</div>}
@@ -201,9 +206,9 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
             {businesses.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
           </select>
         </FG>
-        <FG label="Invoice Type">
+        <FG label={purchaseMode ? 'Document Type' : 'Invoice Type'}>
           <select value={f.type} onChange={e => setF(x => ({ ...x, type: e.target.value }))}>
-            <option value="sale">Sale (Invoice)</option>
+            {!purchaseMode && <option value="sale">Sale (Invoice)</option>}
             <option value="purchase">Purchase (Bill)</option>
           </select>
         </FG>
@@ -264,6 +269,28 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
         <FG label="Notes / Terms"><input value={f.notes} onChange={e => setF(x => ({ ...x, notes: e.target.value }))} placeholder="Due on Receipt" /></FG>
         <FG label="TDS Deducted (₹)"><input type="number" value={f.tds_amount} onChange={e => setF(x => ({ ...x, tds_amount: e.target.value }))} placeholder="0" /></FG>
       </div>
+      {f.type === 'purchase' && (
+        <>
+          <div className="form-row cols-3">
+            <FG label="Supplier Invoice # *"><input value={f.invoice_number} onChange={e => setF(x => ({ ...x, invoice_number: e.target.value }))} placeholder="Supplier's bill number" /></FG>
+            <FG label="PO Reference"><input value={f.purchase_order_ref} onChange={e => setF(x => ({ ...x, purchase_order_ref: e.target.value }))} placeholder="Optional PO #" /></FG>
+            <FG label="GRN / Receipt Ref"><input value={f.grn_ref} onChange={e => setF(x => ({ ...x, grn_ref: e.target.value }))} placeholder="Optional GRN #" /></FG>
+          </div>
+          <div style={{ display:'flex', gap:14, alignItems:'center', margin:'4px 0 12px', padding:'9px 11px', background:'var(--bg2)', border:'1px solid var(--border1)', borderRadius:'var(--r)' }}>
+            <label style={{ display:'flex', alignItems:'center', gap:7, fontSize:12, cursor:'pointer' }}>
+              <input type="checkbox" checked={!!f.itc_eligible} onChange={e => setF(x => ({ ...x, itc_eligible: e.target.checked, itc_ineligible_reason: e.target.checked ? '' : x.itc_ineligible_reason }))} />
+              <span>ITC eligible</span>
+            </label>
+            {!f.itc_eligible && <input style={{ flex:1 }} value={f.itc_ineligible_reason} onChange={e => setF(x => ({ ...x, itc_ineligible_reason: e.target.value }))} placeholder="Reason for ineligible / blocked ITC" />}
+            <label style={{ display:'flex', alignItems:'center', gap:7, fontSize:12, cursor:'pointer' }}>
+              <input type="checkbox" checked={!!f.reverse_charge} onChange={e => setF(x => ({ ...x, reverse_charge: e.target.checked }))} />
+              <span>RCM purchase</span>
+            </label>
+            <span style={{ fontSize:10.5, color:'var(--text3)' }}>Normal supplier GST: keep RCM off.</span>
+          </div>
+        </>
+      )}
+
       <div className="form-row">
         <FG label="Ship To (if different from billing address)">
           <textarea rows={2} placeholder="Leave blank to use the party's billing address on the printed invoice"
@@ -471,7 +498,7 @@ function fmtMonthKey(key) {
 }
 
 // ─── INVOICES VIEW ─────────────────────────────────────────────────────────────
-export function InvoicesView({ invoices, businesses, parties, activeBiz, reload, payments, creditNotes, catalogItems = [] }) {
+export function InvoicesView({ invoices, businesses, parties, activeBiz, reload, payments, creditNotes, catalogItems = [], purchaseMode = false }) {
   const [search, setSearch] = useState('');
   const [groupByMonth, setGroupByMonth] = useState(true);
   const [activeMonth, setActiveMonth] = useState(null); // null = show all months expanded
@@ -493,7 +520,7 @@ export function InvoicesView({ invoices, businesses, parties, activeBiz, reload,
     const stMatch = sf ? i.status === sf : true;
     const s = search.toLowerCase();
     const nameMatch = !s || i.invoice_number.toLowerCase().includes(s) || (parties.find(p => p.id === i.party_id)?.name || '').toLowerCase().includes(s);
-    return biz && stMatch && nameMatch;
+    return biz && stMatch && nameMatch && (purchaseMode ? i.type === 'purchase' : i.type !== 'purchase');
   }).sort((a, b) => new Date(b.issue_date) - new Date(a.issue_date));
 
   // Group by month (YYYY-MM key, sorted newest first)
@@ -673,9 +700,9 @@ export function InvoicesView({ invoices, businesses, parties, activeBiz, reload,
       <div className="table-wrap">
         <table>
           <thead><tr>
-            <th>Invoice #</th><th>Party</th><th>Date</th><th>Due</th>
+            <th>{purchaseMode ? 'Supplier Bill #' : 'Invoice #'}</th><th>{purchaseMode ? 'Supplier' : 'Party'}</th><th>Date</th><th>Due</th>
             <th className="r">Total</th><th className="r">Paid</th><th className="r">Balance</th>
-            <th>GST</th><th>Status</th><th>Actions</th>
+            <th>GST</th>{purchaseMode && <th>ITC</th>}<th>Status</th><th>Actions</th>
           </tr></thead>
           <tbody>
             {list.map(inv => {
@@ -693,6 +720,7 @@ export function InvoicesView({ invoices, businesses, parties, activeBiz, reload,
                   <td className="r mono" style={{ color: 'var(--green)', fontSize: 11 }}>{paid > 0 ? fmt(paid) : '—'}</td>
                   <td className="r mono" style={{ color: bal > 0.01 ? 'var(--amber)' : 'var(--text3)', fontSize: 11 }}>{bal > 0.01 ? fmt(bal) : '✓'}</td>
                   <td><span className={`gst-chip ${gstMode === 'intra' ? 'cgst' : 'igst'}`} style={{ fontSize: 9 }}>{gstMode === 'intra' ? 'C+S' : 'IGST'}</span></td>
+                  {purchaseMode && <td><span className={`gst-chip ${inv.itc_eligible === false ? 'igst' : 'cgst'}`} style={{ fontSize: 9 }}>{inv.itc_eligible === false ? 'Blocked' : 'Eligible'}</span></td>}
                   <td><Badge status={inv.status} /></td>
                   <td>
                     <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
@@ -750,9 +778,9 @@ export function InvoicesView({ invoices, businesses, parties, activeBiz, reload,
         >
           {groupByMonth ? '📅 Monthly' : '≡ All'}
         </button>
-        <button className="btn btn-ghost btn-sm" onClick={() => { setEditData(null); setShowPF(true); }}>+ Proforma</button>
-        <button className="btn btn-ghost btn-sm" onClick={autoNumber} title="Sort all invoices by date and assign sequential numbers per FY">⟳ Auto-Number</button>
-        <button className="btn btn-primary" onClick={() => { setEditData(null); setShowInv(true); }}>+ Invoice</button>
+        {!purchaseMode && <button className="btn btn-ghost btn-sm" onClick={() => { setEditData(null); setShowPF(true); }}>+ Proforma</button>}
+        <button className="btn btn-ghost btn-sm" onClick={autoNumber} title="Sort documents by date and assign sequential numbers per FY">⟳ Auto-Number</button>
+        <button className="btn btn-primary" onClick={() => { setEditData(null); setShowInv(true); }}>{purchaseMode ? '+ Purchase Bill' : '+ Invoice'}</button>
       </div>
 
       {/* ── Monthly tabs view ── */}
@@ -811,7 +839,7 @@ export function InvoicesView({ invoices, businesses, parties, activeBiz, reload,
       )}
 
       {/* ── Modals ── */}
-      {showInv && <InvoiceModal onClose={() => setShowInv(false)} onSave={handleSave} businesses={businesses} parties={parties} editData={editData} allInvoices={invoices} catalogItems={catalogItems} activeBiz={activeBiz} />}
+      {showInv && <InvoiceModal onClose={() => setShowInv(false)} onSave={handleSave} businesses={businesses} parties={parties} editData={editData} allInvoices={invoices} catalogItems={catalogItems} activeBiz={activeBiz} purchaseMode={purchaseMode} />}
       {showPF && <InvoiceModal onClose={() => setShowPF(false)} onSave={handleSave} businesses={businesses} parties={parties} editData={null} allInvoices={invoices} isProforma={true} catalogItems={catalogItems} activeBiz={activeBiz} />}
       {payInv && <PaymentModal onClose={() => setPayInv(null)} onSave={handlePayment} invoice={payInv} existingPayments={paysByInv[payInv.id] || []} />}
     </>

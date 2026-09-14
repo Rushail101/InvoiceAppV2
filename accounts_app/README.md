@@ -41,3 +41,9 @@ npm run dev
 - URL: https://your-project.supabase.co  
 - Anon key: from Supabase → Settings → API  
 - These are saved in browser localStorage after first login
+
+## Production security (Phase 12)
+For a production deployment, enable Supabase Auth and run `auth_rls_phase12.sql` after the master migration. The application accepts Supabase email/password authentication when an email is entered; the old VITE_APP_USERNAME/VITE_APP_PASSWORD login is retained only as a local-development fallback. After Auth/RLS is enabled, every business must have a `user_business_roles` membership. Newly created businesses automatically assign the authenticated creator as owner.
+
+## Phase completion
+Phases 1–16 are represented in this build: accounting/automation, purchase GST/ITC, GSTR-2B/3B review, inventory/item master, PO/GRN, quotations/sales orders, GST amendments staging, audit trail, Auth/RLS hardening, warehouses, production, cost centres/projects, and management KPIs. GST filing remains a human review/submission step; the ERP does not call paid AI or external filing APIs.

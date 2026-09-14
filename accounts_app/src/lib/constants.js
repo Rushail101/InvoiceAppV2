@@ -426,7 +426,7 @@ export const DEFAULT_ACCOUNTS = [
   { code: '2110', name: 'IGST Payable', group: 'liability', sub_group: 'Current Liabilities', description: 'Inter-state GST' },
   { code: '2120', name: 'CGST Payable', group: 'liability', sub_group: 'Current Liabilities', description: 'Central GST' },
   { code: '2130', name: 'SGST Payable', group: 'liability', sub_group: 'Current Liabilities', description: 'State GST' },
-  { code: '2200', name: 'GST Input Credit', group: 'liability', sub_group: 'Current Liabilities', description: 'GST paid on purchases (credit)' },
+  { code: '2200', name: 'GST Input Credit', group: 'asset', sub_group: 'Current Assets', description: 'Eligible GST paid on purchases (input tax credit)' },
   { code: '2300', name: 'TDS Payable', group: 'liability', sub_group: 'Current Liabilities', description: 'Tax deducted at source' },
   { code: '2500', name: 'Loans & Borrowings', group: 'liability', sub_group: 'Long-term Liabilities', description: 'Term loans' },
   // Equity

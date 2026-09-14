@@ -16,6 +16,7 @@ import { GSTR1View } from './views/GSTR1.jsx';
 import { ItemsView } from './views/Items.jsx';
 import { DeliveryChallansView } from './views/DeliveryChallans.jsx';
 import { DebitNotesView } from './views/DebitNotes.jsx';
+import { GSTR2BView, GSTR3BView, InventoryView, WarehousesView, OrdersView, QuotationsView, GRNView, AuditTrailView, UsersRolesView, ProductionView, CostCentresView, KPIDashboard } from './views/EnterpriseViews.jsx';
 import { Badge, ModalShell, FG, EmptyState } from './components/ui.jsx';
 
 // Optional/advanced screens remain hidden from nav; core sales documents
@@ -28,7 +29,8 @@ const NAV = [
   { id: 'debitnotes',  label: 'Debit Notes',       icon: '↗',   group: 'Sales' },
   { id: 'challans',    label: 'Delivery Challans', icon: '🚚',  group: 'Sales' },
   { id: 'parties',     label: 'Parties',           icon: '👥',  group: 'Sales' },
-  // { id: 'items',       label: 'Item Master',       icon: '📦',  group: 'Sales' },
+  { id: 'items',       label: 'Item Master',       icon: '📦',  group: 'Sales' },
+  { id: 'purchasebills', label: 'Purchase Bills',   icon: '🧾',  group: 'Purchases' },
   { id: 'expenses',    label: 'Expenses',          icon: '💸',  group: 'Purchases' },
   { id: 'payments',    label: 'Payments',          icon: '💳',  group: 'Purchases' },
   // { id: 'bulkpay',     label: 'Bulk Payment',      icon: '💰',  group: 'Purchases' },
@@ -50,6 +52,19 @@ const NAV = [
   { id: 'jhealth',    label: 'Journal Health',    icon: '🩺',  group: 'Accounting' },
   { id: 'bulkimport',  label: 'Bulk Bank Import',  icon: '📥',  group: 'Accounting' },
   { id: 'gstr1',       label: 'GSTR-1',            icon: '🧾',  group: 'GST' },
+  { id: 'gstr2b',      label: 'GSTR-2B',           icon: '🔗',  group: 'GST' },
+  { id: 'gstr3b',      label: 'GSTR-3B',           icon: '🧮',  group: 'GST' },
+  { id: 'inventory',   label: 'Inventory',          icon: '📦',  group: 'Operations' },
+  { id: 'warehouses',  label: 'Warehouses',         icon: '🏭',  group: 'Operations' },
+  { id: 'quotations',  label: 'Quotations',         icon: '📝',  group: 'Sales' },
+  { id: 'salesorders', label: 'Sales Orders',       icon: '🛒',  group: 'Sales' },
+  { id: 'purchaseorders', label: 'Purchase Orders',  icon: '📦',  group: 'Purchases' },
+  { id: 'grn',         label: 'GRN / Receipts',     icon: '📥',  group: 'Purchases' },
+  { id: 'production',  label: 'Production',         icon: '⚙',   group: 'Operations' },
+  { id: 'costcentres', label: 'Cost Centres',       icon: '🎯',  group: 'Accounting' },
+  { id: 'audit',       label: 'Audit Trail',        icon: '🛡',  group: 'Settings' },
+  { id: 'users',       label: 'Users & Roles',      icon: '👤',  group: 'Settings' },
+  { id: 'kpis',        label: 'Management KPIs',    icon: '📊',  group: 'Analysis' },
   { id: 'businesses',  label: 'Businesses',        icon: '🏢',  group: 'Settings' },
   { id: 'export',      label: 'Export Data',       icon: '↓',   group: 'Settings' },
   { id: 'sqlsetup',    label: 'SQL Setup',         icon: '⚙',   group: 'Settings' },
@@ -79,15 +94,28 @@ function LoginScreen({ onLogin }) {
   async function login() {
     if (!username.trim() || !password.trim()) { setErr('Enter username and password'); return; }
     setBusy(true); setErr('');
-    // Small delay so it doesn't feel instant (UX)
-    await new Promise(r => setTimeout(r, 400));
-    if (username.trim() === correctUser && password === correctPass) {
-      localStorage.setItem('np_auth', 'true');
-      onLogin();
-    } else {
-      setErr('Incorrect username or password');
+    try {
+      const url = import.meta.env.VITE_SUPABASE_URL || localStorage.getItem('sb_url');
+      const key = import.meta.env.VITE_SUPABASE_ANON_KEY || localStorage.getItem('sb_key');
+      // Prefer real Supabase Auth when an email is supplied. The legacy env
+      // credential remains as a local-development fallback only.
+      if (url && key && username.trim().includes('@')) {
+        const authClient = createClient(url, key, { db: { schema: 'accounts_erp' } });
+        const { error } = await authClient.auth.signInWithPassword({ email: username.trim(), password });
+        if (error) throw error;
+        localStorage.setItem('np_auth', 'true');
+        onLogin();
+      } else if (username.trim() === correctUser && password === correctPass) {
+        localStorage.setItem('np_auth', 'true');
+        onLogin();
+      } else {
+        setErr('Incorrect username or password');
+      }
+    } catch (e) {
+      setErr(e?.message || 'Sign in failed');
+    } finally {
+      setBusy(false);
     }
-    setBusy(false);
   }
 
   function onKey(e) { if (e.key === 'Enter') login(); }
@@ -669,7 +697,37 @@ CREATE UNIQUE INDEX IF NOT EXISTS uidx_invoices_number ON invoices(business_id, 
 CREATE UNIQUE INDEX IF NOT EXISTS uidx_credit_notes_number ON credit_notes(business_id, cn_number);
 
 -- Debit Notes
-CREATE UNIQUE INDEX IF NOT EXISTS uidx_debit_notes_number ON debit_notes(business_id, dn_number);`
+CREATE UNIQUE INDEX IF NOT EXISTS uidx_debit_notes_number ON debit_notes(business_id, dn_number);
+
+-- ── STEP 7: Phase 3 — Purchase Bills + GST Input Credit ─────────────────────
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS itc_eligible boolean DEFAULT true;
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS itc_ineligible_reason text;
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS purchase_order_ref text;
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS grn_ref text;
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS journal_posted boolean DEFAULT false;
+
+-- Input GST is recoverable tax (asset), not output tax payable.
+UPDATE accounts SET group = 'asset', sub_group = 'Current Assets',
+  description = 'Eligible GST paid on purchases (input tax credit)'
+WHERE name = 'GST Input Credit';
+
+INSERT INTO accounts (business_id, code, name, group, sub_group, description)
+SELECT b.id, '2210', 'Input CGST', 'asset', 'Current Assets', 'CGST paid on purchases eligible for ITC'
+FROM businesses b WHERE NOT EXISTS (SELECT 1 FROM accounts a WHERE a.business_id=b.id AND a.name='Input CGST');
+INSERT INTO accounts (business_id, code, name, group, sub_group, description)
+SELECT b.id, '2220', 'Input SGST', 'asset', 'Current Assets', 'SGST paid on purchases eligible for ITC'
+FROM businesses b WHERE NOT EXISTS (SELECT 1 FROM accounts a WHERE a.business_id=b.id AND a.name='Input SGST');
+INSERT INTO accounts (business_id, code, name, group, sub_group, description)
+SELECT b.id, '2230', 'Input IGST', 'asset', 'Current Assets', 'IGST paid on purchases eligible for ITC'
+FROM businesses b WHERE NOT EXISTS (SELECT 1 FROM accounts a WHERE a.business_id=b.id AND a.name='Input IGST');
+INSERT INTO accounts (business_id, code, name, group, sub_group, description)
+SELECT b.id, '2140', 'GST Payable (RCM)', 'liability', 'Current Liabilities', 'GST payable under reverse charge'
+FROM businesses b WHERE NOT EXISTS (SELECT 1 FROM accounts a WHERE a.business_id=b.id AND a.name='GST Payable (RCM)');
+
+CREATE INDEX IF NOT EXISTS idx_invoices_purchase ON invoices(business_id, type, issue_date) WHERE type='purchase';
+CREATE INDEX IF NOT EXISTS idx_invoices_journal_posted ON invoices(journal_posted);
+
+-- End Phase 3`
 
 function SqlSetupView({ invoices = [], payments = [] }) {
   const [copied, setCopied] = useState(false);
@@ -1002,6 +1060,16 @@ export default function App() {
       const c = createClient(url, key, { db: { schema: 'accounts_erp' } });
       initSupabase(c);
       setClient(c);
+      c.auth.getSession().then(({ data }) => {
+        if (data?.session) {
+          localStorage.setItem('np_auth', 'true');
+          setAuthed(true);
+        }
+      }).catch(() => {});
+      const { data: listener } = c.auth.onAuthStateChange((_event, session) => {
+        if (session) { localStorage.setItem('np_auth', 'true'); setAuthed(true); }
+      });
+      return () => listener?.subscription?.unsubscribe();
     }
   }, []);
 
@@ -1021,7 +1089,8 @@ export default function App() {
 
   function handleLogin() { setAuthed(true); }
 
-  function handleLogout() {
+  async function handleLogout() {
+    try { await client?.auth?.signOut(); } catch (_) {}
     localStorage.removeItem('np_auth');
     setAuthed(false);
   }
@@ -1109,6 +1178,11 @@ export default function App() {
               <DeliveryChallansView challans={challans} parties={parties} invoices={invoices} {...cp} />
             )}
             {!loading && view === 'parties' && <PartiesView parties={parties} {...cp} />}
+            {!loading && view === 'items' && <ItemsView items={items} {...cp} />}
+            {!loading && view === 'purchasebills' && (
+              <InvoicesView invoices={invoices} parties={parties} creditNotes={creditNotes}
+                payments={payments} purchaseMode={true} catalogItems={items} {...cp} />
+            )}
             {!loading && view === 'expenses' && <ExpensesView expenses={expenses} parties={parties} accounts={accounts} journalEntries={journalEntries} journalLines={journalLines} invoices={invoices} {...cp} />}
             {!loading && view === 'payments' && (
               <PaymentsView payments={payments} invoices={invoices} parties={parties} journalEntries={journalEntries} journalLines={journalLines} {...cp} />
@@ -1194,6 +1268,19 @@ export default function App() {
                 payments={payments} parties={parties} journalEntries={journalEntries} journalLines={journalLines}
                 activeBiz={activeBiz} reload={reload} />
             )}
+            {!loading && view === 'gstr2b' && <GSTR2BView activeBiz={activeBiz} invoices={invoices} parties={parties} reload={reload} />}
+            {!loading && view === 'gstr3b' && <GSTR3BView activeBiz={activeBiz} invoices={invoices} creditNotes={creditNotes} reload={reload} />}
+            {!loading && view === 'inventory' && <InventoryView activeBiz={activeBiz} items={items} reload={reload} />}
+            {!loading && view === 'warehouses' && <WarehousesView activeBiz={activeBiz} reload={reload} />}
+            {!loading && view === 'quotations' && <QuotationsView activeBiz={activeBiz} parties={parties} items={items} reload={reload} />}
+            {!loading && view === 'salesorders' && <OrdersView activeBiz={activeBiz} parties={parties} items={items} type="sales" reload={reload} />}
+            {!loading && view === 'purchaseorders' && <OrdersView activeBiz={activeBiz} parties={parties} items={items} type="purchase" reload={reload} />}
+            {!loading && view === 'grn' && <GRNView activeBiz={activeBiz} parties={parties} reload={reload} />}
+            {!loading && view === 'production' && <ProductionView activeBiz={activeBiz} items={items} reload={reload} />}
+            {!loading && view === 'costcentres' && <CostCentresView activeBiz={activeBiz} reload={reload} />}
+            {!loading && view === 'audit' && <AuditTrailView activeBiz={activeBiz} />}
+            {!loading && view === 'users' && <UsersRolesView activeBiz={activeBiz} businesses={businesses} />}
+            {!loading && view === 'kpis' && <KPIDashboard activeBiz={activeBiz} invoices={invoices} expenses={expenses} payments={payments} parties={parties} />}
             {!loading && view === 'businesses' && <BusinessesView businesses={businesses} reload={reload} />}
             {!loading && view === 'sqlsetup' && <SqlSetupView invoices={invoices} payments={payments} />}
           </div>

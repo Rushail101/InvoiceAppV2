@@ -22,105 +22,9 @@ import { useState, useCallback, useRef } from 'react';
 import { fmt, fmtDate, today } from '../lib/constants.js';
 import { saveBankTxnWithJournal, savePayment, updateInvoiceStatus } from '../lib/db.js';
 import { ModalShell, FG } from '../components/ui.jsx';
+import { classifyBankTransaction, matchBankTransaction, saveBankAutomationRule } from '../lib/automation.js';
 
-// ══════════════════════════════════════════════════════════════════════════════
-// RULE ENGINE — classify transactions without any AI
-// ══════════════════════════════════════════════════════════════════════════════
-//
-// Rules are checked in order. First match wins.
-// Each rule: { match: string[], type: 'debit'|'credit'|'any', debitAcct, creditAcct, label }
-// "match" checks the UPI purpose field OR full description (lowercased).
-//
-const CLASSIFICATION_RULES = [
-  // ── CREDITS (money IN) ─────────────────────────────────────────────────────
-  // Customer payments via NEFT/UPI
-  { match: ['tailored verse', 'odd mob', 'whitesockslab', 'scjersey', 'bake a film', 'proformaadvance', 'advance', 'gaurish', 'tomsan'],
-    type: 'credit', debitAcct: 'Bank Account', creditAcct: 'Sales Revenue', label: 'Customer Payment' },
-  // Foreign inward remittance
-  { match: ['foreign inward', 'rda foreign', 'inward remittance', 'fcy'],
-    type: 'credit', debitAcct: 'Bank Account', creditAcct: 'Sales Revenue', label: 'Export Payment' },
-  // Capital / loan from partner
-  { match: ['blueheightsavia', 'capital', 'proprietor', 'partner loan'],
-    type: 'credit', debitAcct: 'Bank Account', creditAcct: "Owner's Capital", label: 'Capital Infusion' },
-
-  // ── DEBITS (money OUT) ────────────────────────────────────────────────────
-  // Logistics / Porter
-  { match: ['porter', 'dtdc', 'bluedart', 'fedex', 'delhivery', 'xpressbees', 'ecomexpress', 'shiprocket', 'shipping', 'freight', 'courier', 'delivery'],
-    type: 'debit', debitAcct: 'Shipping & Freight', creditAcct: 'Bank Account', label: 'Freight/Courier' },
-  // Raw materials — fabric
-  { match: ['fabric', 'fabr', 'cloth', 'denim', 'cotton', 'polyester', 'lining', 'interlining', 'woven', 'knit'],
-    type: 'debit', debitAcct: 'Raw Materials', creditAcct: 'Bank Account', label: 'Fabric Purchase' },
-  // Raw materials — trims & accessories
-  { match: ['thread', 'threads', 'zip', 'zips', 'zipper', 'button', 'buttons', 'kaajbutton', 'magnetbutton', 'elastic', 'label', 'labels', 'tag', 'rivet', 'patch', 'velcro', 'felt', 'material', 'bags', 'bagsavation'],
-    type: 'debit', debitAcct: 'Raw Materials', creditAcct: 'Bank Account', label: 'Trims/Accessories' },
-  // Salary & wages
-  { match: ['salary', 'sal ', 'wages', 'meerasalary', 'salarymamta', 'salarysaddam', 'advancesalary', 'hariram', 'masterjip', 'rambabu', 'worker', 'tailor', 'labour', 'labr'],
-    type: 'debit', debitAcct: 'Wages & Salaries', creditAcct: 'Bank Account', label: 'Salary/Wages' },
-  // GST challan
-  { match: ['gib/', 'gst', 'igst', 'cgst', 'sgst', 'gstn', 'gst challan', 'tax challan'],
-    type: 'debit', debitAcct: 'GST Payable (Output)', creditAcct: 'Bank Account', label: 'GST Payment' },
-  // Electricity / Utilities
-  { match: ['bses', 'electricity', 'bijli', 'msedcl', 'tata power', 'adani electric', 'power bill', 'bil/onl'],
-    type: 'debit', debitAcct: 'Utilities', creditAcct: 'Bank Account', label: 'Electricity' },
-  // Water
-  { match: ['waterbill', 'water bill', 'jal board', 'djb'],
-    type: 'debit', debitAcct: 'Utilities', creditAcct: 'Bank Account', label: 'Water Bill' },
-  // Rent
-  { match: ['rent', 'rental', 'landlord', 'property owner'],
-    type: 'debit', debitAcct: 'Rent', creditAcct: 'Bank Account', label: 'Rent' },
-  // Amazon / online purchases (supplies)
-  { match: ['amazon', 'flipkart', 'meesho', 'myntra'],
-    type: 'debit', debitAcct: 'Raw Materials', creditAcct: 'Bank Account', label: 'Online Supplies' },
-  // Marketing
-  { match: ['marketing', 'advertis', 'meta', 'google ads', 'facebook ads', 'instagram'],
-    type: 'debit', debitAcct: 'Marketing & Advertising', creditAcct: 'Bank Account', label: 'Marketing' },
-  // Software
-  { match: ['software', 'subscription', 'saas', 'tally', 'zoho', 'microsoft', 'adobe', 'aws', 'google workspace'],
-    type: 'debit', debitAcct: 'Software & Subscriptions', creditAcct: 'Bank Account', label: 'Software' },
-  // Travel
-  { match: ['uber', 'ola', 'petrol', 'diesel', 'fuel', 'travel', 'cab', 'auto ride'],
-    type: 'debit', debitAcct: 'Travel & Conveyance', creditAcct: 'Bank Account', label: 'Travel' },
-  // Loan repayment
-  { match: ['emi', 'loan repay', 'loan instalment', 'loan emi'],
-    type: 'debit', debitAcct: 'Loans & Borrowings', creditAcct: 'Bank Account', label: 'Loan Repayment' },
-  // Drawings
-  { match: ['drawings', 'personal use', 'self withdrawal'],
-    type: 'debit', debitAcct: 'Drawings', creditAcct: 'Bank Account', label: 'Drawings' },
-];
-
-function classifyTransaction(txn) {
-  // Extract UPI purpose field: UPI/<refno>/<purpose>/<vpa>/...
-  const desc = (txn.description || '').toLowerCase();
-  const upiPurposeMatch = desc.match(/upi\/\d+\/([^/]+)\//);
-  const upiPurpose = upiPurposeMatch ? upiPurposeMatch[1].toLowerCase().trim() : '';
-  const combined = desc + ' ' + upiPurpose;
-
-  for (const rule of CLASSIFICATION_RULES) {
-    if (rule.type !== 'any' && rule.type !== txn.type) continue;
-    for (const kw of rule.match) {
-      if (combined.includes(kw.toLowerCase())) {
-        return {
-          debitAcct: rule.debitAcct,
-          creditAcct: rule.creditAcct,
-          label: rule.label,
-          confidence: 'high',
-          method: 'rule',
-          matchedKeyword: kw,
-        };
-      }
-    }
-  }
-
-  // Fallback: safe defaults
-  return {
-    debitAcct: txn.type === 'credit' ? 'Bank Account' : 'Miscellaneous Expenses',
-    creditAcct: txn.type === 'credit' ? 'Other Income' : 'Bank Account',
-    label: 'Unclassified',
-    confidence: 'low',
-    method: 'fallback',
-    matchedKeyword: null,
-  };
-}
+// Classification is shared with the actual posting layer (no AI/API).
 
 // ══════════════════════════════════════════════════════════════════════════════
 // XLS PARSER — parse ICICI OpTransactionHistory XLS client-side via SheetJS
@@ -278,58 +182,6 @@ function findExistingDuplicate(txn, existingTxns) {
 // ══════════════════════════════════════════════════════════════════════════════
 // PARTY MATCHING (unchanged from v11)
 // ══════════════════════════════════════════════════════════════════════════════
-function matchTransaction(txn, parties, invoices, payments, existingTxns) {
-  const desc = (txn.description || '').toLowerCase();
-  const ref = (txn.reference || '').toLowerCase();
-  const combined = desc + ' ' + ref;
-
-  // Check first against transactions already sitting in the ledger for this
-  // bank account — this is the case the user actually cares about (re-running
-  // an import, or uploading a statement with overlapping dates).
-  const existingDupe = findExistingDuplicate(txn, existingTxns);
-  if (existingDupe) return { status: 'duplicate', partyId: null, invoiceId: null, confidence: 'high', reason: existingDupe.reason };
-
-  const alreadyPaid = payments.find(p =>
-    p.reference && combined.includes(p.reference.toLowerCase())
-  );
-  if (alreadyPaid) return { status: 'duplicate', partyId: null, invoiceId: null, confidence: 'high', reason: 'Already recorded' };
-
-  let bestParty = null;
-  let bestScore = 0;
-  for (const party of parties) {
-    const name = party.name.toLowerCase();
-    const gstin = (party.gstin || '').toLowerCase();
-    const phone = (party.phone || '').replace(/\D/g, '');
-    let score = 0;
-    name.split(/\s+/).filter(w => w.length > 3).forEach(w => { if (combined.includes(w)) score += w.length > 6 ? 3 : 1; });
-    if (gstin && combined.includes(gstin.slice(0, 10))) score += 5;
-    if (phone && phone.length >= 10 && combined.includes(phone.slice(-10))) score += 4;
-    if (score > bestScore) { bestScore = score; bestParty = party; }
-  }
-
-  let bestInvoice = null;
-  if (bestParty) {
-    const partyInvoices = invoices.filter(i =>
-      i.party_id === bestParty.id &&
-      !['paid', 'cancelled', 'proforma'].includes(i.status) &&
-      txn.type === 'credit'
-    );
-    bestInvoice = partyInvoices.find(i => Math.abs(Number(i.total) - txn.amount) / txn.amount < 0.01)
-      || partyInvoices.find(i => Math.abs(Number(i.total) - txn.amount) < 500) || null;
-  }
-
-  const confidence = bestScore >= 4 ? 'high' : bestScore >= 2 ? 'medium' : 'low';
-  return {
-    status: bestScore >= 2 ? 'matched' : 'unknown',
-    partyId: bestParty?.id || null,
-    invoiceId: bestInvoice?.id || null,
-    confidence,
-    reason: bestScore >= 2
-      ? `Matched "${bestParty?.name}"${bestInvoice ? ` + Invoice ${bestInvoice.invoice_number}` : ''}`
-      : 'No match found',
-  };
-}
-
 const CONF_COLORS = {
   high:   { bg: '#0d2b1a', border: '#1a5c36', text: '#4ade80' },
   medium: { bg: '#2b1f08', border: '#5c3d0a', text: '#fbbf24' },
@@ -388,8 +240,8 @@ export function BankImportModal({
 
       setProgress('Classifying transactions…');
       const enriched = txns.map(txn => {
-        const je = classifyTransaction(txn);
-        const match = matchTransaction(txn, parties, invoices, payments, existingTxns);
+        const je = classifyBankTransaction(txn, activeBiz?.id || activeBiz);
+        const match = matchBankTransaction(txn, parties, invoices, payments, existingTxns);
         return {
           ...txn,
           je,
@@ -444,7 +296,7 @@ export function BankImportModal({
           _overrideCredit: row.editedCreditAcct,
         };
 
-        const result = await saveBankTxnWithJournal(txnForJe, accounts, activeBiz);
+        const result = await saveBankTxnWithJournal(txnForJe, accounts, activeBiz?.id || activeBiz);
         results.push({ row, result });
         if (result.journalId) jePosted++;
         else jeSkipped++;
@@ -454,10 +306,13 @@ export function BankImportModal({
           const inv = invoices.find(i => i.id === row.editedInvoiceId);
           if (inv) {
             const existingPaid = payments.filter(p => p.invoice_id === row.editedInvoiceId).reduce((s, p) => s + Number(p.amount), 0);
-            const isFullyPaid = (existingPaid + row.amount) >= Number(inv.total) - 0.01;
+            const outstanding = Math.max(0, Number(inv.total) - existingPaid);
+            if (outstanding <= 0.01) throw new Error(`Invoice ${inv.invoice_number} is already fully paid.`);
+            const appliedAmount = Math.min(Number(row.amount), outstanding);
+            const isFullyPaid = (existingPaid + appliedAmount) >= Number(inv.total) - 0.01;
             await savePayment({
               invoice_id: row.editedInvoiceId, business_id: inv.business_id,
-              party_id: row.editedPartyId || inv.party_id, amount: row.amount,
+              party_id: row.editedPartyId || inv.party_id, amount: appliedAmount,
               payment_date: row.date, method: 'Bank Transfer',
               reference: row.reference || '', notes: 'Auto-imported from bank statement',
             });
@@ -649,7 +504,13 @@ export function BankImportModal({
               invoices={invoices}
               accounts={accounts}
               activeBiz={activeBiz}
-              onSave={(patch) => { updateRow(editingIdx, { ...patch, approved: true }); setEditingIdx(null); }}
+              onSave={(patch) => {
+                if (patch.rememberRule && patch.ruleKeyword) {
+                  saveBankAutomationRule({ businessId: activeBiz?.id || activeBiz, keyword: patch.ruleKeyword, type: row.type, debitAcct: patch.editedDebitAcct, creditAcct: patch.editedCreditAcct, label: patch.ruleLabel });
+                }
+                updateRow(editingIdx, { ...patch, approved: true });
+                setEditingIdx(null);
+              }}
               onClose={() => setEditingIdx(null)}
             />
           )}
@@ -725,6 +586,8 @@ function EditPanel({ row, parties, invoices, accounts, activeBiz, onSave, onClos
   const [debitAcct, setDebitAcct] = useState(row.editedDebitAcct || row.je?.debitAcct || '');
   const [creditAcct, setCreditAcct] = useState(row.editedCreditAcct || row.je?.creditAcct || '');
   const [postAs, setPostAs] = useState(row.postAs || (row.type === 'credit' ? 'payment' : 'expense'));
+  const [rememberRule, setRememberRule] = useState(false);
+  const [ruleKeyword, setRuleKeyword] = useState((row.description || '').split(/\s+/).filter(Boolean)[0] || '');
 
   const bizAccounts = (accounts || []).filter(a => a.business_id === activeBiz);
   const partyInvoices = invoices.filter(i => i.party_id === partyId && !['cancelled', 'proforma'].includes(i.status));
@@ -763,6 +626,18 @@ function EditPanel({ row, parties, invoices, accounts, activeBiz, onSave, onClos
           </select>
         </FG>
       </div>
+      <div style={{ marginTop: 10, padding: '10px 12px', borderRadius: 7, background: 'var(--bg2)', border: '1px solid var(--border)' }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--text2)', cursor: 'pointer' }}>
+          <input type="checkbox" checked={rememberRule} onChange={e => setRememberRule(e.target.checked)} />
+          Remember this as an automation rule for this business
+        </label>
+        {rememberRule && (
+          <div className="form-row cols-2" style={{ marginTop: 8 }}>
+            <FG label="Match keyword / phrase"><input value={ruleKeyword} onChange={e => setRuleKeyword(e.target.value)} placeholder="e.g. amazon" /></FG>
+            <FG label="Rule label"><input value={row.je?.label || ''} readOnly /></FG>
+          </div>
+        )}
+      </div>
       <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 8 }}>
         <button className="btn btn-ghost btn-sm" onClick={onClose}>Cancel</button>
         <button className="btn btn-primary btn-sm" onClick={() => onSave({
@@ -771,6 +646,9 @@ function EditPanel({ row, parties, invoices, accounts, activeBiz, onSave, onClos
           editedDebitAcct: debitAcct,
           editedCreditAcct: creditAcct,
           postAs,
+          rememberRule,
+          ruleKeyword: ruleKeyword.trim(),
+          ruleLabel: row.je?.label || 'Custom Rule',
         })}>Save & Approve</button>
       </div>
     </div>
