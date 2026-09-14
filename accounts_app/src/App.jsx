@@ -651,6 +651,7 @@ CREATE INDEX IF NOT EXISTS idx_expenses_journal ON expenses(journal_posted);
 -- Before running the unique indexes below, check for existing duplicate
 -- invoice/CN numbers — see compliance_fixes_migration.sql for the check queries.
 
+-- Legacy compatibility: keep the old field for existing databases; the sales UI/reporting no longer exposes RCM.
 ALTER TABLE invoices ADD COLUMN IF NOT EXISTS reverse_charge boolean DEFAULT false;
 ALTER TABLE invoices ADD COLUMN IF NOT EXISTS ship_to_address text;
 ALTER TABLE credit_notes ADD COLUMN IF NOT EXISTS note_type text DEFAULT 'tax';
