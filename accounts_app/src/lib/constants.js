@@ -291,7 +291,7 @@ export const MAX_HSN_DIGITS = 8;
 const HSN_LOOKUP = [
   { hsn: '6109', label: 'knitted T-shirts / singlets', keywords: ['t-shirt', 'tshirt', 'tee', 'tees', 'singlet'] },
   { hsn: '6110', label: 'knitted jerseys / pullovers / hoodies', keywords: ['hoodie', 'hoodies', 'sweatshirt', 'sweatshirts', 'pullover', 'jersey'] },
-  { hsn: '6103', label: 'knitted trousers / joggers', keywords: ['jogger', 'joggers', 'track pant', 'trackpants', 'knitted trouser'] },
+  { hsn: '6103', label: 'knitted trousers / joggers', keywords: ['jogger', 'joggers', 'track pant', 'trackpants', 'knitted trouser', 'pants'] },
   { hsn: '6203', label: 'men’s trousers / shorts / jackets', keywords: ['men jacket', 'mens jacket', 'men jeans', 'mens jeans'] },
   { hsn: '6204', label: 'women’s garments', keywords: ['women jacket', 'womens jacket', 'women jeans', 'womens jeans', 'women dress', 'womens dress'] },
   { hsn: '6201', label: 'woven jackets / outerwear', keywords: ['jacket', 'jackets', 'overcoat', 'overcoats', 'coat', 'coats'] },
