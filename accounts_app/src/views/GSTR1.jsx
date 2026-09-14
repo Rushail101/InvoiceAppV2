@@ -470,6 +470,41 @@ function HSNTable({ b2bInvoices, b2cInvoices, allItems }) {
   );
 }
 
+// ─── CREDIT / DEBIT NOTE TABLE ────────────────────────────────────────────────
+function NotesTable({ rows, kind }) {
+  if (!rows.length) return <EmptyState icon={kind === 'debit' ? '↗' : '↩'} message={`No ${kind} notes for this period`} sub="Issued GST notes with valid original-invoice references appear here" />;
+  const totals = rows.reduce((a, r) => ({
+    taxable: a.taxable + r.taxable,
+    cgst: a.cgst + r.cgst,
+    sgst: a.sgst + r.sgst,
+    igst: a.igst + r.igst,
+    total: a.total + r.total,
+  }), { taxable: 0, cgst: 0, sgst: 0, igst: 0, total: 0 });
+  return <div className="table-wrap">
+    <table>
+      <thead><tr><th>Type</th><th>Note #</th><th>Date</th><th>Original Invoice</th><th>Party</th><th>GSTIN</th><th className="r">Taxable</th><th className="r">CGST</th><th className="r">SGST</th><th className="r">IGST</th><th className="r">Total</th></tr></thead>
+      <tbody>
+        {rows.map(r => <tr key={r.id}>
+          <td><span className={`badge ${r.kind === 'debit' ? 'badge-debit' : 'badge-credit_note'}`}>{r.kind === 'debit' ? 'DEBIT' : 'CREDIT'}</span></td>
+          <td className="mono" style={{ color: r.kind === 'debit' ? 'var(--accent)' : '#ff8cc8' }}>{r.number}</td>
+          <td className="mono" style={{ fontSize: 11 }}>{fmtDate(r.date)}</td>
+          <td className="mono" style={{ fontSize: 11, color: 'var(--text3)' }}>{r.originalNumber || '—'}</td>
+          <td>{r.party?.name || '—'}</td>
+          <td className="mono" style={{ fontSize: 10 }}>{r.party?.gstin || '—'}</td>
+          <td className="r mono">{fmt(r.taxable)}</td>
+          <td className="r mono">{fmt(r.cgst)}</td>
+          <td className="r mono">{fmt(r.sgst)}</td>
+          <td className="r mono">{fmt(r.igst)}</td>
+          <td className="r mono" style={{ fontWeight: 600 }}>{fmt(r.total)}</td>
+        </tr>)}
+      </tbody>
+      <tfoot><tr style={{ fontWeight: 700, background: 'var(--bg3)' }}>
+        <td colSpan={6}>TOTAL</td><td className="r mono">{fmt(totals.taxable)}</td><td className="r mono">{fmt(totals.cgst)}</td><td className="r mono">{fmt(totals.sgst)}</td><td className="r mono">{fmt(totals.igst)}</td><td className="r mono">{fmt(totals.total)}</td>
+      </tr></tfoot>
+    </table>
+  </div>;
+}
+
 // ─── GST SUMMARY CARDS ────────────────────────────────────────────────────────
 function GSTSummaryCards({ invoices }) {
   const totTaxable = invoices.reduce((s, r) => s + r.taxable, 0);
@@ -505,7 +540,7 @@ function GSTSummaryCards({ invoices }) {
 }
 
 // ─── MAIN GSTR-1 VIEW ─────────────────────────────────────────────────────────
-export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceItems, payments = [], reload }) {
+export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceItems, payments = [], creditNotes = [], debitNotes = [], reload }) {
   const periods = getPeriodOptions();
   const currentMonth = new Date().toISOString().slice(0, 7);
   const defaultPeriod = periods.find(p => p.value === currentMonth)?.value || periods[0]?.value;
@@ -549,6 +584,29 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceIte
   const b2bInvoices = b2bAll.filter(r => !r.reverse_charge);
   const rcmInvoices = b2bAll.filter(r => r.reverse_charge);
   const b2cInvoices = periodInvoices.filter(r => !r.party?.gstin);
+
+  const periodCreditNotes = useMemo(() => (creditNotes || []).filter(cn => {
+    const bizMatch = activeBiz ? cn.business_id === activeBiz : true;
+    return bizMatch && cn.note_type !== 'commercial' && cn.cn_date?.startsWith(period);
+  }).map(cn => {
+    const party = parties.find(p => p.id === cn.party_id) || {};
+    const inv = invoices.find(i => i.id === cn.invoice_id);
+    return { kind: 'credit', id: cn.id, number: cn.cn_number, date: cn.cn_date, originalNumber: inv?.invoice_number, party, taxable: Number(cn.subtotal || 0), cgst: Number(cn.cgst_amount || 0), sgst: Number(cn.sgst_amount || 0), igst: Number(cn.igst_amount || 0), total: Number(cn.total || 0) };
+  }), [creditNotes, parties, invoices, activeBiz, period]);
+
+  const periodDebitNotes = useMemo(() => (debitNotes || []).filter(dn => {
+    const bizMatch = activeBiz ? dn.business_id === activeBiz : true;
+    return bizMatch && dn.dn_date?.startsWith(period) && dn.status !== 'cancelled';
+  }).map(dn => {
+    const party = parties.find(p => p.id === dn.party_id) || {};
+    const inv = invoices.find(i => i.id === dn.invoice_id);
+    return { kind: 'debit', id: dn.id, number: dn.dn_number, date: dn.dn_date, originalNumber: inv?.invoice_number, party, taxable: Number(dn.subtotal || 0), cgst: Number(dn.cgst_amount || 0), sgst: Number(dn.sgst_amount || 0), igst: Number(dn.igst_amount || 0), total: Number(dn.total || 0) };
+  }), [debitNotes, parties, invoices, activeBiz, period]);
+
+  const registeredCreditNotes = periodCreditNotes.filter(r => r.party?.gstin);
+  const unregisteredCreditNotes = periodCreditNotes.filter(r => !r.party?.gstin);
+  const registeredDebitNotes = periodDebitNotes.filter(r => r.party?.gstin);
+  const unregisteredDebitNotes = periodDebitNotes.filter(r => !r.party?.gstin);
 
   const unfiledInvoices = useMemo(() =>
     eligibleInvoices
@@ -636,6 +694,7 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceIte
     { id: 'b2b', label: `📋 B2B (${b2bInvoices.length})` },
     { id: 'rcm', label: `🔄 RCM (${rcmInvoices.length})` },
     { id: 'b2c', label: `🛒 B2C (${b2cInvoices.length})` },
+    { id: 'notes', label: `↩↗ Notes (${periodCreditNotes.length + periodDebitNotes.length})` },
     { id: 'hsn', label: '🏷️ HSN Summary' },
     { id: 'unfiled', label: `⚠ Unfiled (${unfiledInvoices.length})` },
   ];
@@ -897,6 +956,18 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceIte
       )}
 
       {activeTab === 'b2c' && <B2CTable rows={b2cInvoices} allItems={allItems} />}
+      {activeTab === 'notes' && (
+        <div>
+          <div className="section-title" style={{ marginTop: 0 }}>Credit / Debit Notes — GSTR-1</div>
+          <div style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 14 }}>
+            Tax credit notes are shown separately from commercial/goodwill notes. Debit notes increase taxable value or tax payable and are reported with the corresponding original invoice reference.
+          </div>
+          <div className="section-title">Registered recipients — CDNR</div>
+          <NotesTable rows={[...registeredCreditNotes, ...registeredDebitNotes].sort((a, b) => new Date(a.date) - new Date(b.date))} kind="registered" />
+          <div className="section-title">Unregistered recipients — CDNUR</div>
+          <NotesTable rows={[...unregisteredCreditNotes, ...unregisteredDebitNotes].sort((a, b) => new Date(a.date) - new Date(b.date))} kind="unregistered" />
+        </div>
+      )}
       {activeTab === 'hsn' && <HSNTable b2bInvoices={b2bInvoices} b2cInvoices={b2cInvoices} allItems={allItems} />}
 
       {activeTab === 'unfiled' && (
