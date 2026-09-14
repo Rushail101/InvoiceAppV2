@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from 'react';
-import { fmt, fmtDate, today, PAY_MODES, INDIAN_STATES, STATE_CODES, EXPENSE_CATEGORIES } from '../lib/constants.js';
+import { fmt, fmtDate, today, PAY_MODES, INDIAN_STATES, STATE_CODES, EXPENSE_CATEGORIES, B2CL_THRESHOLD } from '../lib/constants.js';
 import { saveParty, deleteParty, saveExpenseWithJournal, deleteExpense, savePayment, saveBankAccount, saveBankTxnWithJournal, deleteBankTxn, deletePayment, updateInvoiceStatus, saveInvoice, uploadExpenseAttachment, getExpenseAttachmentUrl } from '../lib/db.js';
 import { Badge, ModalShell, FG, EmptyState, StatCard, PillTabs } from '../components/ui.jsx';
 import { BankImportModal } from './BankImport.jsx';
@@ -696,10 +696,11 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz }) {
 
   // B2B: invoices with GSTIN
   const b2b = saleInvoices.filter(i => { const p = parties.find(pt => pt.id === i.party_id); return p?.gstin; });
-  // B2C Large: no GSTIN, amount > 2.5 lakh inter-state
-  const b2cLarge = saleInvoices.filter(i => { const p = parties.find(pt => pt.id === i.party_id); return !p?.gstin && i.is_interstate && Number(i.total) > 250000; });
+  // B2C Large: no GSTIN, inter-state, invoice value > B2CL_THRESHOLD
+  // (₹1L effective 1 Aug 2024, Notification 12/2024-CT — was ₹2.5L before that)
+  const b2cLarge = saleInvoices.filter(i => { const p = parties.find(pt => pt.id === i.party_id); return !p?.gstin && i.is_interstate && Number(i.total) > B2CL_THRESHOLD; });
   // B2C Small: rest
-  const b2cSmall = saleInvoices.filter(i => { const p = parties.find(pt => pt.id === i.party_id); return !p?.gstin && !(i.is_interstate && Number(i.total) > 250000); });
+  const b2cSmall = saleInvoices.filter(i => { const p = parties.find(pt => pt.id === i.party_id); return !p?.gstin && !(i.is_interstate && Number(i.total) > B2CL_THRESHOLD); });
 
   const totalTaxable = saleInvoices.reduce((s, i) => s + Number(i.subtotal || 0), 0);
   const totalCGST = saleInvoices.reduce((s, i) => s + Number(i.cgst_amount || 0), 0);
