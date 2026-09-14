@@ -123,7 +123,7 @@ export function AgingView({ invoices, parties, payments, businesses, activeBiz }
 
 // ─── PARTY STATEMENT ──────────────────────────────────────────────────────────
 
-export function PartyStatementView({ parties, invoices, payments, creditNotes, businesses, activeBiz }) {
+export function PartyStatementView({ parties, invoices, payments, creditNotes, debitNotes = [], businesses, activeBiz }) {
   const [partyId, setPartyId] = useState('');
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
@@ -154,7 +154,9 @@ export function PartyStatementView({ parties, invoices, payments, creditNotes, b
   const partyPayments = payments.filter(p => p.party_id === partyId)
     .sort((a, b) => new Date(a.payment_date) - new Date(b.payment_date));
   const partyCNs = creditNotes.filter(c => c.party_id === partyId)
-    .sort((a, b) => new Date(a.issue_date) - new Date(b.issue_date));
+    .sort((a, b) => new Date(a.cn_date) - new Date(b.cn_date));
+  const partyDNs = debitNotes.filter(d => d.party_id === partyId)
+    .sort((a, b) => new Date(a.dn_date) - new Date(b.dn_date));
 
   // Build the full ledger first (needed to compute an accurate opening
   // balance for whatever date range gets picked), then split it into the
@@ -167,7 +169,8 @@ export function PartyStatementView({ parties, invoices, payments, creditNotes, b
     const label = linkedInv?.status === 'proforma' ? `Advance (${linkedInv.invoice_number})` : `Payment (${pay.method || '—'})`;
     allLines.push({ date: pay.payment_date, type: 'payment', ref: pay.reference || pay.method, desc: label, debit: 0, credit: Number(pay.amount), id: pay.id });
   });
-  partyCNs.forEach(cn => allLines.push({ date: cn.issue_date, type: 'cn', ref: cn.cn_number, desc: 'Credit Note', debit: 0, credit: Number(cn.amount), id: cn.id }));
+  partyCNs.forEach(cn => allLines.push({ date: cn.cn_date, type: 'cn', ref: cn.cn_number, desc: 'Credit Note', debit: 0, credit: Number(cn.total || 0), id: cn.id }));
+  partyDNs.forEach(dn => allLines.push({ date: dn.dn_date, type: 'dn', ref: dn.dn_number, desc: 'Debit Note', debit: Number(dn.total || 0), credit: 0, id: dn.id }));
   allLines.sort((a, b) => new Date(a.date) - new Date(b.date));
 
   const openingBal = dateFrom
