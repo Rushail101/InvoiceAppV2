@@ -1,6 +1,6 @@
 // views/GSTR1.jsx — GSTR-1 Summary Report with 5% & 18% Tax Rate Separation
 import { useState, useMemo } from 'react';
-import { fmt, fmtDate, getFY, STATE_CODES } from '../lib/constants.js';
+import { fmt, fmtDate, getFY, STATE_CODES, B2CL_THRESHOLD } from '../lib/constants.js';
 import { EmptyState, PillTabs } from '../components/ui.jsx';
 import { markGSTFiled } from '../lib/db.js';
 
@@ -209,8 +209,9 @@ function B2BTable({ rows, selected, onToggle, onToggleAll }) {
 function B2CTable({ rows, allItems }) {
   if (!rows.length) return <EmptyState icon="🛒" message="No B2C invoices for this period" sub="B2C = invoices raised to parties without a GSTIN" />;
 
-  const b2cl = rows.filter(r => !r.isIntra && r.total > 250000);
-  const b2csInvoices = rows.filter(r => r.isIntra || r.total <= 250000);
+  // ₹1L threshold effective 1 Aug 2024 (Notification 12/2024-CT) — was ₹2.5L before
+  const b2cl = rows.filter(r => !r.isIntra && r.total > B2CL_THRESHOLD);
+  const b2csInvoices = rows.filter(r => r.isIntra || r.total <= B2CL_THRESHOLD);
 
   // Group B2C Small by State + Supply Type + Tax Rate (Standard GSTR-1 format)
   const b2csGroups = {};
