@@ -117,7 +117,7 @@ function PartyModal({ onClose, onSave, businesses, editData }) {
 }
 
 // ─── AR LEDGER ────────────────────────────────────────────────────────────────
-export function ARLedgerView({ invoices, payments, creditNotes, parties, businesses, activeBiz }) {
+export function ARLedgerView({ invoices, payments, creditNotes, debitNotes = [], parties, businesses, activeBiz }) {
   const [selectedParty, setSelectedParty] = useState('');
   const [agingTab, setAgingTab] = useState('ledger');
 
@@ -131,8 +131,10 @@ export function ARLedgerView({ invoices, payments, creditNotes, parties, busines
     const totalPaid = cInvs.reduce((s, i) => (paysByInv[i.id] || []).reduce((ps, p) => ps + Number(p.amount), 0) + s, 0);
     const balance = totalBilled - totalPaid;
     const cCNs = creditNotes.filter(cn => cn.party_id === c.id);
-    const cnTotal = cCNs.reduce((s, cn) => s + Number(cn.total), 0);
-    const netBalance = balance - cnTotal;
+    const cnTotal = cCNs.reduce((s, cn) => s + Number(cn.total || 0), 0);
+    const cDNs = debitNotes.filter(dn => dn.party_id === c.id);
+    const dnTotal = cDNs.reduce((s, dn) => s + Number(dn.total || 0), 0);
+    const netBalance = balance - cnTotal + dnTotal;
     // Aging
     const now = new Date();
     let aging0 = 0, aging30 = 0, aging60 = 0, aging90 = 0;
@@ -146,7 +148,7 @@ export function ARLedgerView({ invoices, payments, creditNotes, parties, busines
       else if (days <= 60) aging60 += bal;
       else aging90 += bal;
     });
-    return { ...c, totalBilled, totalPaid, balance, cnTotal, netBalance, aging0, aging30, aging60, aging90 };
+    return { ...c, totalBilled, totalPaid, balance, cnTotal, dnTotal, netBalance, aging0, aging30, aging60, aging90 };
   });
 
   const grandBalance = clientSummaries.reduce((s, c) => s + c.netBalance, 0);
