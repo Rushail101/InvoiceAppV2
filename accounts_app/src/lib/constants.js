@@ -246,6 +246,13 @@ export const getFY = () => {
   const sy = m >= 3 ? y : y - 1;
   return `${String(sy).slice(-2)}-${String(sy + 1).slice(-2)}`;
 };
+// Same as getFY() but for an arbitrary date instead of "now" — Indian FY
+// runs April→March.
+export const getFYForDate = (dateStr) => {
+  const d = new Date(dateStr); const y = d.getFullYear(); const m = d.getMonth();
+  const sy = m >= 3 ? y : y - 1;
+  return `${String(sy).slice(-2)}-${String(sy + 1).slice(-2)}`;
+};
 
 export function nextInvNum(invoices, isProforma) {
   const fy = getFY();
@@ -272,6 +279,52 @@ export function nextCNNum(creditNotes) {
   const pat = new RegExp(`^CN-${fy}/(\\d+)$`);
   let max = 0; creditNotes.forEach(c => { const m = (c.cn_number || '').match(pat); if (m) max = Math.max(max, parseInt(m[1], 10)); });
   return `CN-${fy}/${String(max + 1).padStart(3, '0')}`;
+}
+
+// GSTIN format + checksum validation (15 chars: 2-digit state code,
+// 10-char PAN, 1 entity code, 'Z' by default, 1 checksum digit).
+// Returns true/false — used to warn before a bad GSTIN goes on a printed
+// tax invoice (a typo here makes the recipient's ITC claim fail in 2B).
+const GSTIN_CHARS = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+export function isGSTINValid(gstin) {
+  if (!gstin) return false;
+  const g = gstin.trim().toUpperCase();
+  if (!/^\d{2}[A-Z]{5}\d{4}[A-Z][A-Z\d]Z[A-Z\d]$/.test(g)) return false;
+  // Checksum (mod-36) over the first 14 characters, per the GSTN spec
+  let factor = 2, sum = 0;
+  for (let i = 13; i >= 0; i--) {
+    let code = GSTIN_CHARS.indexOf(g[i]) * factor;
+    factor = factor === 2 ? 1 : 2;
+    sum += Math.floor(code / 36) + (code % 36);
+  }
+  const checkChar = GSTIN_CHARS[(36 - (sum % 36)) % 36];
+  return checkChar === g[14];
+}
+
+// GST 2.0 (effective 22 Sep 2025) collapsed most goods, including
+// readymade garments/made-ups, to two slabs based on per-piece sale
+// price: ≤ ₹2,500 → 5%, above → 18%. Used to auto-suggest the line-item
+// tax rate instead of leaving 12%/28% (now largely obsolete) as manual
+// picks. Not a substitute for checking the HSN's actual current rate for
+// non-apparel items.
+export const GARMENT_RATE_THRESHOLD = 2500;
+export function garmentGSTRate(unitPrice) {
+  return Number(unitPrice || 0) > GARMENT_RATE_THRESHOLD ? 18 : 5;
+}
+
+// GSTR-1 Table 5 threshold for invoice-wise ("B2C Large") reporting of
+// inter-state supplies to unregistered persons. Reduced from ₹2.5L to
+// ₹1L effective 1 Aug 2024 (Notification 12/2024-Central Tax). Below
+// this, inter-state B2C invoices fall into the B2CS summary instead.
+export const B2CL_THRESHOLD = 100000;
+
+// Credit notes affecting supplies of a given FY are only valid for
+// adjusting GST output liability if issued by 30 Nov following that
+// FY's end (or before the annual return is filed, whichever is
+// earlier) — Section 34(2) CGST Act. FY string like "25-26".
+export function creditNoteDeadline(fy) {
+  const endYear = 2000 + parseInt(fy.split('-')[1], 10);
+  return `${endYear}-11-30`;
 }
 
 // CGST/SGST vs IGST determination
