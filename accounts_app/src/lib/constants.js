@@ -281,6 +281,60 @@ export function nextCNNum(creditNotes) {
   return `CN-${fy}/${String(max + 1).padStart(3, '0')}`;
 }
 
+
+// HSN helpers. Keep the classifier intentionally conservative: it only
+// suggests a code when the product description contains a strong keyword.
+// The suggestion is never treated as authoritative classification.
+export const MIN_HSN_DIGITS = 4;
+export const MAX_HSN_DIGITS = 8;
+
+const HSN_LOOKUP = [
+  { hsn: '6109', label: 'knitted T-shirts / singlets', keywords: ['t-shirt', 'tshirt', 'tee', 'tees', 'singlet'] },
+  { hsn: '6110', label: 'knitted jerseys / pullovers / hoodies', keywords: ['hoodie', 'hoodies', 'sweatshirt', 'sweatshirts', 'pullover', 'jersey'] },
+  { hsn: '6103', label: 'knitted trousers / joggers', keywords: ['jogger', 'joggers', 'track pant', 'trackpants', 'knitted trouser'] },
+  { hsn: '6203', label: 'men’s trousers / shorts / jackets', keywords: ['men jacket', 'mens jacket', 'men jeans', 'mens jeans'] },
+  { hsn: '6204', label: 'women’s garments', keywords: ['women jacket', 'womens jacket', 'women jeans', 'womens jeans', 'women dress', 'womens dress'] },
+  { hsn: '6201', label: 'woven jackets / outerwear', keywords: ['jacket', 'jackets', 'overcoat', 'overcoats', 'coat', 'coats'] },
+  { hsn: '6203', label: 'woven men’s jeans / trousers', keywords: ['jean', 'jeans', 'denim trouser', 'cargo pant', 'cargo pants', 'men trouser', 'mens trouser', 'men short', 'mens short'] },
+  { hsn: '6204', label: 'woven women’s dresses / trousers', keywords: ['dress', 'dresses', 'skirt', 'skirts', 'women trouser', 'womens trouser', 'women short', 'womens short'] },
+  { hsn: '6105', label: 'knitted men’s shirts / polos', keywords: ['polo', 'polos', 'knit shirt', 'knitted shirt'] },
+  { hsn: '6205', label: 'woven men’s shirts', keywords: ['shirt', 'shirts', 'overshirt', 'overshirts'] },
+  { hsn: '6505', label: 'caps / textile headgear', keywords: ['cap', 'caps', 'bucket hat', 'beanie'] },
+  { hsn: '6115', label: 'socks / hosiery', keywords: ['sock', 'socks', 'hosiery'] },
+  { hsn: '6217', label: 'belts / clothing accessories', keywords: ['belt', 'belts'] },
+  { hsn: '4202', label: 'bags / luggage', keywords: ['bag', 'bags', 'backpack', 'backpacks', 'tote bag', 'sling bag'] },
+  { hsn: '6107', label: 'men’s underwear', keywords: ['underwear', 'brief', 'briefs', 'boxer', 'boxers'] },
+  { hsn: '5208', label: 'woven cotton fabric', keywords: ['cotton fabric', 'woven fabric', 'cotton cloth'] },
+  { hsn: '6006', label: 'other knitted fabrics', keywords: ['knitted fabric', 'knit fabric', 'jersey fabric'] },
+];
+
+export function isHSNValid(value, minDigits = MIN_HSN_DIGITS) {
+  const h = String(value || '').trim();
+  return new RegExp(`^\\d{${minDigits},${MAX_HSN_DIGITS}}$`).test(h);
+}
+
+export function guessHSN(description) {
+  const text = String(description || '').trim().toLowerCase();
+  if (!text) return null;
+  for (const entry of HSN_LOOKUP) {
+    if (entry.keywords.some(k => text.includes(k))) {
+      return { hsn: entry.hsn, label: entry.label };
+    }
+  }
+  return null;
+}
+
+export function nextDNNum(debitNotes) {
+  const fy = getFY();
+  const pat = new RegExp(`^DN-${fy}/(\\d+)$`);
+  let max = 0;
+  (debitNotes || []).forEach(d => {
+    const m = (d.dn_number || '').match(pat);
+    if (m) max = Math.max(max, parseInt(m[1], 10));
+  });
+  return `DN-${fy}/${String(max + 1).padStart(3, '0')}`;
+}
+
 // GSTIN format + checksum validation (15 chars: 2-digit state code,
 // 10-char PAN, 1 entity code, 'Z' by default, 1 checksum digit).
 // Returns true/false — used to warn before a bad GSTIN goes on a printed
