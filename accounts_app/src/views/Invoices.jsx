@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { fmt, fmtDate, today, GST_RATES, PAY_MODES, INDIAN_STATES, gstType, calcLineTax, nextInvNum, getFY } from '../lib/constants.js';
-import { saveInvoice, getInvoiceItems, updateInvoiceStatus, deleteInvoice, savePaymentWithJournal } from '../lib/db.js';
+import { fmt, fmtDate, today, GST_RATES, PAY_MODES, INDIAN_STATES, gstType, calcLineTax, nextInvNum, getFY, garmentGSTRate, isGSTINValid } from '../lib/constants.js';
+import { saveInvoice, getInvoiceItems, updateInvoiceStatus, deleteInvoice, cancelInvoice, savePaymentWithJournal } from '../lib/db.js';
 import { printInvoice } from '../lib/pdf.js';
 import { Badge, ModalShell, FG, PayHistory, EmptyState } from '../components/ui.jsx';
 
@@ -10,14 +10,24 @@ import { Badge, ModalShell, FG, PayHistory, EmptyState } from '../components/ui.
 // taxable value is backed out of it instead. Either way taxable/cgst/sgst/
 // igst/lineTotal end up as real numbers stored per line, so nothing else
 // downstream (PDF, ledgers, GSTR-1) needs to know which mode was used.
-function calcItem(it, isIntrastate, priceMode = 'exclusive') {
+//
+// invDiscRatio: an optional invoice-level discount, applied as a uniform
+// fraction reduction to the (already line-discounted) taxable value BEFORE
+// tax is computed — per Sec 15(3) CGST Act, discounts must reduce the
+// taxable value, not the post-tax total. Scaling every line's taxable value
+// by the same factor scales that line's tax by the same factor too, so the
+// invoice grand total ends up scaled by exactly (1 - invDiscRatio), which is
+// what lets the caller solve for the ratio from a target ₹ or % discount
+// (see InvoiceModal) while keeping taxable + tax == total on every line.
+function calcItem(it, isIntrastate, priceMode = 'exclusive', invDiscRatio = 0) {
   const base = (Number(it.quantity) || 0) * (Number(it.unit_price) || 0);
   const discAmt = base * (Number(it.discount_percent || 0) / 100);
   const net = base - discAmt;
   const taxPercent = Number(it.tax_percent || 0);
-  const taxable = priceMode === 'inclusive' ? net / (1 + taxPercent / 100) : net;
+  let taxable = priceMode === 'inclusive' ? net / (1 + taxPercent / 100) : net;
+  taxable = taxable * (1 - invDiscRatio);
   const { cgst, sgst, igst } = calcLineTax(taxable, taxPercent, isIntrastate);
-  const lineTotal = priceMode === 'inclusive' ? net : taxable + cgst + sgst + igst;
+  const lineTotal = taxable + cgst + sgst + igst;
   return { ...it, base, discAmt, taxable, cgst, sgst, igst, lineTotal };
 }
 
@@ -39,6 +49,7 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
     tds_amount: editData?.tds_amount || 0,
     price_mode: editData?.price_mode || 'exclusive',
     round_off: editData?.round_off ?? false,
+    reverse_charge: editData?.reverse_charge ?? false,
   });
 
   const [items, setItems] = useState(
@@ -53,7 +64,27 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
   const isIntrastate = gstType(bizObj.state, partyObj.state) === 'intrastate';
   const filteredParties = parties.filter(p => p.business_id === f.business_id);
 
-  const calc = items.map(it => calcItem(it, isIntrastate, f.price_mode));
+  // Pass 1 — no invoice-level discount yet — just to know the pre-discount
+  // grand total, which the ratio below is solved against.
+  const calc0 = items.map(it => calcItem(it, isIntrastate, f.price_mode));
+  const subtotal0 = calc0.reduce((s, i) => s + i.taxable, 0);
+  const tax0 = calc0.reduce((s, i) => s + i.cgst + i.sgst + i.igst, 0);
+  const grand0 = subtotal0 + tax0;
+
+  // Invoice-level discount — % or flat ₹, whichever is non-zero (flat takes
+  // priority). Converted to a uniform ratio applied to every line's taxable
+  // value (pre-tax), not to the post-tax total — see calcItem() comment.
+  // Because scaling every line's taxable by the same factor scales that
+  // line's tax by the same factor too, grand0 * (1 - ratio) lands exactly
+  // on the ₹ or % discount the user asked for.
+  const invDiscPct = Number(f.discount_percent || 0);
+  const invDiscFlat = Number(f.discount_amount || 0);
+  const invDiscRatio = invDiscFlat > 0
+    ? (grand0 > 0 ? Math.min(1, invDiscFlat / grand0) : 0)
+    : Math.min(1, invDiscPct / 100);
+
+  // Pass 2 — apply the resolved ratio to get the real, tax-consistent totals.
+  const calc = items.map(it => calcItem(it, isIntrastate, f.price_mode, invDiscRatio));
   const subtotal = calc.reduce((s, i) => s + i.taxable, 0);
   const totalCGST = calc.reduce((s, i) => s + i.cgst, 0);
   const totalSGST = calc.reduce((s, i) => s + i.sgst, 0);
@@ -61,12 +92,9 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
   const totalTax = totalCGST + totalSGST + totalIGST;
   const grand = subtotal + totalTax;
 
-  // Invoice-level discount — % or flat ₹, whichever is non-zero (flat takes priority)
-  const invDiscPct = Number(f.discount_percent || 0);
-  const invDiscFlat = Number(f.discount_amount || 0);
-  const invDiscAmt = invDiscFlat > 0 ? invDiscFlat : grand * (invDiscPct / 100);
-  const invDiscPctDisplay = grand > 0 ? (invDiscAmt / grand) * 100 : 0;
-  const finalTotal = grand - invDiscAmt;
+  const invDiscAmt = grand0 - grand;
+  const invDiscPctDisplay = grand0 > 0 ? (invDiscAmt / grand0) * 100 : 0;
+  const finalTotal = grand;
 
   // Round-off — snaps the final payable amount to the nearest whole rupee
   // (standard practice on Indian tax invoices). The difference between the
@@ -76,7 +104,18 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
   const roundOffAmt = roundedTotal - finalTotal;
   const payableTotal = f.round_off ? roundedTotal : finalTotal;
 
-  function upd(idx, field, val) { setItems(prev => prev.map((it, i) => i !== idx ? it : { ...it, [field]: val })); }
+  function upd(idx, field, val) {
+    setItems(prev => prev.map((it, i) => {
+      if (i !== idx) return it;
+      const next = { ...it, [field]: val };
+      // Auto-suggest the GST rate off the current 2-slab garment rule
+      // (≤₹2,500/piece → 5%, above → 18%) whenever the rate is edited.
+      // Only fires on a price edit, so a deliberate manual GST% pick
+      // (e.g. for a non-apparel line) sticks unless the price changes again.
+      if (field === 'unit_price') next.tax_percent = garmentGSTRate(val);
+      return next;
+    }));
+  }
   function addRow() { setItems(p => [...p, { description: '', hsn_code: '', quantity: 1, unit_price: 0, discount_percent: 0, tax_percent: 5 }]); }
   function remRow(idx) { setItems(p => p.filter((_, i) => i !== idx)); }
 
@@ -128,7 +167,9 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
           </select>
         </FG>
         <FG label="Invoice #">
-          <input value={f.invoice_number} onChange={e => setF(x => ({ ...x, invoice_number: e.target.value }))} />
+          <input value={f.invoice_number} disabled={!!editData?.gst_filed}
+            onChange={e => setF(x => ({ ...x, invoice_number: e.target.value }))} />
+          {editData?.gst_filed && <div style={{ fontSize: 10, color: 'var(--text3)', marginTop: 3 }}>Locked — already marked GST-filed. Cancel and reissue instead of renumbering.</div>}
         </FG>
       </div>
 
@@ -158,7 +199,7 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
                 value={f.discount_percent || ''}
                 onChange={e => {
                   const pct = e.target.value;
-                  const flat = pct ? (grand * (Number(pct) / 100)).toFixed(2) : 0;
+                  const flat = pct ? (grand0 * (Number(pct) / 100)).toFixed(2) : 0;
                   setF(x => ({ ...x, discount_percent: pct, discount_amount: Number(flat) }));
                 }} />
               <span style={{position:'absolute',right:7,top:'50%',transform:'translateY(-50%)',fontSize:11,color:'var(--text3)',pointerEvents:'none'}}>%</span>
@@ -172,7 +213,7 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
                 value={f.discount_amount || ''}
                 onChange={e => {
                   const flat = e.target.value;
-                  const pct = (flat && grand > 0) ? ((Number(flat) / grand) * 100).toFixed(4) : 0;
+                  const pct = (flat && grand0 > 0) ? ((Number(flat) / grand0) * 100).toFixed(4) : 0;
                   setF(x => ({ ...x, discount_amount: Number(flat), discount_percent: Number(pct) }));
                 }} />
             </div>
@@ -181,7 +222,18 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
         </FG>
         <FG label="Notes / Terms"><input value={f.notes} onChange={e => setF(x => ({ ...x, notes: e.target.value }))} placeholder="Due on Receipt" /></FG>
         <FG label="TDS Deducted (₹)"><input type="number" value={f.tds_amount} onChange={e => setF(x => ({ ...x, tds_amount: e.target.value }))} placeholder="0" /></FG>
+        <FG label="Reverse Charge">
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 12, color: 'var(--text2)', marginTop: 6 }}>
+            <input type="checkbox" checked={f.reverse_charge} onChange={e => setF(x => ({ ...x, reverse_charge: e.target.checked }))} />
+            Tax payable on reverse charge
+          </label>
+        </FG>
       </div>
+      {partyObj.gstin && !isGSTINValid(partyObj.gstin) && (
+        <div style={{ fontSize: 11, color: 'var(--red)', marginBottom: 10 }}>
+          ⚠ This party's GSTIN doesn't look valid — double-check it before sending. A wrong GSTIN will fail to match in the recipient's GSTR-2B and block their ITC.
+        </div>
+      )}
 
       {/* GST type indicator */}
       {f.party_id && (
@@ -478,8 +530,19 @@ export function InvoicesView({ invoices, businesses, parties, activeBiz, reload,
   }
 
   async function del(id) {
-    if (!confirm('Delete this invoice? This cannot be undone.')) return;
-    await deleteInvoice(id);
+    const inv = invoices.find(i => i.id === id);
+    // Once an invoice has actually been issued (sent/paid) or marked
+    // GST-filed, records must be retained — Sec 35 CGST Act / Rule 56.
+    // Cancel it instead (keeps the row + number, just voids it) rather
+    // than erasing the audit trail. Only a never-sent draft/proforma can
+    // be hard-deleted.
+    if (inv?.gst_filed || ['sent', 'paid'].includes(inv?.status)) {
+      if (!confirm(`${inv.invoice_number} has already been issued${inv.gst_filed ? ' and marked GST-filed' : ''} — it can't be deleted.\n\nCancel it instead? (keeps the record and number, marks it void; raise a credit note if goods/money need to be reversed)`)) return;
+      await cancelInvoice(id);
+    } else {
+      if (!confirm('Delete this invoice? This cannot be undone.')) return;
+      await deleteInvoice(id);
+    }
     reload();
   }
 
@@ -504,12 +567,16 @@ export function InvoicesView({ invoices, businesses, parties, activeBiz, reload,
   }
 
   async function autoNumber() {
-    // Only renumber real tax invoices (skip proforma and cancelled)
+    // Only renumber invoices that haven't actually gone out yet. Once an
+    // invoice is sent/paid or marked GST-filed, the customer has that
+    // number on their copy and/or it's already on the GST portal —
+    // rewriting it at that point creates a mismatch between your books,
+    // their copy, and what's filed. Only 'draft' invoices are fair game.
     const toNumber = invoices
-      .filter(i => i.type !== 'proforma' && i.status !== 'proforma' && i.status !== 'cancelled')
+      .filter(i => i.type !== 'proforma' && i.status === 'draft' && !i.gst_filed)
       .filter(i => activeBiz ? i.business_id === activeBiz : true);
 
-    if (!toNumber.length) { alert('No invoices found to number.'); return; }
+    if (!toNumber.length) { alert('No draft invoices found to number. Sent, paid, or GST-filed invoices are left alone — cancel and reissue those instead of renumbering.'); return; }
 
     // Indian FY: April (month 3) starts new year
     function getFYForDate(dateStr) {
