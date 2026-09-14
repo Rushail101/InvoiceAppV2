@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
-  fmt, fmtDate, today, getFY, GST_RATES, INDIAN_STATES, gstType, calcLineTax,
+  fmt, fmtDate, today, getFY, GST_RATES, INDIAN_STATES, gstType, calcLineTax, guessHSN,
 } from '../lib/constants.js';
 import {
   saveChallan, getChallanItems, deleteChallan,
@@ -44,10 +44,13 @@ const TRANSPORT_MODES = ['Road', 'Rail', 'Air', 'Ship / Waterways'];
 
 // ─── CHALLAN MODAL ─────────────────────────────────────────────────────────────
 function ChallanModal({ onClose, onSave, businesses, parties, allChallans, invoices, editData, activeBiz }) {
+  const initialBizId = editData?.business_id || activeBiz || businesses[0]?.id || '';
   const [f, setF] = useState({
-    business_id: editData?.business_id || activeBiz || businesses[0]?.id || '',
+    business_id: initialBizId,
     party_id: editData?.party_id || '',
-    challan_number: editData?.challan_number || nextChallanNum(allChallans),
+    // Scoped per business — Rule 55 challans are also expected to run a
+    // consecutive series, same reasoning as invoices/credit notes.
+    challan_number: editData?.challan_number || nextChallanNum(allChallans.filter(c => c.business_id === initialBizId)),
     challan_date: editData?.challan_date || today(),
     purpose: editData?.purpose || 'Job Work',
     vehicle_number: editData?.vehicle_number || '',
@@ -72,6 +75,14 @@ function ChallanModal({ onClose, onSave, businesses, parties, allChallans, invoi
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
 
+  const prevBizRef = useRef(initialBizId);
+  useEffect(() => {
+    if (editData) return;
+    if (f.business_id === prevBizRef.current) return;
+    prevBizRef.current = f.business_id;
+    setF(x => ({ ...x, challan_number: nextChallanNum(allChallans.filter(c => c.business_id === f.business_id)) }));
+  }, [f.business_id]);
+
   const bizObj = businesses.find(b => b.id === f.business_id) || {};
   const partyObj = parties.find(p => p.id === f.party_id) || {};
   const isIntrastate = gstType(bizObj.state, partyObj.state) === 'intrastate';
@@ -95,6 +106,19 @@ function ChallanModal({ onClose, onSave, businesses, parties, allChallans, invoi
   function upd(idx, field, val) {
     setItems(prev => prev.map((it, i) => i !== idx ? it : { ...it, [field]: val }));
   }
+  // Challans aren't tax invoices, so HSN isn't hard-required here — but
+  // it's still useful to have (e-way bill / matching against the later
+  // invoice), so offer the same best-effort suggestion.
+  function guessHSNOnBlur(idx) {
+    setItems(prev => prev.map((it, i) => {
+      if (i !== idx) return it;
+      if (it.hsn_code && !it.hsn_auto) return it;
+      const guess = guessHSN(it.description);
+      if (!guess) return it.hsn_auto ? { ...it, hsn_code: '', hsn_auto: false, hsn_guess_label: null } : it;
+      return { ...it, hsn_code: guess.hsn, hsn_auto: true, hsn_guess_label: guess.label };
+    }));
+  }
+  function editHSN(idx, val) { setItems(prev => prev.map((it, i) => i !== idx ? it : { ...it, hsn_code: val, hsn_auto: false, hsn_guess_label: null })); }
   function addRow() {
     setItems(p => [...p, { description: '', hsn_code: '', quantity: 1, unit: 'Nos', unit_price: 0, discount_percent: 0, tax_percent: 5 }]);
   }
@@ -283,11 +307,14 @@ function ChallanModal({ onClose, onSave, businesses, parties, allChallans, invoi
                 <tr key={idx}>
                   <td>
                     <input className="cell-input" value={it.description}
-                      onChange={e => upd(idx, 'description', e.target.value)} placeholder="Item description" />
+                      onChange={e => upd(idx, 'description', e.target.value)} onBlur={() => guessHSNOnBlur(idx)} placeholder="Item description" />
                   </td>
                   <td>
                     <input className="cell-input" value={it.hsn_code || ''}
-                      onChange={e => upd(idx, 'hsn_code', e.target.value)} placeholder="HSN" />
+                      onChange={e => editHSN(idx, e.target.value)} placeholder="HSN"
+                      style={{ borderColor: it.hsn_auto ? 'var(--accent)' : undefined }}
+                      title={it.hsn_auto ? `Auto-filled from "${it.hsn_guess_label}"` : ''} />
+                    {it.hsn_auto && <div style={{ fontSize: 9, color: 'var(--accent)', marginTop: 2 }}>auto: {it.hsn_guess_label}</div>}
                   </td>
                   <td>
                     <input className="cell-input" value={it.unit || 'Nos'}
