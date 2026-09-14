@@ -15,17 +15,17 @@ import { CreditNotesView } from './views/CreditNotes.jsx';
 import { GSTR1View } from './views/GSTR1.jsx';
 import { ItemsView } from './views/Items.jsx';
 import { DeliveryChallansView } from './views/DeliveryChallans.jsx';
+import { DebitNotesView } from './views/DebitNotes.jsx';
 import { Badge, ModalShell, FG, EmptyState } from './components/ui.jsx';
 
-// Hidden-from-nav (per simplification pass): Credit Notes, Item Master,
-// Bulk Payment, Aging Report, Recurring. Views/db functions are left
-// intact — just not linked from the sidebar — so they're one line to
-// restore if ever needed again.
+// Optional/advanced screens remain hidden from nav; core sales documents
+// (Invoices, Credit Notes, Debit Notes and Delivery Challans) are visible.
 const NAV = [
   { id: 'dashboard',   label: 'Dashboard',        icon: '◈',  group: null },
   { id: 'invoices',    label: 'Invoices',          icon: '📄',  group: 'Sales' },
   { id: 'proformas',   label: 'Proforma',          icon: '📋',  group: 'Sales' },
-  // { id: 'creditnotes', label: 'Credit Notes',      icon: '↩',   group: 'Sales' },
+  { id: 'creditnotes', label: 'Credit Notes',      icon: '↩',   group: 'Sales' },
+  { id: 'debitnotes',  label: 'Debit Notes',       icon: '↗',   group: 'Sales' },
   { id: 'challans',    label: 'Delivery Challans', icon: '🚚',  group: 'Sales' },
   { id: 'parties',     label: 'Parties',           icon: '👥',  group: 'Sales' },
   // { id: 'items',       label: 'Item Master',       icon: '📦',  group: 'Sales' },
@@ -400,6 +400,11 @@ CREATE TABLE IF NOT EXISTS credit_notes (
   cn_number   text NOT NULL,
   cn_date     date NOT NULL,
   reason      text,
+  notes       text,
+  cgst_amount numeric(12,2) DEFAULT 0,
+  sgst_amount numeric(12,2) DEFAULT 0,
+  igst_amount numeric(12,2) DEFAULT 0,
+  is_interstate boolean DEFAULT false,
   subtotal    numeric(12,2) DEFAULT 0,
   tax_amount  numeric(12,2) DEFAULT 0,
   total       numeric(12,2) DEFAULT 0,
@@ -416,6 +421,45 @@ CREATE TABLE IF NOT EXISTS credit_note_items (
   unit_price     numeric(12,2) DEFAULT 0,
   tax_percent    numeric(5,2)  DEFAULT 0,
   taxable_amount numeric(12,2) DEFAULT 0,
+  cgst_amount   numeric(12,2) DEFAULT 0,
+  sgst_amount   numeric(12,2) DEFAULT 0,
+  igst_amount   numeric(12,2) DEFAULT 0,
+  tax_amount    numeric(12,2) DEFAULT 0,
+  amount        numeric(12,2) DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS debit_notes (
+  id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id    uuid REFERENCES businesses(id) ON DELETE CASCADE,
+  invoice_id     uuid REFERENCES invoices(id) ON DELETE SET NULL,
+  party_id       uuid REFERENCES parties(id) ON DELETE SET NULL,
+  dn_number      text NOT NULL,
+  dn_date        date NOT NULL,
+  reason         text,
+  notes          text,
+  subtotal       numeric(12,2) DEFAULT 0,
+  cgst_amount    numeric(12,2) DEFAULT 0,
+  sgst_amount    numeric(12,2) DEFAULT 0,
+  igst_amount    numeric(12,2) DEFAULT 0,
+  tax_amount     numeric(12,2) DEFAULT 0,
+  total          numeric(12,2) DEFAULT 0,
+  is_interstate  boolean DEFAULT false,
+  status         text DEFAULT 'issued',
+  created_at     timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS debit_note_items (
+  id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  debit_note_id  uuid REFERENCES debit_notes(id) ON DELETE CASCADE,
+  description    text NOT NULL,
+  hsn_code       text,
+  quantity       numeric(10,2) DEFAULT 1,
+  unit_price     numeric(12,2) DEFAULT 0,
+  tax_percent    numeric(5,2) DEFAULT 0,
+  taxable_amount numeric(12,2) DEFAULT 0,
+  cgst_amount    numeric(12,2) DEFAULT 0,
+  sgst_amount    numeric(12,2) DEFAULT 0,
+  igst_amount    numeric(12,2) DEFAULT 0,
   tax_amount     numeric(12,2) DEFAULT 0,
   amount         numeric(12,2) DEFAULT 0
 );
@@ -507,6 +551,8 @@ CREATE TRIGGER set_updated_at_delivery_challans
 
 ALTER TABLE delivery_challans      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE delivery_challan_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE debit_notes            ENABLE ROW LEVEL SECURITY;
+ALTER TABLE debit_note_items       ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "challans_all" ON delivery_challans;
 CREATE POLICY "challans_all" ON delivery_challans
@@ -514,6 +560,14 @@ CREATE POLICY "challans_all" ON delivery_challans
 
 DROP POLICY IF EXISTS "challan_items_all" ON delivery_challan_items;
 CREATE POLICY "challan_items_all" ON delivery_challan_items
+  FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "debit_notes_all" ON debit_notes;
+CREATE POLICY "debit_notes_all" ON debit_notes
+  FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "debit_note_items_all" ON debit_note_items;
+CREATE POLICY "debit_note_items_all" ON debit_note_items
   FOR ALL USING (true) WITH CHECK (true);
 
 -- ── STEP 2: Migration — add missing columns to existing tables ─────────────────
@@ -556,6 +610,11 @@ CREATE INDEX IF NOT EXISTS idx_accounts_biz      ON accounts(business_id);
 CREATE INDEX IF NOT EXISTS idx_jlines_journal    ON journal_lines(journal_id);
 CREATE INDEX IF NOT EXISTS idx_jlines_account    ON journal_lines(account_id);
 CREATE INDEX IF NOT EXISTS idx_cn_invoice        ON credit_notes(invoice_id);
+CREATE INDEX IF NOT EXISTS idx_dn_invoice        ON debit_notes(invoice_id);
+CREATE INDEX IF NOT EXISTS idx_dn_party          ON debit_notes(party_id);
+CREATE INDEX IF NOT EXISTS idx_dn_date           ON debit_notes(dn_date DESC);
+CREATE INDEX IF NOT EXISTS idx_dn_items_dn       ON debit_note_items(debit_note_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uidx_debit_notes_number ON debit_notes(business_id, dn_number);
 CREATE INDEX IF NOT EXISTS idx_items_biz         ON items(business_id);
 CREATE INDEX IF NOT EXISTS idx_challans_party    ON delivery_challans(party_id);
 CREATE INDEX IF NOT EXISTS idx_challans_date     ON delivery_challans(challan_date DESC);
@@ -595,10 +654,21 @@ CREATE INDEX IF NOT EXISTS idx_expenses_journal ON expenses(journal_posted);
 ALTER TABLE invoices ADD COLUMN IF NOT EXISTS reverse_charge boolean DEFAULT false;
 ALTER TABLE invoices ADD COLUMN IF NOT EXISTS ship_to_address text;
 ALTER TABLE credit_notes ADD COLUMN IF NOT EXISTS note_type text DEFAULT 'tax';
+ALTER TABLE credit_notes ADD COLUMN IF NOT EXISTS notes text;
+ALTER TABLE credit_notes ADD COLUMN IF NOT EXISTS cgst_amount numeric(12,2) DEFAULT 0;
+ALTER TABLE credit_notes ADD COLUMN IF NOT EXISTS sgst_amount numeric(12,2) DEFAULT 0;
+ALTER TABLE credit_notes ADD COLUMN IF NOT EXISTS igst_amount numeric(12,2) DEFAULT 0;
+ALTER TABLE credit_notes ADD COLUMN IF NOT EXISTS is_interstate boolean DEFAULT false;
+ALTER TABLE credit_note_items ADD COLUMN IF NOT EXISTS cgst_amount numeric(12,2) DEFAULT 0;
+ALTER TABLE credit_note_items ADD COLUMN IF NOT EXISTS sgst_amount numeric(12,2) DEFAULT 0;
+ALTER TABLE credit_note_items ADD COLUMN IF NOT EXISTS igst_amount numeric(12,2) DEFAULT 0;
 ALTER TABLE delivery_challans ADD COLUMN IF NOT EXISTS eway_bill_number text;
 
 CREATE UNIQUE INDEX IF NOT EXISTS uidx_invoices_number ON invoices(business_id, invoice_number);
-CREATE UNIQUE INDEX IF NOT EXISTS uidx_credit_notes_number ON credit_notes(business_id, cn_number);`
+CREATE UNIQUE INDEX IF NOT EXISTS uidx_credit_notes_number ON credit_notes(business_id, cn_number);
+
+-- Debit Notes
+CREATE UNIQUE INDEX IF NOT EXISTS uidx_debit_notes_number ON debit_notes(business_id, dn_number);`
 
 function SqlSetupView({ invoices = [], payments = [] }) {
   const [copied, setCopied] = useState(false);
@@ -918,7 +988,7 @@ export default function App() {
   const [data, setData] = useState({
     businesses: [], invoices: [], parties: [], expenses: [],
     payments: [], accounts: [], journalEntries: [], journalLines: [],
-    creditNotes: [], bankAccounts: [], bankTransactions: [], items: [], challans: [],
+    creditNotes: [], debitNotes: [], bankAccounts: [], bankTransactions: [], items: [], challans: [],
   });
   const [invoiceItems, setInvoiceItems] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -958,7 +1028,7 @@ export default function App() {
   if (!authed) return <><style>{FONTS}{CSS}</style><LoginScreen onLogin={handleLogin} /></>;
 
   const { businesses, invoices, parties, expenses, payments,
-    accounts, journalEntries, journalLines, creditNotes,
+    accounts, journalEntries, journalLines, creditNotes, debitNotes,
     bankAccounts, bankTransactions, items, challans } = data;
 
   const cp = { businesses, activeBiz, reload };
@@ -1031,6 +1101,9 @@ export default function App() {
             {!loading && view === 'creditnotes' && (
               <CreditNotesView creditNotes={creditNotes} invoices={invoices} parties={parties} {...cp} />
             )}
+            {!loading && view === 'debitnotes' && (
+              <DebitNotesView debitNotes={debitNotes} invoices={invoices} businesses={businesses} parties={parties} activeBiz={activeBiz} reload={reload} />
+            )}
             {!loading && view === 'challans' && (
               <DeliveryChallansView challans={challans} parties={parties} invoices={invoices} {...cp} />
             )}
@@ -1049,7 +1122,7 @@ export default function App() {
               <AgingView invoices={invoices} parties={parties} payments={payments} businesses={businesses} activeBiz={activeBiz} />
             )}
             {!loading && view === 'statement' && (
-              <PartyStatementView parties={parties} invoices={invoices} payments={payments} creditNotes={creditNotes} businesses={businesses} activeBiz={activeBiz} />
+              <PartyStatementView parties={parties} invoices={invoices} payments={payments} creditNotes={creditNotes} debitNotes={debitNotes} businesses={businesses} activeBiz={activeBiz} />
             )}
             {!loading && view === 'tds' && (
               <TDSView invoices={invoices} payments={payments} parties={parties} businesses={businesses} activeBiz={activeBiz} />
@@ -1071,7 +1144,7 @@ export default function App() {
             )}
             {!loading && view === 'trial' && (
               <TrialBalanceView accounts={accounts} journalLines={journalLines} journalEntries={journalEntries}
-                invoices={invoices} payments={payments} expenses={expenses} creditNotes={creditNotes} {...cp} />
+                invoices={invoices} payments={payments} expenses={expenses} creditNotes={creditNotes} debitNotes={debitNotes} {...cp} />
             )}
             {!loading && view === 'balance' && (
               <BalanceSheetView accounts={accounts} journalLines={journalLines} journalEntries={journalEntries}
@@ -1079,10 +1152,10 @@ export default function App() {
             )}
             {!loading && view === 'gstr1' && (
               <GSTR1View invoices={invoices} parties={parties} businesses={businesses}
-                activeBiz={activeBiz} invoiceItems={invoiceItems} payments={payments} />
+                activeBiz={activeBiz} invoiceItems={invoiceItems} payments={payments} creditNotes={creditNotes} debitNotes={debitNotes} />
             )}
             {!loading && view === 'ar' && (
-              <ARLedgerView invoices={invoices} payments={payments} creditNotes={creditNotes}
+              <ARLedgerView invoices={invoices} payments={payments} creditNotes={creditNotes} debitNotes={debitNotes}
                 parties={parties} businesses={businesses} activeBiz={activeBiz} />
             )}
             {!loading && view === 'ap' && (
