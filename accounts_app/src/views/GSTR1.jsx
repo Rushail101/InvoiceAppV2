@@ -577,12 +577,9 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceIte
     return filtered.map(inv => enrichInvoice(inv, parties, allItems));
   }, [eligibleInvoices, period, parties, viewMode, payments, allItems]);
 
-  const b2bAll = periodInvoices.filter(r => r.party?.gstin);
-  // Table 4B of GSTR-1 requires reverse-charge B2B supplies reported apart
-  // from normal (4A) B2B — split them out here rather than lumping them
-  // into the same bucket.
-  const b2bInvoices = b2bAll.filter(r => !r.reverse_charge);
-  const rcmInvoices = b2bAll.filter(r => r.reverse_charge);
+  // Sales in this ERP use the normal forward-charge GST workflow.
+  // Keep all registered-party sales in the standard B2B bucket.
+  const b2bInvoices = periodInvoices.filter(r => r.party?.gstin);
   const b2cInvoices = periodInvoices.filter(r => !r.party?.gstin);
 
   const periodCreditNotes = useMemo(() => (creditNotes || []).filter(cn => {
@@ -692,7 +689,6 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceIte
   const tabs = [
     { id: 'summary', label: '📊 Summary' },
     { id: 'b2b', label: `📋 B2B (${b2bInvoices.length})` },
-    { id: 'rcm', label: `🔄 RCM (${rcmInvoices.length})` },
     { id: 'b2c', label: `🛒 B2C (${b2cInvoices.length})` },
     { id: 'notes', label: `↩↗ Notes (${periodCreditNotes.length + periodDebitNotes.length})` },
     { id: 'hsn', label: '🏷️ HSN Summary' },
@@ -752,13 +748,6 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceIte
           disabled={b2bInvoices.length === 0}
         >
           ⬇ B2B CSV
-        </button>
-        <button
-          className="btn btn-ghost btn-sm"
-          onClick={() => exportCSV(rcmInvoices, `GSTR1-RCM-${period}.csv`)}
-          disabled={rcmInvoices.length === 0}
-        >
-          ⬇ RCM CSV
         </button>
         <button
           className="btn btn-ghost btn-sm"
@@ -936,22 +925,6 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceIte
             </div>
           )}
           <B2BTable rows={b2bInvoices} selected={selected} onToggle={toggleSelected} onToggleAll={toggleSelectAll} />
-        </div>
-      )}
-
-      {activeTab === 'rcm' && (
-        <div>
-          <div style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 10 }}>
-            Outward supplies where the recipient pays GST under reverse charge (Sec 9(3)/9(4)) — report these in Table 4B, separately from ordinary B2B (4A). You still owe the taxable value; the tax itself isn't part of your output liability.
-          </div>
-          {selected.size > 0 && (
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10 }}>
-              <span className="mono" style={{ fontSize: 11.5, color: 'var(--amber)' }}>{selected.size} selected</span>
-              <button className="btn btn-primary btn-sm" disabled={marking} onClick={() => markSelected(true)}>✓ Mark Filed</button>
-              <button className="btn btn-ghost btn-sm" disabled={marking} onClick={() => markSelected(false)}>Mark Unfiled</button>
-            </div>
-          )}
-          <B2BTable rows={rcmInvoices} selected={selected} onToggle={toggleSelected} onToggleAll={toggleSelectAll} />
         </div>
       )}
 
