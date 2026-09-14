@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { fmt, fmtDate, today, GST_RATES, gstType, calcLineTax, nextCNNum, getFYForDate, creditNoteDeadline } from '../lib/constants.js';
+import { useState, useEffect, useRef } from 'react';
+import { fmt, fmtDate, today, GST_RATES, gstType, calcLineTax, nextCNNum, getFYForDate, creditNoteDeadline, guessHSN, isHSNValid, MIN_HSN_DIGITS } from '../lib/constants.js';
 import { saveCreditNote } from '../lib/db.js';
 import { printInvoice } from '../lib/pdf.js';
 import { Badge, ModalShell, FG, EmptyState } from '../components/ui.jsx';
@@ -11,11 +11,14 @@ function calcCNItem(it, isIntrastate) {
 }
 
 export function CreditNoteModal({ onClose, onSave, businesses, parties, invoices, creditNotes, preInvoice }) {
+  const initialBizId = preInvoice?.business_id || businesses[0]?.id || '';
   const [f, setF] = useState({
-    business_id: preInvoice?.business_id || businesses[0]?.id || '',
+    business_id: initialBizId,
     party_id: preInvoice?.party_id || '',
     invoice_id: preInvoice?.id || '',
-    cn_number: nextCNNum(creditNotes),
+    // Scoped to this business only — Rule 53 numbering must be consecutive
+    // per GSTIN, same reasoning as invoices.
+    cn_number: nextCNNum(creditNotes.filter(c => c.business_id === initialBizId)),
     cn_date: today(),
     reason: '',
     notes: '',
@@ -24,6 +27,14 @@ export function CreditNoteModal({ onClose, onSave, businesses, parties, invoices
   const [items, setItems] = useState([{ description: '', hsn_code: '', quantity: 1, unit_price: 0, tax_percent: 5 }]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
+
+  // Re-scope the number if the user switches business before saving.
+  const prevBizRef = useRef(initialBizId);
+  useEffect(() => {
+    if (f.business_id === prevBizRef.current) return;
+    prevBizRef.current = f.business_id;
+    setF(x => ({ ...x, cn_number: nextCNNum(creditNotes.filter(c => c.business_id === f.business_id)) }));
+  }, [f.business_id]);
 
   const bizObj = businesses.find(b => b.id === f.business_id) || {};
   const partyObj = parties.find(p => p.id === f.party_id) || {};
@@ -39,6 +50,16 @@ export function CreditNoteModal({ onClose, onSave, businesses, parties, invoices
   const grand = subtotal + totalCGST + totalSGST + totalIGST;
 
   function upd(idx, field, val) { setItems(prev => prev.map((it, i) => i !== idx ? it : { ...it, [field]: val })); }
+  function guessHSNOnBlur(idx) {
+    setItems(prev => prev.map((it, i) => {
+      if (i !== idx) return it;
+      if (it.hsn_code && !it.hsn_auto) return it;
+      const guess = guessHSN(it.description);
+      if (!guess) return it.hsn_auto ? { ...it, hsn_code: '', hsn_auto: false, hsn_guess_label: null } : it;
+      return { ...it, hsn_code: guess.hsn, hsn_auto: true, hsn_guess_label: guess.label };
+    }));
+  }
+  function editHSN(idx, val) { setItems(prev => prev.map((it, i) => i !== idx ? it : { ...it, hsn_code: val, hsn_auto: false, hsn_guess_label: null })); }
 
   const linkedInvoice = invoices.find(i => i.id === f.invoice_id) || null;
   const deadline = linkedInvoice?.issue_date
@@ -58,6 +79,16 @@ export function CreditNoteModal({ onClose, onSave, businesses, parties, invoices
     }
     const validItems = calc.filter(i => i.description?.trim());
     if (!validItems.length) { setErr('Add at least one item'); return; }
+    // Tax notes mirror the original invoice for GST purposes (Rule 53) —
+    // HSN is required on those. Commercial/goodwill notes don't touch GST
+    // liability, so it's not enforced there.
+    if (f.note_type === 'tax') {
+      const badHSN = validItems.filter(i => !isHSNValid(i.hsn_code));
+      if (badHSN.length) {
+        setErr(`HSN code required (min ${MIN_HSN_DIGITS} digits) for: ${badHSN.map(i => i.description).join(', ')}`);
+        return;
+      }
+    }
     setErr(''); setBusy(true);
     try {
       const isTax = f.note_type === 'tax';
@@ -137,8 +168,13 @@ export function CreditNoteModal({ onClose, onSave, businesses, parties, invoices
         const c = calcCNItem(it, isIntrastate);
         return (
           <div className="line-item-row" key={idx} style={{ gridTemplateColumns: '2fr 90px 70px 100px 60px 110px 28px' }}>
-            <input placeholder="Item description" value={it.description} onChange={e => upd(idx, 'description', e.target.value)} />
-            <input placeholder="HSN" value={it.hsn_code || ''} onChange={e => upd(idx, 'hsn_code', e.target.value)} />
+            <input placeholder="Item description" value={it.description} onChange={e => upd(idx, 'description', e.target.value)} onBlur={() => guessHSNOnBlur(idx)} />
+            <div>
+              <input placeholder="HSN" value={it.hsn_code || ''} onChange={e => editHSN(idx, e.target.value)}
+                style={{ borderColor: it.hsn_auto ? 'var(--accent)' : undefined }}
+                title={it.hsn_auto ? `Auto-filled from "${it.hsn_guess_label}"` : ''} />
+              {it.hsn_auto && <div style={{ fontSize: 9, color: 'var(--accent)', marginTop: 2 }}>auto: {it.hsn_guess_label}</div>}
+            </div>
             <input type="number" min="0" value={it.quantity} onChange={e => upd(idx, 'quantity', e.target.value)} />
             <input type="number" min="0" value={it.unit_price} onChange={e => upd(idx, 'unit_price', e.target.value)} />
             <select value={it.tax_percent} onChange={e => upd(idx, 'tax_percent', e.target.value)}>{GST_RATES.map(r => <option key={r} value={r}>{r}%</option>)}</select>
