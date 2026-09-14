@@ -145,7 +145,6 @@ tbody tr:nth-child(even) td{background:#fafafa}
     ${isPF ? '<div class="sub">Not valid for GST input credit</div>' : ''}
     ${isDN ? '<div class="sub">Debit Note against original supply</div>' : (isCN ? `<div class="sub">${isCommercialCN ? 'No GST adjustment' : 'Credit Note'}</div>` : '')}
     ${isIntrastate ? '<div class="sub" style="color:#1a3a8a">Intra-state supply · CGST + SGST</div>' : '<div class="sub" style="color:#7a4500">Inter-state supply · IGST</div>'}
-    ${invoice.reverse_charge ? '<div class="sub" style="color:#b00;font-weight:700">Tax Payable on Reverse Charge Basis</div>' : ''}
   </div>
 </div>
 
