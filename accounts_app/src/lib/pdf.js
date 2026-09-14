@@ -12,7 +12,7 @@ function docFileName(docNum, clientName) {
   return `${sanitizeForFilename(docNum)}${c ? '_' + c : ''}`;
 }
 
-export function printInvoice(invoice, items, party, biz, invPayments, isCreditNote = false) {
+export function printInvoice(invoice, items, party, biz, invPayments, isCreditNote = false, documentType = 'invoice') {
   const calc = items.map(it => {
     const base = Number(it.quantity) * Number(it.unit_price);
     const discAmt = base * (Number(it.discount_percent || 0) / 100);
@@ -49,6 +49,9 @@ export function printInvoice(invoice, items, party, biz, invPayments, isCreditNo
   const isIntrastate = totalCGST > 0;
   const isPF = invoice.status === 'proforma';
   const isCN = isCreditNote;
+  const isDN = documentType === 'debit_note';
+  const isCommercialCN = isCN && invoice.note_type === 'commercial';
+  const documentNumber = invoice.invoice_number || invoice.cn_number || invoice.dn_number || '';
 
   // GST groups for totals section
   const gstGroups = {};
@@ -63,15 +66,15 @@ export function printInvoice(invoice, items, party, biz, invPayments, isCreditNo
   });
 
   const upiData = biz.upi_id
-    ? `upi://pay?pa=${encodeURIComponent(biz.upi_id)}&pn=${encodeURIComponent(biz.name || '')}&am=${grand.toFixed(2)}&cu=INR&tn=${encodeURIComponent(invoice.invoice_number || '')}`
+    ? `upi://pay?pa=${encodeURIComponent(biz.upi_id)}&pn=${encodeURIComponent(biz.name || '')}&am=${grand.toFixed(2)}&cu=INR&tn=${encodeURIComponent(documentNumber)}`
     : null;
   const qrUrl = upiData
     ? `https://api.qrserver.com/v1/create-qr-code/?size=100x100&data=${encodeURIComponent(upiData)}`
     : null;
 
   const titleMap = { proforma: 'PROFORMA INVOICE', draft: 'TAX INVOICE', sent: 'TAX INVOICE', paid: 'TAX INVOICE', partially_paid: 'TAX INVOICE', overdue: 'TAX INVOICE', cancelled: 'TAX INVOICE' };
-  const docTitle = isCN ? 'CREDIT NOTE' : (titleMap[invoice.status] || 'TAX INVOICE');
-  const fileName = docFileName(invoice.invoice_number || invoice.cn_number, party?.name);
+  const docTitle = isDN ? 'DEBIT NOTE' : (isCN ? (isCommercialCN ? 'COMMERCIAL CREDIT NOTE' : 'CREDIT NOTE') : (titleMap[invoice.status] || 'TAX INVOICE'));
+  const fileName = docFileName(documentNumber, party?.name);
 
   const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${fileName}</title>
 <style>
@@ -140,18 +143,18 @@ tbody tr:nth-child(even) td{background:#fafafa}
   <div class="doc-title">
     <h1>${docTitle}</h1>
     ${isPF ? '<div class="sub">Not valid for GST input credit</div>' : ''}
-    ${isCN ? '<div class="sub">Credit Note</div>' : ''}
+    ${isDN ? '<div class="sub">Debit Note against original supply</div>' : (isCN ? `<div class="sub">${isCommercialCN ? 'No GST adjustment' : 'Credit Note'}</div>` : '')}
     ${isIntrastate ? '<div class="sub" style="color:#1a3a8a">Intra-state supply · CGST + SGST</div>' : '<div class="sub" style="color:#7a4500">Inter-state supply · IGST</div>'}
     ${invoice.reverse_charge ? '<div class="sub" style="color:#b00;font-weight:700">Tax Payable on Reverse Charge Basis</div>' : ''}
   </div>
 </div>
 
 <div class="meta-grid">
-  <div class="mc"><div class="lbl">${isCN ? 'CN Number' : 'Invoice #'}</div><div class="val">${invoice.invoice_number || invoice.cn_number || ''}</div></div>
+  <div class="mc"><div class="lbl">${isDN ? 'DN Number' : (isCN ? 'CN Number' : 'Invoice #')}</div><div class="val">${documentNumber}</div></div>
   <div class="mc"><div class="lbl">Date</div><div class="val">${fmtDate(invoice.issue_date || invoice.cn_date)}</div></div>
   <div class="mc"><div class="lbl">Place of Supply</div><div class="val">${party.state || ''}</div></div>
-  ${!isCN ? `<div class="mc"><div class="lbl">Due Date</div><div class="val">${fmtDate(invoice.due_date)}</div></div>` : ''}
-  ${!isCN ? `<div class="mc"><div class="lbl">Terms</div><div class="val">${invoice.notes || 'Due on Receipt'}</div></div>` : ''}
+  ${!isCN && !isDN ? `<div class="mc"><div class="lbl">Due Date</div><div class="val">${fmtDate(invoice.due_date)}</div></div>` : ''}
+  ${!isCN && !isDN ? `<div class="mc"><div class="lbl">Terms</div><div class="val">${invoice.notes || 'Due on Receipt'}</div></div>` : ''}
   <div class="mc"><div class="lbl">Status</div><div class="val">${(invoice.status || 'CREDIT NOTE').toUpperCase()}</div></div>
 </div>
 
@@ -243,18 +246,18 @@ tbody tr:nth-child(even) td{background:#fafafa}
     ${qrUrl ? `<img src="${qrUrl}" style="width:95px;height:95px;margin-top:3px"><div class="bd-row" style="justify-content:center;margin-top:3px;font-size:9px;color:#666">${biz.upi_id}</div>` : `<p style="color:#bbb;font-size:9.5px;margin-top:4px">Add UPI ID in Business Settings</p>`}
   </div>
 </div>
-<div class="note">This is a computer-generated document and does not require a physical signature.${isCN ? ' This credit note reduces the amount due on the linked invoice.' : ''}</div>
+<div class="note">This is a computer-generated document.${isDN ? ' This debit note increases the amount due against the linked original invoice.' : (isCN ? (isCommercialCN ? ' This commercial/goodwill credit note does not adjust GST liability.' : ' This credit note reduces the amount due on the linked invoice.') : ' It does not require a physical signature unless otherwise required by law or the recipient.' )}</div>
 </div></body></html>`;
 
   const blob = new Blob([html], { type: 'text/html' });
   const burl = URL.createObjectURL(blob);
-  const docNum = invoice.invoice_number || invoice.cn_number || 'doc';
+  const docNum = documentNumber || 'doc';
 
   const ov = document.createElement('div');
   ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.8);display:flex;align-items:center;justify-content:center;z-index:9999;font-family:sans-serif;backdrop-filter:blur(3px)';
   const bx = document.createElement('div');
   bx.style.cssText = 'background:#1a1a1a;border:1px solid #333;border-radius:14px;padding:28px 32px;text-align:center;color:#e8e6df;min-width:320px;box-shadow:0 8px 32px rgba(0,0,0,.6)';
-  bx.innerHTML = `<div style="font-size:24px;margin-bottom:8px">${isCN ? '🔄' : '📄'}</div>
+  bx.innerHTML = `<div style="font-size:24px;margin-bottom:8px">${isDN ? '↗' : (isCN ? '🔄' : '📄')}</div>
     <div style="font-size:15px;font-weight:700;margin-bottom:3px">${docNum}</div>
     <div style="font-size:12px;color:#888;margin-bottom:20px">${docTitle} · ₹${grand.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</div>
     <div style="display:flex;flex-direction:column;gap:10px">
