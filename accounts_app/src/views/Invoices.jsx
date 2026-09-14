@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { fmt, fmtDate, today, GST_RATES, PAY_MODES, INDIAN_STATES, gstType, calcLineTax, nextInvNum, getFY, garmentGSTRate, isGSTINValid } from '../lib/constants.js';
+import { useState, useEffect, useRef } from 'react';
+import { fmt, fmtDate, today, GST_RATES, PAY_MODES, INDIAN_STATES, gstType, calcLineTax, nextInvNum, getFY, garmentGSTRate, isGSTINValid, guessHSN, MIN_HSN_DIGITS } from '../lib/constants.js';
 import { saveInvoice, getInvoiceItems, updateInvoiceStatus, deleteInvoice, cancelInvoice, savePaymentWithJournal } from '../lib/db.js';
 import { printInvoice } from '../lib/pdf.js';
 import { Badge, ModalShell, FG, PayHistory, EmptyState } from '../components/ui.jsx';
@@ -34,11 +34,15 @@ function calcItem(it, isIntrastate, priceMode = 'exclusive', invDiscRatio = 0) {
 // ─── INVOICE MODAL ─────────────────────────────────────────────────────────────
 export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItems = [], editData, allInvoices, isProforma = false, activeBiz }) {
   const isPF = isProforma || (editData?.status === 'proforma');
+  const initialBizId = editData?.business_id || activeBiz || businesses[0]?.id || '';
 
   const [f, setF] = useState({
-    business_id: editData?.business_id || activeBiz || businesses[0]?.id || '',
+    business_id: initialBizId,
     party_id: editData?.party_id || '',
-    invoice_number: editData?.invoice_number || nextInvNum(allInvoices, isPF),
+    // Sequence must be unique per GSTIN (Rule 46(b)) — scope the scan to this
+    // business only, not every business's invoices, or numbers will skip
+    // around whenever another business creates a document in between.
+    invoice_number: editData?.invoice_number || nextInvNum(allInvoices.filter(i => i.business_id === initialBizId), isPF),
     type: editData?.type || 'sale',
     issue_date: editData?.issue_date || today(),
     due_date: editData?.due_date || '',
@@ -50,6 +54,7 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
     price_mode: editData?.price_mode || 'exclusive',
     round_off: editData?.round_off ?? false,
     reverse_charge: editData?.reverse_charge ?? false,
+    ship_to_address: editData?.ship_to_address || '',
   });
 
   const [items, setItems] = useState(
@@ -58,6 +63,18 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
   );
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
+
+  // Switching the business on a NEW invoice must re-scope the number to that
+  // business's own sequence — otherwise it'd keep whatever number the
+  // previously-selected business generated. Skip this while editing an
+  // existing invoice (its number is already fixed).
+  const prevBizRef = useRef(initialBizId);
+  useEffect(() => {
+    if (editData) return;
+    if (f.business_id === prevBizRef.current) return;
+    prevBizRef.current = f.business_id;
+    setF(x => ({ ...x, invoice_number: nextInvNum(allInvoices.filter(i => i.business_id === f.business_id), isPF) }));
+  }, [f.business_id]);
 
   const bizObj = businesses.find(b => b.id === f.business_id) || {};
   const partyObj = parties.find(p => p.id === f.party_id) || {};
@@ -119,10 +136,35 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
   function addRow() { setItems(p => [...p, { description: '', hsn_code: '', quantity: 1, unit_price: 0, discount_percent: 0, tax_percent: 5 }]); }
   function remRow(idx) { setItems(p => p.filter((_, i) => i !== idx)); }
 
+  // Best-effort HSN suggestion from the description, on blur (not every
+  // keystroke — matching mid-word would flicker). Only fills a currently
+  // blank field, and only overwrites a *previous auto-fill* (hsn_auto) if
+  // the description changed enough to suggest something different — a
+  // manually-typed HSN (hsn_auto unset) is never touched.
+  function guessHSNOnBlur(idx) {
+    setItems(prev => prev.map((it, i) => {
+      if (i !== idx) return it;
+      if (it.hsn_code && !it.hsn_auto) return it; // user typed their own — leave it
+      const guess = guessHSN(it.description);
+      if (!guess) return it.hsn_auto ? { ...it, hsn_code: '', hsn_auto: false, hsn_guess_label: null } : it;
+      return { ...it, hsn_code: guess.hsn, hsn_auto: true, hsn_guess_label: guess.label };
+    }));
+  }
+  function editHSN(idx, val) {
+    setItems(prev => prev.map((it, i) => i !== idx ? it : { ...it, hsn_code: val, hsn_auto: false, hsn_guess_label: null }));
+  }
+
   async function save() {
     if (!f.party_id) { setErr('Select a party'); return; }
     const validItems = calc.filter(i => i.description?.trim());
     if (!validItems.length) { setErr('Add at least one line item'); return; }
+    // Rule 46(f) — HSN is mandatory on every line, minimum 4 digits below
+    // ₹5cr turnover.
+    const badHSN = validItems.filter(i => !isHSNValid(i.hsn_code));
+    if (badHSN.length) {
+      setErr(`HSN code required (min ${MIN_HSN_DIGITS} digits) for: ${badHSN.map(i => i.description).join(', ')}`);
+      return;
+    }
     setErr(''); setBusy(true);
     try {
       const invData = {
@@ -229,6 +271,12 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
           </label>
         </FG>
       </div>
+      <div className="form-row">
+        <FG label="Ship To (if different from billing address)">
+          <textarea rows={2} placeholder="Leave blank to use the party's billing address on the printed invoice"
+            value={f.ship_to_address} onChange={e => setF(x => ({ ...x, ship_to_address: e.target.value }))} />
+        </FG>
+      </div>
       {partyObj.gstin && !isGSTINValid(partyObj.gstin) && (
         <div style={{ fontSize: 11, color: 'var(--red)', marginBottom: 10 }}>
           ⚠ This party's GSTIN doesn't look valid — double-check it before sending. A wrong GSTIN will fail to match in the recipient's GSTR-2B and block their ITC.
@@ -276,7 +324,7 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
         return (
           <div className="line-item-row" key={idx} style={{ gridTemplateColumns: '2fr 90px 70px 100px 72px 60px 100px 28px' }}>
             <div style={{ position: 'relative', display: 'flex', gap: 3 }}>
-              <input placeholder="Product / service" value={it.description} onChange={e => upd(idx, 'description', e.target.value)} style={{ flex: 1 }} />
+              <input placeholder="Product / service" value={it.description} onChange={e => upd(idx, 'description', e.target.value)} onBlur={() => guessHSNOnBlur(idx)} style={{ flex: 1 }} />
               {catalogItems.filter(i => bizObj && i.business_id === f.business_id).length > 0 && (
                 <select
                   style={{ background: 'var(--bg3)', border: '1px solid var(--border2)', color: 'var(--accent)', borderRadius: 'var(--r)', padding: '4px 6px', fontSize: 10, fontFamily: 'var(--mono)', cursor: 'pointer', flexShrink: 0, maxWidth: 120 }}
@@ -288,6 +336,7 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
                       ...it2,
                       description: item.name,
                       hsn_code: item.hsn_code || it2.hsn_code,
+                      hsn_auto: false, hsn_guess_label: null,
                       unit_price: item.sale_price || it2.unit_price,
                       tax_percent: item.tax_percent ?? it2.tax_percent,
                     }));
@@ -298,7 +347,12 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
                 </select>
               )}
             </div>
-            <input placeholder="HSN" value={it.hsn_code || ''} onChange={e => upd(idx, 'hsn_code', e.target.value)} style={{ fontFamily: 'var(--mono)', fontSize: 11 }} />
+            <div>
+              <input placeholder="HSN" value={it.hsn_code || ''} onChange={e => editHSN(idx, e.target.value)}
+                style={{ fontFamily: 'var(--mono)', fontSize: 11, borderColor: it.hsn_auto ? 'var(--accent)' : undefined }}
+                title={it.hsn_auto ? `Auto-filled from "${it.hsn_guess_label}" — check it, then edit if needed` : ''} />
+              {it.hsn_auto && <div style={{ fontSize: 9, color: 'var(--accent)', marginTop: 2 }}>auto: {it.hsn_guess_label}</div>}
+            </div>
             <input type="number" min="0" value={it.quantity} onChange={e => upd(idx, 'quantity', e.target.value)} />
             <input type="number" min="0" value={it.unit_price} onChange={e => upd(idx, 'unit_price', e.target.value)} />
             <input type="number" min="0" max="100" value={it.discount_percent || 0} onChange={e => upd(idx, 'discount_percent', e.target.value)} />
@@ -498,7 +552,7 @@ export function InvoicesView({ invoices, businesses, parties, activeBiz, reload,
     if (inv?.status === 'proforma') {
       if (isFullyPaid) {
         // Auto-convert: assign next invoice number, mark paid, use date of final payment as invoice date
-        const newNum = nextInvNum(invoices, false);
+        const newNum = nextInvNum(invoices.filter(i => i.business_id === inv.business_id), false);
         const invoiceDate = data.payment_date || today();
         const { supabase } = await import('../lib/db.js');
         await supabase.from('invoices')
@@ -523,7 +577,7 @@ export function InvoicesView({ invoices, businesses, parties, activeBiz, reload,
       ? payments.reduce((latest, p) => p.payment_date > latest ? p.payment_date : latest, payments[0].payment_date)
       : today();
     if (!confirm(`Convert ${inv.invoice_number} to Tax Invoice?\n\nPayment received: ₹${totalPaid.toLocaleString('en-IN')} of ₹${Number(inv.total).toLocaleString('en-IN')} (${pct}%)\n\nIssue date will be set to ${lastPaymentDate}. Continue?`)) return;
-    const newNum = nextInvNum(invoices, false);
+    const newNum = nextInvNum(invoices.filter(i => i.business_id === inv.business_id), false);
     const { supabase } = await import('../lib/db.js');
     await supabase.from('invoices').update({ status: totalPaid >= Number(inv.total) - 0.01 ? 'paid' : 'sent', invoice_number: newNum, proforma_number: inv.invoice_number, issue_date: lastPaymentDate }).eq('id', inv.id);
     reload();
@@ -593,12 +647,15 @@ export function InvoicesView({ invoices, businesses, parties, activeBiz, reload,
       return (a.invoice_number || '').localeCompare(b.invoice_number || '');
     });
 
-    // Assign numbers per FY starting at 1001
+    // Assign numbers per FY, per business (Rule 46(b) — sequence must be
+    // consecutive within one GSTIN; keying only by FY would interleave two
+    // businesses' drafts into one shared sequence if activeBiz isn't set).
     const fyCounters = {};
     const updates = sorted.map(inv => {
       const fy = getFYForDate(inv.issue_date);
-      if (!fyCounters[fy]) fyCounters[fy] = 1001;
-      const num = fyCounters[fy]++;
+      const key = `${inv.business_id}|${fy}`;
+      if (!fyCounters[key]) fyCounters[key] = 1001;
+      const num = fyCounters[key]++;
       return { id: inv.id, old: inv.invoice_number, newNum: `${fy}/${num}` };
     });
 
