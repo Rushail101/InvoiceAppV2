@@ -163,7 +163,7 @@ tbody tr:nth-child(even) td{background:#fafafa}
     ${party.gstin ? `<br><strong>GSTIN:</strong> ${party.gstin}` : ''}</p>
   </div>
   <div class="pc"><h4>Ship To</h4>
-    <p>${(party.address || '').replace(/\n/g, '<br>')}
+    <p>${(invoice.ship_to_address || party.address || '').replace(/\n/g, '<br>')}
     ${party.phone ? `<br>${party.phone}` : ''}</p>
   </div>
 </div>
@@ -510,7 +510,7 @@ tbody tr:nth-child(even) td{background:#fafafa}
 </div>
 
 <p style="text-align:center;font-size:9px;color:#bbb;margin-top:12px">
-  This is a computer-generated delivery challan — no signature required if sent electronically.
+  Rule 55 requires this challan to be signed by the consignor (or authorised representative) before goods move — sign above.
 </p>
 
 </div></body></html>`;
