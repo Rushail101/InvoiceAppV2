@@ -164,7 +164,7 @@ const INV_COLS = [
   'business_id','party_id','invoice_number','type','status',
   'issue_date','due_date','notes','discount_percent','discount_amount',
   'subtotal','cgst_amount','sgst_amount','igst_amount','tax_amount',
-  'total','is_interstate','tds_amount',
+  'total','is_interstate','tds_amount','reverse_charge',
 ];
 
 function pickInvCols(data) {
@@ -228,8 +228,18 @@ export async function markGSTFiled(ids, filed = true, period = null) {
   if (error) throw new Error(`GST filed update failed: ${error.message}`);
 }
 
+// Hard delete — only ever safe for an invoice that was never sent/filed
+// (Invoices.jsx guards this). Once an invoice has been shared with a
+// customer or marked GST-filed, records must be retained (Sec 35 CGST
+// Act / Rule 56) — use cancelInvoice() instead, which keeps the row and
+// its number but marks it void.
 export async function deleteInvoice(id) {
   await supabase.from('invoices').delete().eq('id', id);
+}
+
+export async function cancelInvoice(id) {
+  const { error } = await supabase.from('invoices').update({ status: 'cancelled' }).eq('id', id);
+  if (error) throw new Error(`Cancel failed: ${error.message}`);
 }
 
 // ── Payments ───────────────────────────────────────────────────────────────────
@@ -641,6 +651,7 @@ export async function saveChallan(challan, items, id) {
     dispatch_from: challan.dispatch_from || null,
     dispatch_to: challan.dispatch_to || null,
     linked_invoice_id: challan.linked_invoice_id || null,
+    eway_bill_number: challan.eway_bill_number || null,
     notes: challan.notes || null,
     status: challan.status || 'draft',
     subtotal: challan.subtotal,
