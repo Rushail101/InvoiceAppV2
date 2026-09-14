@@ -42,7 +42,7 @@ async function fetchAll(table, { order, select } = {}) {
 
 // ── Load all data ──────────────────────────────────────────────────────────────
 export async function loadAll() {
-  const [biz, inv, par, exp, pay, accs, jnl, jlines, cns, banks, bankTxns, itms, dcs] = await Promise.all([
+  const [biz, inv, par, exp, pay, accs, jnl, jlines, cns, dns, banks, bankTxns, itms, dcs] = await Promise.all([
     fetchAll('businesses', { order: { column: 'name', ascending: true } }),
     fetchAll('invoices', { order: { column: 'created_at', ascending: false } }),
     fetchAll('parties', { order: { column: 'name', ascending: true } }),
@@ -52,6 +52,7 @@ export async function loadAll() {
     fetchAll('journal_entries', { order: [{ column: 'entry_date', ascending: false }, { column: 'created_at', ascending: false }] }),
     fetchAll('journal_lines'),
     fetchAll('credit_notes', { order: { column: 'created_at', ascending: false } }),
+    fetchAll('debit_notes', { order: { column: 'created_at', ascending: false } }),
     fetchAll('bank_accounts', { order: { column: 'name', ascending: true } }),
     fetchAll('bank_transactions', { order: { column: 'txn_date', ascending: false } }),
     fetchAll('items', { order: { column: 'name', ascending: true } }),
@@ -67,6 +68,7 @@ export async function loadAll() {
     journalEntries: jnl,
     journalLines: jlines,
     creditNotes: cns,
+    debitNotes: dns,
     bankAccounts: banks,
     bankTransactions: bankTxns,
     items: itms,
@@ -350,17 +352,75 @@ export async function deleteJournal(id) {
 }
 
 // ── Credit Notes ───────────────────────────────────────────────────────────────
+const CN_COLS = [
+  'business_id','invoice_id','party_id','cn_number','cn_date','reason','notes',
+  'subtotal','cgst_amount','sgst_amount','igst_amount','tax_amount','total',
+  'is_interstate','status','note_type',
+];
+
 export async function saveCreditNote(cn, items) {
-  const { data, error } = await supabase.from('credit_notes').insert(cn).select().single();
-  if (error) throw error;
+  const payload = Object.fromEntries(Object.entries(cn).filter(([k]) => CN_COLS.includes(k)));
+  const { data, error } = await supabase.from('credit_notes').insert(payload).select().single();
+  if (error) throw new Error(`Credit note save failed: ${error.message}. Run the compliance migration from Settings → SQL Setup.`);
   const cnId = data.id;
   if (items?.length) {
-    await supabase.from('credit_note_items').insert(items.map(i => ({ ...i, credit_note_id: cnId })));
+    const rows = items.map(i => ({ ...i, credit_note_id: cnId }));
+    const { error: itemError } = await supabase.from('credit_note_items').insert(rows);
+    if (itemError) throw new Error(`Credit note items save failed: ${itemError.message}`);
   }
   return cnId;
 }
 export async function getCreditNoteItems(cnId) {
   const { data } = await supabase.from('credit_note_items').select('*').eq('credit_note_id', cnId);
+  return data || [];
+}
+
+// ── Debit Notes ────────────────────────────────────────────────────────────────
+export async function saveDebitNote(dn, items) {
+  const payload = {
+    business_id: dn.business_id,
+    invoice_id: dn.invoice_id || null,
+    party_id: dn.party_id,
+    dn_number: dn.dn_number,
+    dn_date: dn.dn_date,
+    reason: dn.reason || null,
+    notes: dn.notes || null,
+    subtotal: Number(dn.subtotal || 0),
+    cgst_amount: Number(dn.cgst_amount || 0),
+    sgst_amount: Number(dn.sgst_amount || 0),
+    igst_amount: Number(dn.igst_amount || 0),
+    tax_amount: Number(dn.tax_amount || 0),
+    total: Number(dn.total || 0),
+    is_interstate: Boolean(dn.is_interstate),
+    status: dn.status || 'issued',
+  };
+  const { data, error } = await supabase.from('debit_notes').insert(payload).select().single();
+  if (error) throw new Error(`Debit note save failed: ${error.message}. Run the Debit Note migration from Settings → SQL Setup.`);
+  const dnId = data.id;
+  if (items?.length) {
+    const rows = items.map(i => ({
+      debit_note_id: dnId,
+      description: i.description,
+      hsn_code: i.hsn_code || null,
+      quantity: Number(i.quantity || 0),
+      unit_price: Number(i.unit_price || 0),
+      tax_percent: Number(i.tax_percent || 0),
+      taxable_amount: Number(i.taxable || i.taxable_amount || 0),
+      cgst_amount: Number(i.cgst || i.cgst_amount || 0),
+      sgst_amount: Number(i.sgst || i.sgst_amount || 0),
+      igst_amount: Number(i.igst || i.igst_amount || 0),
+      tax_amount: Number(i.tax || 0),
+      amount: Number(i.lineTotal || i.amount || 0),
+    }));
+    const { error: itemError } = await supabase.from('debit_note_items').insert(rows);
+    if (itemError) throw new Error(`Debit note items save failed: ${itemError.message}`);
+  }
+  return dnId;
+}
+
+export async function getDebitNoteItems(dnId) {
+  const { data, error } = await supabase.from('debit_note_items').select('*').eq('debit_note_id', dnId).order('id');
+  if (error) throw error;
   return data || [];
 }
 
