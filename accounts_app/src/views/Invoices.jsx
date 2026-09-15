@@ -1,0 +1,847 @@
+import { useState, useEffect, useRef } from 'react';
+import { fmt, fmtDate, today, GST_RATES, PAY_MODES, INDIAN_STATES, gstType, calcLineTax, nextInvNum, getFY, garmentGSTRate, isGSTINValid, guessHSN, isHSNValid, MIN_HSN_DIGITS } from '../lib/constants.js';
+import { saveInvoice, getInvoiceItems, updateInvoiceStatus, deleteInvoice, cancelInvoice, savePaymentWithJournal } from '../lib/db.js';
+import { printInvoice } from '../lib/pdf.js';
+import { Badge, ModalShell, FG, PayHistory, EmptyState } from '../components/ui.jsx';
+
+// ─── LINE ITEM CALCULATION ─────────────────────────────────────────────────────
+// priceMode: 'exclusive' (default) — unit_price is the pre-tax rate, GST is
+// added on top. 'inclusive' — unit_price already has GST baked in, so the
+// taxable value is backed out of it instead. Either way taxable/cgst/sgst/
+// igst/lineTotal end up as real numbers stored per line, so nothing else
+// downstream (PDF, ledgers, GSTR-1) needs to know which mode was used.
+//
+// invDiscRatio: an optional invoice-level discount, applied as a uniform
+// fraction reduction to the (already line-discounted) taxable value BEFORE
+// tax is computed — per Sec 15(3) CGST Act, discounts must reduce the
+// taxable value, not the post-tax total. Scaling every line's taxable value
+// by the same factor scales that line's tax by the same factor too, so the
+// invoice grand total ends up scaled by exactly (1 - invDiscRatio), which is
+// what lets the caller solve for the ratio from a target ₹ or % discount
+// (see InvoiceModal) while keeping taxable + tax == total on every line.
+function calcItem(it, isIntrastate, priceMode = 'exclusive', invDiscRatio = 0) {
+  const base = (Number(it.quantity) || 0) * (Number(it.unit_price) || 0);
+  const discAmt = base * (Number(it.discount_percent || 0) / 100);
+  const net = base - discAmt;
+  const taxPercent = Number(it.tax_percent || 0);
+  let taxable = priceMode === 'inclusive' ? net / (1 + taxPercent / 100) : net;
+  taxable = taxable * (1 - invDiscRatio);
+  const { cgst, sgst, igst } = calcLineTax(taxable, taxPercent, isIntrastate);
+  const lineTotal = taxable + cgst + sgst + igst;
+  return { ...it, base, discAmt, taxable, cgst, sgst, igst, lineTotal };
+}
+
+// ─── INVOICE MODAL ─────────────────────────────────────────────────────────────
+export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItems = [], editData, allInvoices, isProforma = false, activeBiz, purchaseMode = false }) {
+  const isPF = isProforma || (editData?.status === 'proforma');
+  const initialBizId = editData?.business_id || activeBiz || businesses[0]?.id || '';
+
+  const [f, setF] = useState({
+    business_id: initialBizId,
+    party_id: editData?.party_id || '',
+    // Sequence must be unique per GSTIN (Rule 46(b)) — scope the scan to this
+    // business only, not every business's invoices, or numbers will skip
+    // around whenever another business creates a document in between.
+    invoice_number: editData?.invoice_number || nextInvNum(allInvoices.filter(i => i.business_id === initialBizId), isPF),
+    type: editData?.type || (purchaseMode ? 'purchase' : 'sale'),
+    issue_date: editData?.issue_date || today(),
+    due_date: editData?.due_date || '',
+    status: editData?.status || (isPF ? 'proforma' : 'draft'),
+    notes: editData?.notes || '',
+    discount_percent: editData?.discount_percent || 0,
+    discount_amount: editData?.discount_amount || 0,
+    tds_amount: editData?.tds_amount || 0,
+    price_mode: editData?.price_mode || 'exclusive',
+    round_off: editData?.round_off ?? false,
+    ship_to_address: editData?.ship_to_address || '',
+    itc_eligible: editData?.itc_eligible ?? true,
+    itc_ineligible_reason: editData?.itc_ineligible_reason || '',
+    purchase_order_ref: editData?.purchase_order_ref || '',
+    grn_ref: editData?.grn_ref || '',
+    reverse_charge: editData?.reverse_charge || false,
+  });
+
+  const [items, setItems] = useState(
+    editData?.items?.length ? editData.items
+      : [{ description: '', hsn_code: '', quantity: 1, unit_price: 0, discount_percent: 0, tax_percent: 5 }]
+  );
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  // Switching the business on a NEW invoice must re-scope the number to that
+  // business's own sequence — otherwise it'd keep whatever number the
+  // previously-selected business generated. Skip this while editing an
+  // existing invoice (its number is already fixed).
+  const prevBizRef = useRef(initialBizId);
+  useEffect(() => {
+    if (editData) return;
+    if (f.business_id === prevBizRef.current) return;
+    prevBizRef.current = f.business_id;
+    setF(x => ({ ...x, invoice_number: nextInvNum(allInvoices.filter(i => i.business_id === f.business_id), isPF) }));
+  }, [f.business_id]);
+
+  const bizObj = businesses.find(b => b.id === f.business_id) || {};
+  const partyObj = parties.find(p => p.id === f.party_id) || {};
+  const isIntrastate = gstType(bizObj.state, partyObj.state) === 'intrastate';
+  const filteredParties = parties.filter(p => p.business_id === f.business_id);
+
+  // Pass 1 — no invoice-level discount yet — just to know the pre-discount
+  // grand total, which the ratio below is solved against.
+  const calc0 = items.map(it => calcItem(it, isIntrastate, f.price_mode));
+  const subtotal0 = calc0.reduce((s, i) => s + i.taxable, 0);
+  const tax0 = calc0.reduce((s, i) => s + i.cgst + i.sgst + i.igst, 0);
+  const grand0 = subtotal0 + tax0;
+
+  // Invoice-level discount — % or flat ₹, whichever is non-zero (flat takes
+  // priority). Converted to a uniform ratio applied to every line's taxable
+  // value (pre-tax), not to the post-tax total — see calcItem() comment.
+  // Because scaling every line's taxable by the same factor scales that
+  // line's tax by the same factor too, grand0 * (1 - ratio) lands exactly
+  // on the ₹ or % discount the user asked for.
+  const invDiscPct = Number(f.discount_percent || 0);
+  const invDiscFlat = Number(f.discount_amount || 0);
+  const invDiscRatio = invDiscFlat > 0
+    ? (grand0 > 0 ? Math.min(1, invDiscFlat / grand0) : 0)
+    : Math.min(1, invDiscPct / 100);
+
+  // Pass 2 — apply the resolved ratio to get the real, tax-consistent totals.
+  const calc = items.map(it => calcItem(it, isIntrastate, f.price_mode, invDiscRatio));
+  const subtotal = calc.reduce((s, i) => s + i.taxable, 0);
+  const totalCGST = calc.reduce((s, i) => s + i.cgst, 0);
+  const totalSGST = calc.reduce((s, i) => s + i.sgst, 0);
+  const totalIGST = calc.reduce((s, i) => s + i.igst, 0);
+  const totalTax = totalCGST + totalSGST + totalIGST;
+  const grand = subtotal + totalTax;
+
+  const invDiscAmt = grand0 - grand;
+  const invDiscPctDisplay = grand0 > 0 ? (invDiscAmt / grand0) * 100 : 0;
+  const finalTotal = grand;
+
+  // Round-off — snaps the final payable amount to the nearest whole rupee
+  // (standard practice on Indian tax invoices). The difference between the
+  // exact and rounded figure is shown as its own "Round Off" line so nothing
+  // is silently hidden.
+  const roundedTotal = Math.round(finalTotal);
+  const roundOffAmt = roundedTotal - finalTotal;
+  const payableTotal = f.round_off ? roundedTotal : finalTotal;
+
+  function upd(idx, field, val) {
+    setItems(prev => prev.map((it, i) => {
+      if (i !== idx) return it;
+      const next = { ...it, [field]: val };
+      // Auto-suggest the GST rate off the current 2-slab garment rule
+      // (≤₹2,500/piece → 5%, above → 18%) whenever the rate is edited.
+      // Only fires on a price edit, so a deliberate manual GST% pick
+      // (e.g. for a non-apparel line) sticks unless the price changes again.
+      if (field === 'unit_price') next.tax_percent = garmentGSTRate(val);
+      return next;
+    }));
+  }
+  function addRow() { setItems(p => [...p, { description: '', hsn_code: '', quantity: 1, unit_price: 0, discount_percent: 0, tax_percent: 5 }]); }
+  function remRow(idx) { setItems(p => p.filter((_, i) => i !== idx)); }
+
+  // Best-effort HSN suggestion from the description, on blur (not every
+  // keystroke — matching mid-word would flicker). Only fills a currently
+  // blank field, and only overwrites a *previous auto-fill* (hsn_auto) if
+  // the description changed enough to suggest something different — a
+  // manually-typed HSN (hsn_auto unset) is never touched.
+  function guessHSNOnBlur(idx) {
+    setItems(prev => prev.map((it, i) => {
+      if (i !== idx) return it;
+      if (it.hsn_code && !it.hsn_auto) return it; // user typed their own — leave it
+      const guess = guessHSN(it.description);
+      if (!guess) return it.hsn_auto ? { ...it, hsn_code: '', hsn_auto: false, hsn_guess_label: null } : it;
+      return { ...it, hsn_code: guess.hsn, hsn_auto: true, hsn_guess_label: guess.label };
+    }));
+  }
+  function editHSN(idx, val) {
+    setItems(prev => prev.map((it, i) => i !== idx ? it : { ...it, hsn_code: val, hsn_auto: false, hsn_guess_label: null }));
+  }
+
+  async function save() {
+    if (!f.party_id) { setErr('Select a party'); return; }
+    const validItems = calc.filter(i => i.description?.trim());
+    if (!validItems.length) { setErr('Add at least one line item'); return; }
+    // Rule 46(f) — HSN is mandatory on every line, minimum 4 digits below
+    // ₹5cr turnover.
+    const badHSN = validItems.filter(i => !isHSNValid(i.hsn_code));
+    if (badHSN.length) {
+      setErr(`HSN code required (min ${MIN_HSN_DIGITS} digits) for: ${badHSN.map(i => i.description).join(', ')}`);
+      return;
+    }
+    setErr(''); setBusy(true);
+    try {
+      const invData = {
+        ...f,
+        subtotal,
+        cgst_amount: totalCGST,
+        sgst_amount: totalSGST,
+        igst_amount: totalIGST,
+        tax_amount: totalTax,
+        discount_amount: invDiscAmt,
+        discount_percent: invDiscPctDisplay,
+        total: payableTotal,
+        is_interstate: !isIntrastate,
+      };
+      await onSave(invData, validItems, editData?.id);
+      onClose();
+    } catch (e) { setErr(e.message); }
+    setBusy(false);
+  }
+
+  const gstLabel = isIntrastate
+    ? <span>GST split: <span className="gst-chip cgst">CGST</span> <span className="gst-chip sgst">SGST</span></span>
+    : <span>GST type: <span className="gst-chip igst">IGST</span> (inter-state)</span>;
+
+  return (
+    <ModalShell title={editData ? (f.type === 'purchase' ? 'Edit Purchase Bill' : 'Edit Invoice') : (isPF ? 'New Proforma Invoice' : (purchaseMode ? 'New Purchase Bill' : 'New Tax Invoice'))} onClose={onClose} size="modal-xl"
+      foot={<><button className="btn btn-ghost" onClick={onClose}>Cancel</button><button className="btn btn-primary" onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save Invoice'}</button></>}>
+
+      {isPF && <div className="pf-banner">⚡ Proforma Invoice — numbered PI-… Use "→ Invoice" to convert when approved.</div>}
+
+      {/* Top fields */}
+      <div className="form-row cols-3">
+        <FG label="Business">
+          <select value={f.business_id} onChange={e => setF(x => ({ ...x, business_id: e.target.value, party_id: '' }))}>
+            {businesses.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+          </select>
+        </FG>
+        <FG label={purchaseMode ? 'Document Type' : 'Invoice Type'}>
+          <select value={f.type} onChange={e => setF(x => ({ ...x, type: e.target.value }))}>
+            {!purchaseMode && <option value="sale">Sale (Invoice)</option>}
+            <option value="purchase">Purchase (Bill)</option>
+          </select>
+        </FG>
+        <FG label="Invoice #">
+          <input value={f.invoice_number} disabled={!!editData?.gst_filed}
+            onChange={e => setF(x => ({ ...x, invoice_number: e.target.value }))} />
+          {editData?.gst_filed && <div style={{ fontSize: 10, color: 'var(--text3)', marginTop: 3 }}>Locked — already marked GST-filed. Cancel and reissue instead of renumbering.</div>}
+        </FG>
+      </div>
+
+      <div className="form-row cols-3">
+        <FG label="Party *">
+          <select value={f.party_id} onChange={e => setF(x => ({ ...x, party_id: e.target.value }))}>
+            <option value="">Select party…</option>
+            {filteredParties.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </FG>
+        <FG label="Issue Date"><input type="date" value={f.issue_date} onChange={e => setF(x => ({ ...x, issue_date: e.target.value }))} /></FG>
+        <FG label="Due Date"><input type="date" value={f.due_date} onChange={e => setF(x => ({ ...x, due_date: e.target.value }))} /></FG>
+      </div>
+
+      <div className="form-row cols-3">
+        <FG label="Status">
+          <select value={f.status} onChange={e => setF(x => ({ ...x, status: e.target.value }))}>
+            {['proforma', 'draft', 'sent', 'paid', 'overdue', 'cancelled'].map(s => <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>)}
+          </select>
+        </FG>
+        <FG label="Discount">
+          <div style={{display:'flex',gap:6,alignItems:'center'}}>
+            <div style={{position:'relative',flex:1}}>
+              <input type="number" min="0" max="100" step="0.01"
+                style={{paddingRight:22,width:'100%'}}
+                placeholder="0"
+                value={f.discount_percent || ''}
+                onChange={e => {
+                  const pct = e.target.value;
+                  const flat = pct ? (grand0 * (Number(pct) / 100)).toFixed(2) : 0;
+                  setF(x => ({ ...x, discount_percent: pct, discount_amount: Number(flat) }));
+                }} />
+              <span style={{position:'absolute',right:7,top:'50%',transform:'translateY(-50%)',fontSize:11,color:'var(--text3)',pointerEvents:'none'}}>%</span>
+            </div>
+            <span style={{color:'var(--text3)',fontSize:11,flexShrink:0}}>or</span>
+            <div style={{position:'relative',flex:1}}>
+              <span style={{position:'absolute',left:7,top:'50%',transform:'translateY(-50%)',fontSize:11,color:'var(--text3)',pointerEvents:'none'}}>₹</span>
+              <input type="number" min="0" step="0.01"
+                style={{paddingLeft:18,width:'100%'}}
+                placeholder="0"
+                value={f.discount_amount || ''}
+                onChange={e => {
+                  const flat = e.target.value;
+                  const pct = (flat && grand0 > 0) ? ((Number(flat) / grand0) * 100).toFixed(4) : 0;
+                  setF(x => ({ ...x, discount_amount: Number(flat), discount_percent: Number(pct) }));
+                }} />
+            </div>
+          </div>
+          {invDiscAmt > 0 && <div style={{fontSize:10,color:'var(--text3)',marginTop:2}}>= ₹{invDiscAmt.toLocaleString('en-IN',{minimumFractionDigits:2})} ({invDiscPctDisplay.toFixed(2)}% off)</div>}
+        </FG>
+        <FG label="Notes / Terms"><input value={f.notes} onChange={e => setF(x => ({ ...x, notes: e.target.value }))} placeholder="Due on Receipt" /></FG>
+        <FG label="TDS Deducted (₹)"><input type="number" value={f.tds_amount} onChange={e => setF(x => ({ ...x, tds_amount: e.target.value }))} placeholder="0" /></FG>
+      </div>
+      {f.type === 'purchase' && (
+        <>
+          <div className="form-row cols-3">
+            <FG label="Supplier Invoice # *"><input value={f.invoice_number} onChange={e => setF(x => ({ ...x, invoice_number: e.target.value }))} placeholder="Supplier's bill number" /></FG>
+            <FG label="PO Reference"><input value={f.purchase_order_ref} onChange={e => setF(x => ({ ...x, purchase_order_ref: e.target.value }))} placeholder="Optional PO #" /></FG>
+            <FG label="GRN / Receipt Ref"><input value={f.grn_ref} onChange={e => setF(x => ({ ...x, grn_ref: e.target.value }))} placeholder="Optional GRN #" /></FG>
+          </div>
+          <div style={{ display:'flex', gap:14, alignItems:'center', margin:'4px 0 12px', padding:'9px 11px', background:'var(--bg2)', border:'1px solid var(--border1)', borderRadius:'var(--r)' }}>
+            <label style={{ display:'flex', alignItems:'center', gap:7, fontSize:12, cursor:'pointer' }}>
+              <input type="checkbox" checked={!!f.itc_eligible} onChange={e => setF(x => ({ ...x, itc_eligible: e.target.checked, itc_ineligible_reason: e.target.checked ? '' : x.itc_ineligible_reason }))} />
+              <span>ITC eligible</span>
+            </label>
+            {!f.itc_eligible && <input style={{ flex:1 }} value={f.itc_ineligible_reason} onChange={e => setF(x => ({ ...x, itc_ineligible_reason: e.target.value }))} placeholder="Reason for ineligible / blocked ITC" />}
+            <label style={{ display:'flex', alignItems:'center', gap:7, fontSize:12, cursor:'pointer' }}>
+              <input type="checkbox" checked={!!f.reverse_charge} onChange={e => setF(x => ({ ...x, reverse_charge: e.target.checked }))} />
+              <span>RCM purchase</span>
+            </label>
+            <span style={{ fontSize:10.5, color:'var(--text3)' }}>Normal supplier GST: keep RCM off.</span>
+          </div>
+        </>
+      )}
+
+      <div className="form-row">
+        <FG label="Ship To (if different from billing address)">
+          <textarea rows={2} placeholder="Leave blank to use the party's billing address on the printed invoice"
+            value={f.ship_to_address} onChange={e => setF(x => ({ ...x, ship_to_address: e.target.value }))} />
+        </FG>
+      </div>
+      {partyObj.gstin && !isGSTINValid(partyObj.gstin) && (
+        <div style={{ fontSize: 11, color: 'var(--red)', marginBottom: 10 }}>
+          ⚠ This party's GSTIN doesn't look valid — double-check it before sending. A wrong GSTIN will fail to match in the recipient's GSTR-2B and block their ITC.
+        </div>
+      )}
+
+      {/* GST type indicator */}
+      {f.party_id && (
+        <div style={{ marginBottom: 10, fontSize: 12, color: 'var(--text2)' }}>
+          {gstLabel}
+          {bizObj.state && partyObj.state && <span style={{ marginLeft: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 11 }}>({bizObj.state} → {partyObj.state})</span>}
+        </div>
+      )}
+
+      {/* Line items */}
+      <div className="section-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span>Line Items</span>
+        <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+          <span style={{ fontSize: 10.5, color: 'var(--text3)', fontFamily: 'var(--mono)', textTransform: 'none', fontWeight: 400 }}>Rates entered below are:</span>
+          <div style={{ display: 'flex', borderRadius: 6, overflow: 'hidden', border: '1px solid var(--border2)' }}>
+            <button type="button"
+              onClick={() => setF(p => ({ ...p, price_mode: 'exclusive' }))}
+              style={{ padding: '4px 10px', fontSize: 11, border: 'none', cursor: 'pointer', background: f.price_mode === 'exclusive' ? 'var(--accent)' : 'var(--bg2)', color: f.price_mode === 'exclusive' ? '#0d0d0d' : 'var(--text2)', fontWeight: f.price_mode === 'exclusive' ? 700 : 400 }}>
+              GST added on top
+            </button>
+            <button type="button"
+              onClick={() => setF(p => ({ ...p, price_mode: 'inclusive' }))}
+              style={{ padding: '4px 10px', fontSize: 11, border: 'none', cursor: 'pointer', background: f.price_mode === 'inclusive' ? 'var(--accent)' : 'var(--bg2)', color: f.price_mode === 'inclusive' ? '#0d0d0d' : 'var(--text2)', fontWeight: f.price_mode === 'inclusive' ? 700 : 400 }}>
+              GST already included
+            </button>
+          </div>
+        </div>
+      </div>
+      {f.price_mode === 'inclusive' && (
+        <div style={{ fontSize: 10.5, color: 'var(--amber)', marginBottom: 6 }}>
+          Rate × Qty is treated as the final price including GST — the taxable value and tax split are backed out of it, not added on top.
+        </div>
+      )}
+      <div className="line-items-head" style={{ gridTemplateColumns: '2fr 90px 70px 100px 72px 60px 100px 28px' }}>
+        <span>Description</span><span>HSN</span><span>Qty</span><span>Rate</span><span>Disc%</span><span>GST%</span><span style={{ textAlign: 'right' }}>Amount</span><span></span>
+      </div>
+
+      {items.map((it, idx) => {
+        const c = calcItem(it, isIntrastate, f.price_mode);
+        return (
+          <div className="line-item-row" key={idx} style={{ gridTemplateColumns: '2fr 90px 70px 100px 72px 60px 100px 28px' }}>
+            <div style={{ position: 'relative', display: 'flex', gap: 3 }}>
+              <input placeholder="Product / service" value={it.description} onChange={e => upd(idx, 'description', e.target.value)} onBlur={() => guessHSNOnBlur(idx)} style={{ flex: 1 }} />
+              {catalogItems.filter(i => bizObj && i.business_id === f.business_id).length > 0 && (
+                <select
+                  style={{ background: 'var(--bg3)', border: '1px solid var(--border2)', color: 'var(--accent)', borderRadius: 'var(--r)', padding: '4px 6px', fontSize: 10, fontFamily: 'var(--mono)', cursor: 'pointer', flexShrink: 0, maxWidth: 120 }}
+                  value=""
+                  onChange={e => {
+                    if (!e.target.value) return;
+                    const item = catalogItems.find(i => i.id === e.target.value);
+                    if (item) setItems(prev => prev.map((it2, i2) => i2 !== idx ? it2 : {
+                      ...it2,
+                      description: item.name,
+                      hsn_code: item.hsn_code || it2.hsn_code,
+                      hsn_auto: false, hsn_guess_label: null,
+                      unit_price: item.sale_price || it2.unit_price,
+                      tax_percent: item.tax_percent ?? it2.tax_percent,
+                    }));
+                  }}
+                >
+                  <option value="">📦 Pick…</option>
+                  {catalogItems.filter(i => i.business_id === f.business_id).map(i => <option key={i.id} value={i.id}>{i.name}</option>)}
+                </select>
+              )}
+            </div>
+            <div>
+              <input placeholder="HSN" value={it.hsn_code || ''} onChange={e => editHSN(idx, e.target.value)}
+                style={{ fontFamily: 'var(--mono)', fontSize: 11, borderColor: it.hsn_auto ? 'var(--accent)' : undefined }}
+                title={it.hsn_auto ? `Auto-filled from "${it.hsn_guess_label}" — check it, then edit if needed` : ''} />
+              {it.hsn_auto && <div style={{ fontSize: 9, color: 'var(--accent)', marginTop: 2 }}>auto: {it.hsn_guess_label}</div>}
+            </div>
+            <input type="number" min="0" value={it.quantity} onChange={e => upd(idx, 'quantity', e.target.value)} />
+            <input type="number" min="0" value={it.unit_price} onChange={e => upd(idx, 'unit_price', e.target.value)} />
+            <input type="number" min="0" max="100" value={it.discount_percent || 0} onChange={e => upd(idx, 'discount_percent', e.target.value)} />
+            <select value={it.tax_percent} onChange={e => upd(idx, 'tax_percent', e.target.value)}>
+              {GST_RATES.map(r => <option key={r} value={r}>{r}%</option>)}
+            </select>
+            <div className="line-total">{fmt(c.lineTotal)}</div>
+            <button className="remove-btn" onClick={() => remRow(idx)}>×</button>
+          </div>
+        );
+      })}
+
+      <button className="btn btn-ghost btn-sm" style={{ marginTop: 4 }} onClick={addRow}>+ Add line</button>
+
+      {/* Totals */}
+      <div className="inv-totals">
+        <p><span>Subtotal (Taxable)</span><span>{fmt(subtotal)}</span></p>
+        {isIntrastate ? (
+          <>
+            <p><span>CGST</span><span>{fmt(totalCGST)}</span></p>
+            <p><span>SGST</span><span>{fmt(totalSGST)}</span></p>
+          </>
+        ) : (
+          <p><span>IGST</span><span>{fmt(totalIGST)}</span></p>
+        )}
+        {invDiscAmt > 0 && <p><span>Invoice Discount ({f.discount_percent}%)</span><span>-{fmt(invDiscAmt)}</span></p>}
+        <p style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer', fontSize: 12, color: 'var(--text2)' }}>
+              <input type="checkbox" checked={f.round_off} onChange={e => setF(x => ({ ...x, round_off: e.target.checked }))} />
+              Round off to nearest ₹1
+            </label>
+          </span>
+          {f.round_off && <span>{roundOffAmt >= 0 ? '+' : '-'}{fmt(Math.abs(roundOffAmt))}</span>}
+        </p>
+        <p className="grand"><span>Total</span><span>{fmt(payableTotal)}</span></p>
+      </div>
+
+      {err && <p className="err-msg">{err}</p>}
+    </ModalShell>
+  );
+}
+
+// ─── PAYMENT MODAL ─────────────────────────────────────────────────────────────
+export function PaymentModal({ onClose, onSave, invoice, existingPayments }) {
+  const totalPaid = existingPayments.reduce((s, p) => s + Number(p.amount), 0);
+  const balance = Number(invoice.total) - totalPaid;
+  const [f, setF] = useState({ amount: balance.toFixed(2), payment_date: today(), method: 'UPI', reference: '', notes: '' });
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  async function save() {
+    const amt = Number(f.amount);
+    if (!amt || amt <= 0) { setErr('Enter a valid amount'); return; }
+    if (amt > balance + 0.01) { setErr(`Max allowed: ${fmt(balance)}`); return; }
+    setBusy(true);
+    try {
+      await onSave({ ...f, amount: amt, invoice_id: invoice.id, business_id: invoice.business_id, party_id: invoice.party_id, invoice_type: invoice.type });
+      onClose();
+    } catch (e) { setErr(e.message); }
+    setBusy(false);
+  }
+
+  return (
+    <ModalShell title={invoice.status === 'proforma' ? `Record Advance — ${invoice.invoice_number}` : 'Record Payment'} onClose={onClose}
+      foot={<><button className="btn btn-ghost" onClick={onClose}>Cancel</button><button className="btn btn-primary" onClick={save} disabled={busy}>{busy ? 'Saving…' : invoice.status === 'proforma' ? 'Record Advance' : 'Record Payment'}</button></>}>
+      {invoice.status === 'proforma' && (() => {
+        const pct = invoice.total > 0 ? Math.min(100, Math.round((totalPaid / Number(invoice.total)) * 100)) : 0;
+        const remaining = Math.max(0, Number(invoice.total) - totalPaid);
+        return (
+          <div style={{ background: '#0e1a0e', border: '1px solid #1e3d1e', borderRadius: 10, padding: '12px 14px', marginBottom: 14 }}>
+            {/* Header row */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
+              <span style={{ fontSize: 12, fontWeight: 600, color: '#4ade80' }}>⚡ Proforma — Advance Collection</span>
+              <span style={{ fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 700, color: pct === 100 ? '#4ade80' : 'var(--amber)' }}>{pct}% collected</span>
+            </div>
+            {/* Progress bar */}
+            <div style={{ height: 6, background: 'var(--bg1)', borderRadius: 99, overflow: 'hidden', marginBottom: 10 }}>
+              <div style={{ height: '100%', width: `${pct}%`, background: pct === 100 ? '#4ade80' : '#fbbf24', borderRadius: 99, transition: 'width 0.4s' }} />
+            </div>
+            {/* Amount breakdown */}
+            <div style={{ display: 'flex', gap: 18, fontSize: 12, fontFamily: 'var(--mono)' }}>
+              <span style={{ color: 'var(--text3)' }}>Invoice total <strong style={{ color: 'var(--text1)' }}>{fmt(invoice.total)}</strong></span>
+              <span style={{ color: 'var(--text3)' }}>Received <strong style={{ color: '#4ade80' }}>{fmt(totalPaid)}</strong></span>
+              <span style={{ color: 'var(--text3)' }}>Remaining <strong style={{ color: remaining > 0 ? 'var(--amber)' : '#4ade80' }}>{fmt(remaining)}</strong></span>
+            </div>
+            {pct < 100 && (
+              <div style={{ marginTop: 8, fontSize: 11, color: 'var(--text3)' }}>
+                Tax invoice + invoice number will be assigned automatically when full payment is received.
+              </div>
+            )}
+          </div>
+        );
+      })()}
+      <PayHistory payments={existingPayments} invoiceTotal={Number(invoice.total)} />
+      <div style={{ marginTop: 14 }} className="form-row cols-2">
+        <FG label="Amount (₹) *"><input type="number" value={f.amount} onChange={e => setF(x => ({ ...x, amount: e.target.value }))} /></FG>
+        <FG label="Date *"><input type="date" value={f.payment_date} onChange={e => setF(x => ({ ...x, payment_date: e.target.value }))} /></FG>
+      </div>
+      <div className="form-row cols-2">
+        <FG label="Method"><select value={f.method} onChange={e => setF(x => ({ ...x, method: e.target.value }))}>{PAY_MODES.map(m => <option key={m} value={m}>{m}</option>)}</select></FG>
+        <FG label="Reference / UTR"><input value={f.reference} onChange={e => setF(x => ({ ...x, reference: e.target.value }))} placeholder="UTR / cheque no." /></FG>
+      </div>
+      <FG label="Notes"><textarea value={f.notes} onChange={e => setF(x => ({ ...x, notes: e.target.value }))} /></FG>
+      {err && <p className="err-msg">{err}</p>}
+    </ModalShell>
+  );
+}
+
+// ─── MONTH HELPERS ─────────────────────────────────────────────────────────────
+const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+function getMonthKey(dateStr) {
+  if (!dateStr) return 'unknown';
+  const d = new Date(dateStr);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function fmtMonthKey(key) {
+  if (key === 'unknown') return 'Unknown Date';
+  const [y, m] = key.split('-');
+  return `${MONTH_NAMES[parseInt(m, 10) - 1]} ${y}`;
+}
+
+// ─── INVOICES VIEW ─────────────────────────────────────────────────────────────
+export function InvoicesView({ invoices, businesses, parties, activeBiz, reload, payments, creditNotes, catalogItems = [], purchaseMode = false }) {
+  const [search, setSearch] = useState('');
+  const [groupByMonth, setGroupByMonth] = useState(true);
+  const [activeMonth, setActiveMonth] = useState(null); // null = show all months expanded
+  const [sf, setSf] = useState('');
+  const [showInv, setShowInv] = useState(false);
+  const [showPF, setShowPF] = useState(false);
+  const [editData, setEditData] = useState(null);
+  const [payInv, setPayInv] = useState(null);
+  const [collapsedMonths, setCollapsedMonths] = useState({});
+
+  const paysByInv = {};
+  payments.forEach(p => { if (!paysByInv[p.invoice_id]) paysByInv[p.invoice_id] = []; paysByInv[p.invoice_id].push(p); });
+
+  const cnsByInv = {};
+  creditNotes.forEach(cn => { if (!cnsByInv[cn.invoice_id]) cnsByInv[cn.invoice_id] = []; cnsByInv[cn.invoice_id].push(cn); });
+
+  const filtered = invoices.filter(i => {
+    const biz = activeBiz ? i.business_id === activeBiz : true;
+    const stMatch = sf ? i.status === sf : true;
+    const s = search.toLowerCase();
+    const nameMatch = !s || i.invoice_number.toLowerCase().includes(s) || (parties.find(p => p.id === i.party_id)?.name || '').toLowerCase().includes(s);
+    return biz && stMatch && nameMatch && (purchaseMode ? i.type === 'purchase' : i.type !== 'purchase');
+  }).sort((a, b) => new Date(b.issue_date) - new Date(a.issue_date));
+
+  // Group by month (YYYY-MM key, sorted newest first)
+  const monthGroups = filtered.reduce((acc, inv) => {
+    const key = getMonthKey(inv.issue_date);
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(inv);
+    return acc;
+  }, {});
+  const sortedMonthKeys = Object.keys(monthGroups).sort((a, b) => b.localeCompare(a));
+
+  // Set default active month to most recent when switching to tab mode
+  function handleGroupToggle() {
+    const newMode = !groupByMonth;
+    setGroupByMonth(newMode);
+    if (newMode && !activeMonth && sortedMonthKeys.length) {
+      setActiveMonth(sortedMonthKeys[0]);
+    }
+  }
+
+  // When tabs mode: show only active month; when accordion: show all, toggle collapse
+  const displayMonths = groupByMonth && activeMonth !== null
+    ? sortedMonthKeys // tabs mode shows tabs, content filtered below
+    : sortedMonthKeys;
+
+  function toggleCollapse(key) {
+    setCollapsedMonths(prev => ({ ...prev, [key]: !prev[key] }));
+  }
+
+  // Ensure active month defaults to first month on first render with groupByMonth=true
+  if (groupByMonth && activeMonth === null && sortedMonthKeys.length > 0) {
+    // Use setTimeout to avoid setState-in-render
+    setTimeout(() => setActiveMonth(sortedMonthKeys[0]), 0);
+  }
+
+  async function handleSave(invData, items, id) {
+    await saveInvoice(invData, items, id);
+    reload();
+  }
+
+  async function handlePayment(data) {
+    const amt = Number(data.amount);
+    await savePaymentWithJournal(data);
+    const inv = invoices.find(i => i.id === data.invoice_id);
+    const prev = (paysByInv[data.invoice_id] || []).reduce((s, p) => s + Number(p.amount), 0);
+    const totalPaid = prev + amt;
+    const isFullyPaid = totalPaid >= Number(inv?.total) - 0.01;
+
+    if (inv?.status === 'proforma') {
+      if (isFullyPaid) {
+        // Auto-convert: assign next invoice number, mark paid, use date of final payment as invoice date
+        const newNum = nextInvNum(invoices.filter(i => i.business_id === inv.business_id), false);
+        const invoiceDate = data.payment_date || today();
+        const { supabase } = await import('../lib/db.js');
+        await supabase.from('invoices')
+          .update({ status: 'paid', invoice_number: newNum, proforma_number: inv.invoice_number, issue_date: invoiceDate })
+          .eq('id', data.invoice_id);
+        alert(`✅ Full payment received!\nTax Invoice ${newNum} raised on ${invoiceDate}.\nThis invoice will now appear in GSTR-1 for the current month.`);
+      }
+      // Partial advance on proforma — record payment, keep as proforma, show running total
+    } else {
+      const newStatus = isFullyPaid ? 'paid' : 'partially_paid';
+      await updateInvoiceStatus(data.invoice_id, newStatus);
+    }
+    reload();
+  }
+
+  async function convertProforma(inv) {
+    const totalPaid = (paysByInv[inv.id] || []).reduce((s, p) => s + Number(p.amount), 0);
+    const pct = inv.total > 0 ? Math.round((totalPaid / Number(inv.total)) * 100) : 0;
+    // Use the date of the last payment recorded as the invoice date
+    const payments = paysByInv[inv.id] || [];
+    const lastPaymentDate = payments.length > 0
+      ? payments.reduce((latest, p) => p.payment_date > latest ? p.payment_date : latest, payments[0].payment_date)
+      : today();
+    if (!confirm(`Convert ${inv.invoice_number} to Tax Invoice?\n\nPayment received: ₹${totalPaid.toLocaleString('en-IN')} of ₹${Number(inv.total).toLocaleString('en-IN')} (${pct}%)\n\nIssue date will be set to ${lastPaymentDate}. Continue?`)) return;
+    const newNum = nextInvNum(invoices.filter(i => i.business_id === inv.business_id), false);
+    const { supabase } = await import('../lib/db.js');
+    await supabase.from('invoices').update({ status: totalPaid >= Number(inv.total) - 0.01 ? 'paid' : 'sent', invoice_number: newNum, proforma_number: inv.invoice_number, issue_date: lastPaymentDate }).eq('id', inv.id);
+    reload();
+  }
+
+  async function del(id) {
+    const inv = invoices.find(i => i.id === id);
+    // Once an invoice has actually been issued (sent/paid) or marked
+    // GST-filed, records must be retained — Sec 35 CGST Act / Rule 56.
+    // Cancel it instead (keeps the row + number, just voids it) rather
+    // than erasing the audit trail. Only a never-sent draft/proforma can
+    // be hard-deleted.
+    if (inv?.gst_filed || ['sent', 'paid'].includes(inv?.status)) {
+      if (!confirm(`${inv.invoice_number} has already been issued${inv.gst_filed ? ' and marked GST-filed' : ''} — it can't be deleted.\n\nCancel it instead? (keeps the record and number, marks it void; raise a credit note if goods/money need to be reversed)`)) return;
+      await cancelInvoice(id);
+    } else {
+      if (!confirm('Delete this invoice? This cannot be undone.')) return;
+      await deleteInvoice(id);
+    }
+    reload();
+  }
+
+  async function dlPDF(inv) {
+    const { supabase } = await import('../lib/db.js');
+    const { data: items } = await supabase.from('invoice_items').select('*').eq('invoice_id', inv.id);
+    const party = parties.find(p => p.id === inv.party_id) || {};
+    const biz = businesses.find(b => b.id === inv.business_id) || {};
+    printInvoice(inv, items || [], party, biz, paysByInv[inv.id] || []);
+  }
+
+  async function openEdit(inv) {
+    // NOTE: line items live in a separate invoice_items table and were never
+    // being fetched here — the modal was opening with only the invoice header
+    // (party, dates, totals), so its item list always started empty on edit,
+    // even though the items themselves were safely sitting in the database
+    // the whole time. Delivery Challans already do this correctly (openEdit
+    // there calls getChallanItems first) — this mirrors that.
+    const items = await getInvoiceItems(inv.id);
+    setEditData({ ...inv, items });
+    setShowInv(true);
+  }
+
+  async function autoNumber() {
+    // Only renumber invoices that haven't actually gone out yet. Once an
+    // invoice is sent/paid or marked GST-filed, the customer has that
+    // number on their copy and/or it's already on the GST portal —
+    // rewriting it at that point creates a mismatch between your books,
+    // their copy, and what's filed. Only 'draft' invoices are fair game.
+    const toNumber = invoices
+      .filter(i => i.type !== 'proforma' && i.status === 'draft' && !i.gst_filed)
+      .filter(i => activeBiz ? i.business_id === activeBiz : true);
+
+    if (!toNumber.length) { alert('No draft invoices found to number. Sent, paid, or GST-filed invoices are left alone — cancel and reissue those instead of renumbering.'); return; }
+
+    // Indian FY: April (month 3) starts new year
+    function getFYForDate(dateStr) {
+      const d = new Date(dateStr);
+      const y = d.getFullYear(), m = d.getMonth();
+      const sy = m >= 3 ? y : y - 1;
+      return `${String(sy).slice(-2)}-${String(sy + 1).slice(-2)}`;
+    }
+
+    // Sort by date ascending, existing number as tiebreaker
+    const sorted = [...toNumber].sort((a, b) => {
+      const diff = new Date(a.issue_date) - new Date(b.issue_date);
+      if (diff !== 0) return diff;
+      return (a.invoice_number || '').localeCompare(b.invoice_number || '');
+    });
+
+    // Assign numbers per FY, per business (Rule 46(b) — sequence must be
+    // consecutive within one GSTIN; keying only by FY would interleave two
+    // businesses' drafts into one shared sequence if activeBiz isn't set).
+    const fyCounters = {};
+    const updates = sorted.map(inv => {
+      const fy = getFYForDate(inv.issue_date);
+      const key = `${inv.business_id}|${fy}`;
+      if (!fyCounters[key]) fyCounters[key] = 1001;
+      const num = fyCounters[key]++;
+      return { id: inv.id, old: inv.invoice_number, newNum: `${fy}/${num}` };
+    });
+
+    // Preview confirmation
+    const preview = updates.slice(0, 8).map(u => `  ${u.old}  →  ${u.newNum}`).join('\n');
+    const more = updates.length > 8 ? `\n  ...and ${updates.length - 8} more` : '';
+    const ok = confirm(`Auto-Number Invoices\n\nThis will renumber ${updates.length} invoice(s) by date:\n\n${preview}${more}\n\nThis overwrites existing numbers. Continue?`);
+    if (!ok) return;
+
+    const { supabase } = await import('../lib/db.js');
+    for (const u of updates) {
+      await supabase.from('invoices').update({ invoice_number: u.newNum }).eq('id', u.id);
+    }
+    alert(`✅ Done! ${updates.length} invoices renumbered.`);
+    reload();
+  }
+
+  // Render a table of invoices for a given list
+  function InvoiceTable({ list }) {
+    if (!list.length) return <EmptyState icon="📄" message="No invoices this month" />;
+    return (
+      <div className="table-wrap">
+        <table>
+          <thead><tr>
+            <th>{purchaseMode ? 'Supplier Bill #' : 'Invoice #'}</th><th>{purchaseMode ? 'Supplier' : 'Party'}</th><th>Date</th><th>Due</th>
+            <th className="r">Total</th><th className="r">Paid</th><th className="r">Balance</th>
+            <th>GST</th>{purchaseMode && <th>ITC</th>}<th>Status</th><th>Actions</th>
+          </tr></thead>
+          <tbody>
+            {list.map(inv => {
+              const ip = paysByInv[inv.id] || [];
+              const paid = ip.reduce((s, p) => s + Number(p.amount), 0);
+              const bal = Number(inv.total) - paid;
+              const gstMode = inv.is_interstate === false ? 'intra' : 'inter';
+              return (
+                <tr key={inv.id}>
+                  <td className="mono">{inv.invoice_number}</td>
+                  <td style={{ fontWeight: 500 }}>{parties.find(p => p.id === inv.party_id)?.name || '—'}</td>
+                  <td className="mono" style={{ fontSize: 11 }}>{fmtDate(inv.issue_date)}</td>
+                  <td className="mono" style={{ fontSize: 11, color: inv.due_date && new Date(inv.due_date) < new Date() && inv.status !== 'paid' ? 'var(--red)' : 'var(--text3)' }}>{fmtDate(inv.due_date)}</td>
+                  <td className="r mono">{fmt(inv.total)}</td>
+                  <td className="r mono" style={{ color: 'var(--green)', fontSize: 11 }}>{paid > 0 ? fmt(paid) : '—'}</td>
+                  <td className="r mono" style={{ color: bal > 0.01 ? 'var(--amber)' : 'var(--text3)', fontSize: 11 }}>{bal > 0.01 ? fmt(bal) : '✓'}</td>
+                  <td><span className={`gst-chip ${gstMode === 'intra' ? 'cgst' : 'igst'}`} style={{ fontSize: 9 }}>{gstMode === 'intra' ? 'C+S' : 'IGST'}</span></td>
+                  {purchaseMode && <td><span className={`gst-chip ${inv.itc_eligible === false ? 'igst' : 'cgst'}`} style={{ fontSize: 9 }}>{inv.itc_eligible === false ? 'Blocked' : 'Eligible'}</span></td>}
+                  <td><Badge status={inv.status} /></td>
+                  <td>
+                    <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+                      {inv.status === 'proforma' && <button className="btn btn-warning btn-sm" title="Manually assign invoice number now" onClick={() => convertProforma(inv)}>→ Invoice</button>}
+                      {!['paid', 'cancelled'].includes(inv.status) && <button className="btn btn-ghost btn-sm" onClick={() => setPayInv(inv)}>💰</button>}
+                      <button className="btn btn-ghost btn-sm" onClick={() => dlPDF(inv)}>⬇ PDF</button>
+                      <button className="btn btn-ghost btn-sm" onClick={() => openEdit(inv)}>Edit</button>
+                      <button className="btn btn-danger btn-sm" onClick={() => del(inv.id)}>Del</button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
+
+  // Month summary pill
+  function MonthSummary({ list }) {
+    const total = list.reduce((s, i) => s + Number(i.total), 0);
+    const paid = list.reduce((s, i) => {
+      const p = (paysByInv[i.id] || []).reduce((a, x) => a + Number(x.amount), 0);
+      return s + p;
+    }, 0);
+    const outstanding = total - paid;
+    const proformaCount = list.filter(i => i.status === 'proforma').length;
+    return (
+      <span style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
+        <span style={{ color: 'var(--text2)' }}>{list.length} doc{list.length !== 1 ? 's' : ''}</span>
+        <span>·</span>
+        <span style={{ color: 'var(--text1)' }}>{fmt(total)}</span>
+        {outstanding > 0.01 && <><span>·</span><span style={{ color: 'var(--amber)' }}>{fmt(outstanding)} due</span></>}
+        {proformaCount > 0 && <><span>·</span><span style={{ color: 'var(--purple)' }}>{proformaCount} PF</span></>}
+      </span>
+    );
+  }
+
+  return (
+    <>
+      {/* ── Filter bar ── */}
+      <div className="filter-bar">
+        <input placeholder="Search invoice #, party name…" value={search} onChange={e => setSearch(e.target.value)} />
+        <select value={sf} onChange={e => setSf(e.target.value)}>
+          <option value="">All Status</option>
+          {['proforma', 'draft', 'sent', 'partially_paid', 'paid', 'overdue', 'cancelled'].map(s => <option key={s} value={s}>{s.replace('_', ' ')}</option>)}
+        </select>
+        {/* Group toggle */}
+        <button
+          className={`btn btn-sm ${groupByMonth ? 'btn-primary' : 'btn-ghost'}`}
+          title={groupByMonth ? 'Switch to flat list' : 'Group by month'}
+          onClick={handleGroupToggle}
+          style={{ fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: '.03em' }}
+        >
+          {groupByMonth ? '📅 Monthly' : '≡ All'}
+        </button>
+        {!purchaseMode && <button className="btn btn-ghost btn-sm" onClick={() => { setEditData(null); setShowPF(true); }}>+ Proforma</button>}
+        <button className="btn btn-ghost btn-sm" onClick={autoNumber} title="Sort documents by date and assign sequential numbers per FY">⟳ Auto-Number</button>
+        <button className="btn btn-primary" onClick={() => { setEditData(null); setShowInv(true); }}>{purchaseMode ? '+ Purchase Bill' : '+ Invoice'}</button>
+      </div>
+
+      {/* ── Monthly tabs view ── */}
+      {groupByMonth && sortedMonthKeys.length > 0 && (
+        <>
+          {/* Month tab strip */}
+          <div style={{
+            display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 14, paddingBottom: 10,
+            borderBottom: '1px solid var(--border1)',
+          }}>
+            {sortedMonthKeys.map(key => {
+              const isActive = activeMonth === key;
+              const list = monthGroups[key];
+              const total = list.reduce((s, i) => s + Number(i.total), 0);
+              return (
+                <button
+                  key={key}
+                  onClick={() => setActiveMonth(key)}
+                  style={{
+                    padding: '5px 12px', borderRadius: 'var(--r)', border: '1px solid',
+                    borderColor: isActive ? 'var(--accent)' : 'var(--border2)',
+                    background: isActive ? 'var(--accent)' : 'var(--bg2)',
+                    color: isActive ? '#fff' : 'var(--text2)',
+                    cursor: 'pointer', fontSize: 12, fontFamily: 'var(--mono)',
+                    display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2,
+                    minWidth: 70, transition: 'all 0.15s',
+                  }}
+                >
+                  <span style={{ fontWeight: 600 }}>{fmtMonthKey(key)}</span>
+                  <span style={{ fontSize: 10, opacity: 0.75 }}>{list.length} · {fmt(total)}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Active month content */}
+          {activeMonth && monthGroups[activeMonth] && (
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+                <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text1)' }}>{fmtMonthKey(activeMonth)}</span>
+                <MonthSummary list={monthGroups[activeMonth]} />
+              </div>
+              <InvoiceTable list={monthGroups[activeMonth]} />
+            </div>
+          )}
+
+          {sortedMonthKeys.length === 0 && <EmptyState icon="📄" message="No invoices found" />}
+        </>
+      )}
+
+      {/* ── Flat / search results view ── */}
+      {!groupByMonth && (
+        filtered.length === 0
+          ? <EmptyState icon="📄" message="No invoices found" />
+          : <InvoiceTable list={filtered} />
+      )}
+
+      {/* ── Modals ── */}
+      {showInv && <InvoiceModal onClose={() => setShowInv(false)} onSave={handleSave} businesses={businesses} parties={parties} editData={editData} allInvoices={invoices} catalogItems={catalogItems} activeBiz={activeBiz} purchaseMode={purchaseMode} />}
+      {showPF && <InvoiceModal onClose={() => setShowPF(false)} onSave={handleSave} businesses={businesses} parties={parties} editData={null} allInvoices={invoices} isProforma={true} catalogItems={catalogItems} activeBiz={activeBiz} />}
+      {payInv && <PaymentModal onClose={() => setPayInv(null)} onSave={handlePayment} invoice={payInv} existingPayments={paysByInv[payInv.id] || []} />}
+    </>
+  );
+}
