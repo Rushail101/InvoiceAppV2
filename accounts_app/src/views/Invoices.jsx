@@ -588,21 +588,21 @@ export function InvoicesView({ invoices, businesses, parties, activeBiz, reload,
     reload();
   }
 
-  async function convertProforma(inv) {
-    const totalPaid = (paysByInv[inv.id] || []).reduce((s, p) => s + Number(p.amount), 0);
-    const pct = inv.total > 0 ? Math.round((totalPaid / Number(inv.total)) * 100) : 0;
-    // Use the date of the last payment recorded as the invoice date
-    const payments = paysByInv[inv.id] || [];
-    const lastPaymentDate = payments.length > 0
-      ? payments.reduce((latest, p) => p.payment_date > latest ? p.payment_date : latest, payments[0].payment_date)
-      : today();
-    if (!confirm(`Convert ${inv.invoice_number} to Tax Invoice?\n\nPayment received: ₹${totalPaid.toLocaleString('en-IN')} of ₹${Number(inv.total).toLocaleString('en-IN')} (${pct}%)\n\nIssue date will be set to ${lastPaymentDate}. Continue?`)) return;
-    const newNum = nextInvNum(invoices.filter(i => i.business_id === inv.business_id), false);
-    const { supabase } = await import('../lib/db.js');
-    await supabase.from('invoices').update({ status: totalPaid >= Number(inv.total) - 0.01 ? 'paid' : 'sent', invoice_number: newNum, proforma_number: inv.invoice_number, issue_date: lastPaymentDate }).eq('id', inv.id);
-    reload();
-  }
-
+async function convertProforma(inv) {
+  const totalPaid = (paysByInv[inv.id] || []).reduce((s, p) => s + Number(p.amount), 0);
+  const pct = inv.total > 0 ? Math.round((totalPaid / Number(inv.total)) * 100) : 0;
+  // Issue date = the date goods/services are actually supplied (Sec 31
+  // CGST Act — the invoice must be issued at/before time of supply), so
+  // this is the date you're converting on (i.e. when it's actually going
+  // out/delivered), NOT the date payment happened to arrive. Payment
+  // timing has no bearing on when the supply occurred.
+  const conversionDate = today();
+  if (!confirm(`Convert ${inv.invoice_number} to Tax Invoice?\n\nPayment received: ₹${totalPaid.toLocaleString('en-IN')} of ₹${Number(inv.total).toLocaleString('en-IN')} (${pct}%)\n\nIssue date will be set to today (${conversionDate}) — the date of conversion/delivery, not the payment date. Continue?`)) return;
+  const newNum = nextInvNum(invoices.filter(i => i.business_id === inv.business_id), false);
+  const { supabase } = await import('../lib/db.js');
+  await supabase.from('invoices').update({ status: totalPaid >= Number(inv.total) - 0.01 ? 'paid' : 'sent', invoice_number: newNum, proforma_number: inv.invoice_number, issue_date: conversionDate }).eq('id', inv.id);
+  reload();
+}
   async function del(id) {
     const inv = invoices.find(i => i.id === id);
     // Once an invoice has actually been issued (sent/paid) or marked
