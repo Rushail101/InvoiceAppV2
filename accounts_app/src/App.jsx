@@ -4,7 +4,7 @@ import { FONTS, CSS } from './lib/constants.js';
 import { initSupabase, loadAll, saveBusiness, deleteBusiness } from './lib/db.js';
 import { InvoicesView } from './views/Invoices.jsx';
 import { PartiesView, ExpensesView, PaymentsView, BankView, ARLedgerView, APLedgerView } from './views/Operations.jsx';
-import { AgingView, PartyStatementView, BulkPaymentView, RecurringView, ExportView, TDSView } from './views/ExtraViews.jsx';
+import { AgingView, PartyStatementView, PaymentListView, BulkPaymentView, RecurringView, ExportView, TDSView } from './views/ExtraViews.jsx';
 import { BulkImportView } from './views/BulkImport.jsx';
 import { ReconciliationView } from './views/Reconciliation.jsx';
 import { CashFlowView } from './views/CashFlow.jsx';
@@ -39,6 +39,7 @@ const NAV = [
   { id: 'ap',          label: 'AP Ledger',         icon: '🔴',  group: 'Ledgers' },
   // { id: 'aging',       label: 'Aging Report',      icon: '📊',  group: 'Ledgers' },
   { id: 'statement',   label: 'Party Statement',   icon: '📋',  group: 'Ledgers' },
+  { id: 'paylist',     label: 'Payment List',      icon: '💵',  group: 'Ledgers' },
   { id: 'tds',         label: 'TDS',               icon: '📑',  group: 'Ledgers' },
   // { id: 'recurring',   label: 'Recurring',         icon: '🔁',  group: 'Sales' },
   { id: 'accounts',    label: 'Chart of Accounts', icon: '📒',  group: 'Accounting' },
@@ -1189,6 +1190,9 @@ export default function App() {
             )}
             {!loading && view === 'statement' && (
               <PartyStatementView parties={parties} invoices={invoices} payments={payments} creditNotes={creditNotes} debitNotes={debitNotes} businesses={businesses} activeBiz={activeBiz} />
+            )}
+            {!loading && view === 'paylist' && (
+              <PaymentListView payments={payments} parties={parties} businesses={businesses} activeBiz={activeBiz} />
             )}
             {!loading && view === 'tds' && (
               <TDSView invoices={invoices} payments={payments} parties={parties} businesses={businesses} activeBiz={activeBiz} />
