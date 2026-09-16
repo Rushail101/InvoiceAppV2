@@ -312,6 +312,102 @@ export function PartyStatementView({ parties, invoices, payments, creditNotes, d
   );
 }
 
+// ─── PAYMENT LIST (bank-statement tally) ──────────────────────────────────────
+// Deliberately the opposite of everything else in this file: no invoice
+// numbers, no debit/credit, no double-entry framing. Just "money that came
+// in or went out, on what date, from/to whom" — the shape a bank statement
+// actually comes in, so the two can be checked against each other line by
+// line.
+export function PaymentListView({ payments, parties, businesses, activeBiz }) {
+  const [partyId, setPartyId] = useState('');
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+
+  const filteredParties = (activeBiz ? parties.filter(p => p.business_id === activeBiz) : parties)
+    .slice().sort((a, b) => a.name.localeCompare(b.name));
+
+  function applyPreset(preset) {
+    const now = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    const iso = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    if (preset === 'this_month') { setDateFrom(iso(new Date(now.getFullYear(), now.getMonth(), 1))); setDateTo(iso(now)); }
+    else if (preset === 'last_month') { setDateFrom(iso(new Date(now.getFullYear(), now.getMonth() - 1, 1))); setDateTo(iso(new Date(now.getFullYear(), now.getMonth(), 0))); }
+    else { setDateFrom(''); setDateTo(''); }
+  }
+
+  const rows = (activeBiz ? payments.filter(p => p.business_id === activeBiz) : payments)
+    .filter(p => !partyId || p.party_id === partyId)
+    .filter(p => (!dateFrom || p.payment_date >= dateFrom) && (!dateTo || p.payment_date <= dateTo))
+    .sort((a, b) => a.payment_date.localeCompare(b.payment_date))
+    .map(p => ({ ...p, party: parties.find(pt => pt.id === p.party_id) }));
+
+  const total = rows.reduce((s, r) => s + Number(r.amount), 0);
+
+  function exportCSV() {
+    const csvRows = rows.map(r => [r.payment_date, r.party?.name || '—', r.method || '', r.reference || '', Number(r.amount).toFixed(2)]);
+    const csv = [['Date', 'Party', 'Method', 'Reference', 'Amount'].join(','),
+      ...csvRows.map(r => r.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(','))].join('\n');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' }));
+    a.download = `payments_${partyId ? (filteredParties.find(p => p.id === partyId)?.name || 'party') : 'all'}_${today()}.csv`.replace(/\s+/g, '_');
+    a.click();
+  }
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+        <select value={partyId} onChange={e => setPartyId(e.target.value)}
+          style={{ flex: 1, maxWidth: 260, background: 'var(--bg2)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 'var(--r)', padding: '7px 11px' }}>
+          <option value="">All parties</option>
+          {filteredParties.map(p => <option key={p.id} value={p.id}>{p.name} ({p.type})</option>)}
+        </select>
+        <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
+          style={{ padding: '5px 8px', borderRadius: 6, background: 'var(--bg2)', border: '1px solid var(--border2)', color: 'var(--text1)', fontSize: 12 }} />
+        <span style={{ fontSize: 11, color: 'var(--text3)' }}>to</span>
+        <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
+          style={{ padding: '5px 8px', borderRadius: 6, background: 'var(--bg2)', border: '1px solid var(--border2)', color: 'var(--text1)', fontSize: 12 }} />
+        {[['this_month', 'This Month'], ['last_month', 'Last Month'], ['all', 'All Time']].map(([k, l]) => (
+          <button key={k} className="btn btn-ghost btn-sm" onClick={() => applyPreset(k)}>{l}</button>
+        ))}
+        <button className="btn btn-ghost btn-sm" onClick={exportCSV} disabled={!rows.length}>↓ CSV</button>
+      </div>
+
+      {rows.length === 0
+        ? <EmptyState icon="💳" message="No payments" sub="No payments match this party/date range" />
+        : (
+          <>
+            <div className="card" style={{ padding: '10px 14px', marginBottom: 14, maxWidth: 220 }}>
+              <div style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', marginBottom: 3 }}>TOTAL</div>
+              <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--green)' }}>{fmt(total)}</div>
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>Date</th><th>Party</th><th>Method</th><th>Reference</th><th className="r">Amount</th></tr></thead>
+                <tbody>
+                  {rows.map(r => (
+                    <tr key={r.id}>
+                      <td className="mono" style={{ fontSize: 11 }}>{fmtDate(r.payment_date)}</td>
+                      <td style={{ fontSize: 12.5, fontWeight: 500 }}>{r.party?.name || '—'}</td>
+                      <td className="mono" style={{ fontSize: 11 }}>{r.method || '—'}</td>
+                      <td className="mono" style={{ fontSize: 11, color: 'var(--accent)' }}>{r.reference || '—'}</td>
+                      <td className="r mono" style={{ fontSize: 12, color: 'var(--green)', fontWeight: 600 }}>{fmt(r.amount)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr style={{ borderTop: '2px solid var(--border2)' }}>
+                    <td colSpan={4} style={{ fontWeight: 700 }}>TOTAL</td>
+                    <td className="r mono" style={{ fontWeight: 700, color: 'var(--green)' }}>{fmt(total)}</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          </>
+        )}
+    </div>
+  );
+}
+
 // ─── BULK PAYMENT ─────────────────────────────────────────────────────────────
 
 export function BulkPaymentView({ invoices, parties, payments, businesses, activeBiz, reload }) {
