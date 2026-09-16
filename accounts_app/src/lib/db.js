@@ -169,6 +169,7 @@ const INV_COLS = [
   'subtotal','cgst_amount','sgst_amount','igst_amount','tax_amount',
   'total','is_interstate','tds_amount','reverse_charge','ship_to_address',
   'itc_eligible','itc_ineligible_reason','purchase_order_ref','grn_ref','journal_posted',
+  'party_gstin_snapshot',
 ];
 
 function pickInvCols(data) {

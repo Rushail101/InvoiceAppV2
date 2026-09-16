@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { fmt, fmtDate, today, GST_RATES, PAY_MODES, INDIAN_STATES, gstType, calcLineTax, nextInvNum, getFY, garmentGSTRate, isGSTINValid, guessHSN, isHSNValid, MIN_HSN_DIGITS } from '../lib/constants.js';
+import { fmt, fmtDate, today, GST_RATES, PAY_MODES, INDIAN_STATES, gstType, calcLineTax, nextInvNum, getFY, garmentGSTRate, isGSTINValid, guessHSN, isHSNValid, MIN_HSN_DIGITS, needsEwayBill, ewayBillThreshold } from '../lib/constants.js';
 import { saveInvoice, getInvoiceItems, updateInvoiceStatus, deleteInvoice, cancelInvoice, savePaymentWithJournal } from '../lib/db.js';
 import { printInvoice } from '../lib/pdf.js';
 import { Badge, ModalShell, FG, PayHistory, EmptyState } from '../components/ui.jsx';
@@ -59,6 +59,11 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
     purchase_order_ref: editData?.purchase_order_ref || '',
     grn_ref: editData?.grn_ref || '',
     reverse_charge: editData?.reverse_charge || false,
+    // null = not yet locked, follows the party's live GST status (legacy
+    // invoices, or a fresh one before save). '' = explicitly locked as
+    // unregistered (B2C). A GSTIN string = explicitly locked as registered.
+    // See effectiveGstin() in constants.js.
+    party_gstin_snapshot: editData?.party_gstin_snapshot ?? null,
   });
 
   const [items, setItems] = useState(
@@ -171,6 +176,13 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
     }
     setErr(''); setBusy(true);
     try {
+      // Lock GST-registration status the moment this becomes a real
+      // invoice — not read live later. Only auto-captures for a genuinely
+      // new, non-proforma invoice; editing an existing one leaves a null
+      // snapshot alone (still following the party's live record) unless
+      // the "GST status for this invoice" control below was used.
+      let gstinSnapshot = f.party_gstin_snapshot;
+      if (!editData && !isPF && gstinSnapshot === null) gstinSnapshot = partyObj.gstin || '';
       const invData = {
         ...f,
         subtotal,
@@ -182,6 +194,7 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
         discount_percent: invDiscPctDisplay,
         total: payableTotal,
         is_interstate: !isIntrastate,
+        party_gstin_snapshot: gstinSnapshot,
       };
       await onSave(invData, validItems, editData?.id);
       onClose();
@@ -300,6 +313,33 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
       {partyObj.gstin && !isGSTINValid(partyObj.gstin) && (
         <div style={{ fontSize: 11, color: 'var(--red)', marginBottom: 10 }}>
           ⚠ This party's GSTIN doesn't look valid — double-check it before sending. A wrong GSTIN will fail to match in the recipient's GSTR-2B and block their ITC.
+        </div>
+      )}
+      {needsEwayBill(finalTotal, !isIntrastate, bizObj.state) && (
+        <div style={{ fontSize: 11, color: 'var(--amber)', marginBottom: 10 }}>
+          ⚠ This invoice is above the e-way bill threshold (₹{ewayBillThreshold(!isIntrastate, bizObj.state).toLocaleString('en-IN')} for {isIntrastate ? `intra-state in ${bizObj.state || 'this state'}` : 'inter-state'} movement) — generate one on the e-way bill portal before dispatch if goods are moving by road.
+        </div>
+      )}
+      {(partyObj.gstin || f.party_gstin_snapshot) && (
+        <div style={{ marginBottom: 12, padding: '8px 10px', background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 6 }}>
+          <label style={{ fontSize: 11, color: 'var(--text3)', display: 'block', marginBottom: 5 }}>
+            GST status for THIS invoice (B2B vs B2C in GSTR-1)
+          </label>
+          <select
+            value={f.party_gstin_snapshot === null ? 'auto' : f.party_gstin_snapshot === '' ? 'unregistered' : 'registered'}
+            onChange={e => {
+              const v = e.target.value;
+              setF(x => ({ ...x, party_gstin_snapshot: v === 'auto' ? null : v === 'unregistered' ? '' : (partyObj.gstin || '') }));
+            }}
+            style={{ fontSize: 12 }}
+          >
+            <option value="auto">Auto — follow this party's current record{partyObj.gstin ? ` (currently registered: ${partyObj.gstin})` : ' (currently not registered)'}</option>
+            {partyObj.gstin && <option value="registered">Registered — GSTIN {partyObj.gstin} (lock as B2B)</option>}
+            <option value="unregistered">Not registered at the time of this invoice (lock as B2C)</option>
+          </select>
+          <div style={{ fontSize: 10, color: 'var(--text3)', marginTop: 4 }}>
+            Use this if the party got their GSTIN AFTER this invoice was issued — "Auto" would otherwise silently reclassify it as B2B using their current status, which can shift figures on a GSTR-1 you've already filed.
+          </div>
         </div>
       )}
 
@@ -588,21 +628,28 @@ export function InvoicesView({ invoices, businesses, parties, activeBiz, reload,
     reload();
   }
 
-async function convertProforma(inv) {
-  const totalPaid = (paysByInv[inv.id] || []).reduce((s, p) => s + Number(p.amount), 0);
-  const pct = inv.total > 0 ? Math.round((totalPaid / Number(inv.total)) * 100) : 0;
-  // Issue date = the date goods/services are actually supplied (Sec 31
-  // CGST Act — the invoice must be issued at/before time of supply), so
-  // this is the date you're converting on (i.e. when it's actually going
-  // out/delivered), NOT the date payment happened to arrive. Payment
-  // timing has no bearing on when the supply occurred.
-  const conversionDate = today();
-  if (!confirm(`Convert ${inv.invoice_number} to Tax Invoice?\n\nPayment received: ₹${totalPaid.toLocaleString('en-IN')} of ₹${Number(inv.total).toLocaleString('en-IN')} (${pct}%)\n\nIssue date will be set to today (${conversionDate}) — the date of conversion/delivery, not the payment date. Continue?`)) return;
-  const newNum = nextInvNum(invoices.filter(i => i.business_id === inv.business_id), false);
-  const { supabase } = await import('../lib/db.js');
-  await supabase.from('invoices').update({ status: totalPaid >= Number(inv.total) - 0.01 ? 'paid' : 'sent', invoice_number: newNum, proforma_number: inv.invoice_number, issue_date: conversionDate }).eq('id', inv.id);
-  reload();
-}
+  async function convertProforma(inv) {
+    const totalPaid = (paysByInv[inv.id] || []).reduce((s, p) => s + Number(p.amount), 0);
+    const pct = inv.total > 0 ? Math.round((totalPaid / Number(inv.total)) * 100) : 0;
+    // Issue date = the date goods/services are actually supplied (Sec 31
+    // CGST Act — the invoice must be issued at/before time of supply), so
+    // this is the date you're converting on (i.e. when it's actually going
+    // out/delivered), NOT the date payment happened to arrive. Payment
+    // timing has no bearing on when the supply occurred.
+    const conversionDate = today();
+    // Lock B2B/B2C classification to the party's GST status right now, at
+    // the moment this actually becomes a real invoice — see effectiveGstin()
+    // in constants.js. Stops a later GSTIN addition from silently
+    // reclassifying this invoice.
+    const party = parties.find(p => p.id === inv.party_id);
+    const gstinSnapshot = party?.gstin || '';
+    if (!confirm(`Convert ${inv.invoice_number} to Tax Invoice?\n\nPayment received: ₹${totalPaid.toLocaleString('en-IN')} of ₹${Number(inv.total).toLocaleString('en-IN')} (${pct}%)\n\nIssue date will be set to today (${conversionDate}) — the date of conversion/delivery, not the payment date. Continue?`)) return;
+    const newNum = nextInvNum(invoices.filter(i => i.business_id === inv.business_id), false);
+    const { supabase } = await import('../lib/db.js');
+    await supabase.from('invoices').update({ status: totalPaid >= Number(inv.total) - 0.01 ? 'paid' : 'sent', invoice_number: newNum, proforma_number: inv.invoice_number, issue_date: conversionDate, party_gstin_snapshot: gstinSnapshot }).eq('id', inv.id);
+    reload();
+  }
+
   async function del(id) {
     const inv = invoices.find(i => i.id === id);
     // Once an invoice has actually been issued (sent/paid) or marked

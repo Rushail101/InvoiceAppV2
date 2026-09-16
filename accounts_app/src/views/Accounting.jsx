@@ -679,6 +679,170 @@ export function TrialBalanceView({ accounts, journalLines, journalEntries, invoi
   );
 }
 
+// ─── GENERAL LEDGER ───────────────────────────────────────────────────────────
+// The piece that sits between Journal View (everything, mixed together) and
+// Trial Balance (final numbers only, no history): pick one account and see
+// every line posted to it, in date order, with a running balance. No new
+// data — same journalLines/journalEntries/accounts already loaded elsewhere.
+export function GeneralLedgerView({ accounts, journalLines, journalEntries, businesses, activeBiz }) {
+  const [accountId, setAccountId] = useState('');
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+
+  const filtAccs = (activeBiz ? accounts.filter(a => a.business_id === activeBiz) : accounts)
+    .slice().sort((a, b) => (a.code || '').localeCompare(b.code || ''));
+
+  // If the account picked no longer belongs to the active business (business
+  // switched), treat it as unselected rather than silently showing stale data.
+  const account = filtAccs.find(a => a.id === accountId);
+
+  const bizJournals = activeBiz ? journalEntries.filter(j => j.business_id === activeBiz) : journalEntries;
+  const journalById = {};
+  bizJournals.forEach(j => { journalById[j.id] = j; });
+
+  const acctLines = account
+    ? (journalLines || [])
+        .filter(l => l.account_id === account.id && journalById[l.journal_id])
+        .map(l => ({ ...l, entry: journalById[l.journal_id] }))
+        .sort((a, b) => {
+          const dcmp = (a.entry.entry_date || '').localeCompare(b.entry.entry_date || '');
+          if (dcmp !== 0) return dcmp;
+          return (a.entry.created_at || '').localeCompare(b.entry.created_at || '');
+        })
+    : [];
+
+  // Opening balance = net of everything before the "from" date, so the
+  // running balance in the visible window is still correct even when
+  // scoped to a shorter period.
+  let opening = 0;
+  acctLines.forEach(l => {
+    if (dateFrom && l.entry.entry_date < dateFrom) {
+      opening += l.type === 'debit' ? Number(l.amount) : -Number(l.amount);
+    }
+  });
+
+  let running = opening;
+  const rows = acctLines
+    .filter(l => {
+      if (dateFrom && l.entry.entry_date < dateFrom) return false;
+      if (dateTo && l.entry.entry_date > dateTo) return false;
+      return true;
+    })
+    .map(l => {
+      running += l.type === 'debit' ? Number(l.amount) : -Number(l.amount);
+      return { ...l, balance: running };
+    });
+
+  const totalDr = rows.reduce((s, r) => s + (r.type === 'debit' ? Number(r.amount) : 0), 0);
+  const totalCr = rows.reduce((s, r) => s + (r.type === 'credit' ? Number(r.amount) : 0), 0);
+  const closing = rows.length ? rows[rows.length - 1].balance : opening;
+
+  function balLabel(v) {
+    return `${fmt(Math.abs(v))} ${v >= 0 ? 'Dr' : 'Cr'}`;
+  }
+
+  function applyPreset(preset) {
+    const now = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    const iso = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    if (preset === 'this_month') { setDateFrom(iso(new Date(now.getFullYear(), now.getMonth(), 1))); setDateTo(iso(now)); }
+    else if (preset === 'last_month') { setDateFrom(iso(new Date(now.getFullYear(), now.getMonth() - 1, 1))); setDateTo(iso(new Date(now.getFullYear(), now.getMonth(), 0))); }
+    else if (preset === 'this_fy') {
+      const fyStartYear = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+      setDateFrom(iso(new Date(fyStartYear, 3, 1))); setDateTo(iso(now));
+    }
+    else { setDateFrom(''); setDateTo(''); }
+  }
+
+  function toCSV(headers, csvRows) {
+    return [headers.join(','), ...csvRows.map(r => r.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(','))].join('\n');
+  }
+
+  function exportCSV() {
+    if (!account) return;
+    const csvRows = [['', 'Opening Balance', '', '', '', opening.toFixed(2)]];
+    rows.forEach(r => {
+      csvRows.push([
+        r.entry.entry_date, r.entry.reference || '', r.narration || r.entry.description || '',
+        r.type === 'debit' ? Number(r.amount).toFixed(2) : '', r.type === 'credit' ? Number(r.amount).toFixed(2) : '',
+        r.balance.toFixed(2),
+      ]);
+    });
+    const csv = toCSV(['Date', 'Reference', 'Description', 'Debit', 'Credit', 'Balance'], csvRows);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' }));
+    a.download = `ledger_${account.code || account.name}_${today()}.csv`;
+    a.click();
+  }
+
+  return (
+    <div>
+      <div className="filter-bar">
+        <div style={{ minWidth: 260 }}>
+          <AccountSelect accounts={filtAccs} value={accountId} onChange={setAccountId} placeholder="Search account…" />
+        </div>
+        <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)} style={{ maxWidth: 145 }} title="From date" />
+        <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)} style={{ maxWidth: 145 }} title="To date" />
+        <button className="btn btn-ghost btn-sm" onClick={exportCSV} disabled={!account}>↓ CSV</button>
+      </div>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 14, marginTop: -8 }}>
+        {[['this_month', 'This month'], ['last_month', 'Last month'], ['this_fy', 'This FY'], ['', 'Clear dates']].map(([id, label]) => (
+          <button key={id || 'clear'} className="btn btn-ghost btn-sm" onClick={() => applyPreset(id)}>{label}</button>
+        ))}
+      </div>
+
+      {!account && <EmptyState icon="📖" message="Pick an account" sub="Search for an account above to see its ledger — every line posted to it, in date order, with a running balance." />}
+
+      {account && rows.length === 0 && opening === 0 && (
+        <EmptyState icon="📖" message="No transactions in this period" sub={`${account.name} has no journal lines${dateFrom || dateTo ? ' in this date range' : ' yet'}.`} />
+      )}
+
+      {account && (rows.length > 0 || opening !== 0) && (
+        <>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <span style={{ fontSize: 12, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
+              <span className="mono" style={{ color: 'var(--accent)' }}>{account.code}</span> · {account.name} <Badge status={account.group} />
+            </span>
+            <span style={{ fontSize: 12, fontFamily: 'var(--mono)', color: 'var(--text2)' }}>Closing: {balLabel(closing)}</span>
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead><tr>
+                <th>Date</th><th>Reference</th><th>Description</th>
+                <th className="r">Debit</th><th className="r">Credit</th><th className="r">Balance</th>
+              </tr></thead>
+              <tbody>
+                <tr>
+                  <td colSpan={5} style={{ fontStyle: 'italic', color: 'var(--text3)', fontSize: 11.5 }}>Opening Balance</td>
+                  <td className="r mono" style={{ fontSize: 11 }}>{balLabel(opening)}</td>
+                </tr>
+                {rows.map((r, i) => (
+                  <tr key={r.id || i}>
+                    <td className="mono" style={{ fontSize: 11 }}>{fmtDate(r.entry.entry_date)}</td>
+                    <td className="mono" style={{ color: 'var(--accent)', fontSize: 11 }}>{r.entry.reference || '—'}</td>
+                    <td style={{ fontSize: 12.5 }}>{r.narration || r.entry.description || '—'}</td>
+                    <td className="r mono dr" style={{ fontSize: 11 }}>{r.type === 'debit' ? fmt(Number(r.amount)) : '—'}</td>
+                    <td className="r mono cr" style={{ fontSize: 11 }}>{r.type === 'credit' ? fmt(Number(r.amount)) : '—'}</td>
+                    <td className="r mono" style={{ fontSize: 11, color: 'var(--text)' }}>{balLabel(r.balance)}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr style={{ fontWeight: 700, borderTop: '2px solid var(--border2)', background: 'var(--bg3)' }}>
+                  <td colSpan={3} style={{ padding: '10px 16px', fontFamily: 'var(--mono)', fontSize: 12 }}>PERIOD TOTAL</td>
+                  <td className="r mono" style={{ padding: '10px 16px', color: 'var(--red)' }}>{fmt(totalDr)}</td>
+                  <td className="r mono" style={{ padding: '10px 16px', color: 'var(--green)' }}>{fmt(totalCr)}</td>
+                  <td className="r mono" style={{ padding: '10px 16px' }}>{balLabel(closing)}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ─── BALANCE SHEET ────────────────────────────────────────────────────────────
 export function BalanceSheetView({ accounts, journalLines, journalEntries, invoices, payments, expenses, businesses, activeBiz }) {
   const bizAccounts = activeBiz ? accounts.filter(a => a.business_id === activeBiz) : accounts;

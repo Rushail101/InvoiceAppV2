@@ -8,7 +8,7 @@ import { AgingView, PartyStatementView, BulkPaymentView, RecurringView, ExportVi
 import { BulkImportView } from './views/BulkImport.jsx';
 import { ReconciliationView } from './views/Reconciliation.jsx';
 import { CashFlowView } from './views/CashFlow.jsx';
-import { ChartOfAccountsView, JournalView, TrialBalanceView, BalanceSheetView, PLView } from './views/Accounting.jsx';
+import { ChartOfAccountsView, JournalView, GeneralLedgerView, TrialBalanceView, BalanceSheetView, PLView } from './views/Accounting.jsx';
 import { AnalysisView } from './views/Analysis.jsx';
 import { JournalHealthView } from './views/JournalHealth.jsx';
 import { CreditNotesView } from './views/CreditNotes.jsx';
@@ -43,6 +43,7 @@ const NAV = [
   // { id: 'recurring',   label: 'Recurring',         icon: '🔁',  group: 'Sales' },
   { id: 'accounts',    label: 'Chart of Accounts', icon: '📒',  group: 'Accounting' },
   { id: 'journal',     label: 'Journal Vouchers',  icon: '📝',  group: 'Accounting' },
+  { id: 'ledger',      label: 'General Ledger',    icon: '📖',  group: 'Accounting' },
   { id: 'trial',       label: 'Trial Balance',     icon: '⚖',   group: 'Accounting' },
   { id: 'balance',     label: 'Balance Sheet',     icon: '📊',  group: 'Accounting' },
   { id: 'analysis',    label: 'Analysis',          icon: '🔎',  group: 'Accounting' },
@@ -1207,6 +1208,9 @@ export default function App() {
               <AnalysisView journalEntries={journalEntries} journalLines={journalLines} accounts={accounts}
                 parties={parties} invoices={invoices} payments={payments} {...cp} />
             )}
+            {!loading && view === 'ledger' && (
+              <GeneralLedgerView accounts={accounts} journalLines={journalLines} journalEntries={journalEntries} {...cp} />
+            )}
             {!loading && view === 'trial' && (
               <TrialBalanceView accounts={accounts} journalLines={journalLines} journalEntries={journalEntries}
                 invoices={invoices} payments={payments} expenses={expenses} creditNotes={creditNotes} debitNotes={debitNotes} {...cp} />
@@ -1258,7 +1262,7 @@ export default function App() {
                 payments={payments} parties={parties} journalEntries={journalEntries} journalLines={journalLines}
                 activeBiz={activeBiz} reload={reload} />
             )}
-            {!loading && view === 'gstr3b' && <GSTR3BView activeBiz={activeBiz} invoices={invoices} creditNotes={creditNotes} reload={reload} />}
+            {!loading && view === 'gstr3b' && <GSTR3BView activeBiz={activeBiz} businesses={businesses} invoices={invoices} creditNotes={creditNotes} reload={reload} />}
             {!loading && view === 'audit' && <AuditTrailView activeBiz={activeBiz} />}
             {!loading && view === 'kpis' && <KPIDashboard activeBiz={activeBiz} invoices={invoices} expenses={expenses} payments={payments} parties={parties} />}
             {!loading && view === 'businesses' && <BusinessesView businesses={businesses} reload={reload} />}

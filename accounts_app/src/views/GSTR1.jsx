@@ -1,6 +1,6 @@
 // views/GSTR1.jsx — GSTR-1 Summary Report with 5% & 18% Tax Rate Separation
 import { useState, useMemo } from 'react';
-import { fmt, fmtDate, getFY, STATE_CODES, B2CL_THRESHOLD } from '../lib/constants.js';
+import { fmt, fmtDate, getFY, STATE_CODES, B2CL_THRESHOLD, effectiveGstin } from '../lib/constants.js';
 import { EmptyState, PillTabs } from '../components/ui.jsx';
 import { markGSTFiled } from '../lib/db.js';
 
@@ -41,7 +41,10 @@ function filterByPaymentDate(invoices, payments, period) {
 
 // Enrich invoice with computed GST amounts and 5% vs 18% rate buckets
 function enrichInvoice(inv, parties, itemsMap = {}) {
-  const party = parties.find(p => p.id === inv.party_id) || {};
+  const rawParty = parties.find(p => p.id === inv.party_id) || {};
+  // See effectiveGstin() in constants.js — locks B2B/B2C classification to
+  // the invoice's own snapshot instead of the party's current live GSTIN.
+  const party = { ...rawParty, gstin: effectiveGstin(inv, rawParty) };
   const isIntra = inv.is_interstate === false;
   const taxable = Number(inv.subtotal || 0);
   const cgst = Number(inv.cgst_amount || 0);
@@ -259,7 +262,7 @@ function B2CTable({ rows, allItems }) {
     <div>
       {b2cl.length > 0 && (
         <div style={{ marginBottom: 20 }}>
-          <div className="section-title">B2C Large (Inter-state invoices &gt; ₹2.5 Lakh)</div>
+          <div className="section-title">B2C Large (Inter-state invoices &gt; ₹1 Lakh)</div>
           <div className="table-wrap">
             <table>
               <thead>
@@ -586,8 +589,12 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceIte
     const bizMatch = activeBiz ? cn.business_id === activeBiz : true;
     return bizMatch && cn.note_type !== 'commercial' && cn.cn_date?.startsWith(period);
   }).map(cn => {
-    const party = parties.find(p => p.id === cn.party_id) || {};
+    const rawParty = parties.find(p => p.id === cn.party_id) || {};
     const inv = invoices.find(i => i.id === cn.invoice_id);
+    // Classification follows the ORIGINAL invoice's locked snapshot, not a
+    // live party lookup — a credit note against a June B2C invoice stays
+    // B2C even if the party has since registered for GST.
+    const party = { ...rawParty, gstin: effectiveGstin(inv, rawParty) };
     return { kind: 'credit', id: cn.id, number: cn.cn_number, date: cn.cn_date, originalNumber: inv?.invoice_number, party, taxable: Number(cn.subtotal || 0), cgst: Number(cn.cgst_amount || 0), sgst: Number(cn.sgst_amount || 0), igst: Number(cn.igst_amount || 0), total: Number(cn.total || 0) };
   }), [creditNotes, parties, invoices, activeBiz, period]);
 
@@ -595,8 +602,9 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceIte
     const bizMatch = activeBiz ? dn.business_id === activeBiz : true;
     return bizMatch && dn.dn_date?.startsWith(period) && dn.status !== 'cancelled';
   }).map(dn => {
-    const party = parties.find(p => p.id === dn.party_id) || {};
+    const rawParty = parties.find(p => p.id === dn.party_id) || {};
     const inv = invoices.find(i => i.id === dn.invoice_id);
+    const party = { ...rawParty, gstin: effectiveGstin(inv, rawParty) };
     return { kind: 'debit', id: dn.id, number: dn.dn_number, date: dn.dn_date, originalNumber: inv?.invoice_number, party, taxable: Number(dn.subtotal || 0), cgst: Number(dn.cgst_amount || 0), sgst: Number(dn.sgst_amount || 0), igst: Number(dn.igst_amount || 0), total: Number(dn.total || 0) };
   }), [debitNotes, parties, invoices, activeBiz, period]);
 

@@ -335,6 +335,22 @@ export function nextDNNum(debitNotes) {
   return `DN-${fy}/${String(max + 1).padStart(3, '0')}`;
 }
 
+// GST-registration status for B2B/B2C classification purposes must be
+// locked to what was true when the invoice was created (party_gstin_snapshot),
+// not read live off the party record. Otherwise adding a client's GSTIN
+// later — common once they cross the ₹20L mandatory-registration turnover —
+// silently flips every one of their PAST invoices from B2C to B2B, changing
+// GSTR-1 figures for periods that may already be filed. Convention:
+//   null/undefined snapshot -> pre-fix invoice, no snapshot captured yet,
+//                               falls back to the party's current GSTIN
+//   ''  snapshot            -> explicitly confirmed unregistered at the
+//                               time of this invoice — always B2C
+//   'GSTIN...' snapshot     -> explicitly confirmed registered with this
+//                               GSTIN at the time of this invoice
+export function effectiveGstin(invoice, party) {
+  return invoice?.party_gstin_snapshot ?? party?.gstin ?? '';
+}
+
 // GSTIN format + checksum validation (15 chars: 2-digit state code,
 // 10-char PAN, 1 entity code, 'Z' by default, 1 checksum digit).
 // Returns true/false — used to warn before a bad GSTIN goes on a printed
@@ -379,6 +395,25 @@ export const B2CL_THRESHOLD = 100000;
 export function creditNoteDeadline(fy) {
   const endYear = 2000 + parseInt(fy.split('-')[1], 10);
   return `${endYear}-11-30`;
+}
+
+// E-way bill threshold. Inter-state is a flat ₹50,000 everywhere. Intra-state
+// varies by state notification — most states are ₹50,000 too, but several
+// (including Delhi) raised their own intra-state limit to ₹1,00,000. This
+// list is the "higher limit" states as of early 2026; state notifications do
+// change, so double-check before relying on this for a state not in your
+// regular list.
+const EWAY_HIGH_THRESHOLD_STATES = new Set([
+  'Delhi', 'Bihar', 'Chhattisgarh', 'Gujarat', 'Haryana', 'Himachal Pradesh',
+  'Jharkhand', 'Madhya Pradesh', 'Maharashtra', 'Odisha', 'Punjab',
+  'Tamil Nadu', 'Uttarakhand', 'Chandigarh', 'Puducherry',
+]);
+export function ewayBillThreshold(isInterstate, bizState) {
+  if (isInterstate) return 50000;
+  return EWAY_HIGH_THRESHOLD_STATES.has(bizState) ? 100000 : 50000;
+}
+export function needsEwayBill(total, isInterstate, bizState) {
+  return Number(total || 0) > ewayBillThreshold(isInterstate, bizState);
 }
 
 // CGST/SGST vs IGST determination

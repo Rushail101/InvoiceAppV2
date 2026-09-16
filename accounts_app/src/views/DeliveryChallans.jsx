@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import {
-  fmt, fmtDate, today, getFY, GST_RATES, INDIAN_STATES, gstType, calcLineTax, guessHSN,
+  fmt, fmtDate, today, getFY, GST_RATES, INDIAN_STATES, gstType, calcLineTax, guessHSN, needsEwayBill, ewayBillThreshold,
 } from '../lib/constants.js';
 import {
   saveChallan, getChallanItems, deleteChallan,
@@ -195,6 +195,11 @@ function ChallanModal({ onClose, onSave, businesses, parties, allChallans, invoi
       {(f.purpose === 'Sale — tax invoice not yet raised (reconcile ASAP)' || f.purpose === 'Supply of Goods') && (
         <div style={{ fontSize: 11, color: 'var(--amber)', marginBottom: 12, background: '#1e1400', border: '1px solid #3a2e00', borderRadius: 6, padding: '8px 10px' }}>
           ⚠ A delivery challan isn't a tax document — this goods movement isn't reported to GSTN until a tax invoice is raised. If this is an actual sale, raise the invoice now (or right after) and link it below.
+        </div>
+      )}
+      {needsEwayBill(grand, !isIntrastate, bizObj.state) && !f.eway_bill_number && (
+        <div style={{ fontSize: 11, color: 'var(--amber)', marginBottom: 12 }}>
+          ⚠ This consignment is above the e-way bill threshold (₹{ewayBillThreshold(!isIntrastate, bizObj.state).toLocaleString('en-IN')} for {isIntrastate ? `intra-state in ${bizObj.state || 'this state'}` : 'inter-state'} movement) — generate one before dispatch and enter the number below.
         </div>
       )}
 

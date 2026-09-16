@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from 'react';
-import { fmt, fmtDate, today, PAY_MODES, INDIAN_STATES, STATE_CODES, EXPENSE_CATEGORIES, B2CL_THRESHOLD } from '../lib/constants.js';
+import { fmt, fmtDate, today, PAY_MODES, INDIAN_STATES, STATE_CODES, EXPENSE_CATEGORIES, B2CL_THRESHOLD, effectiveGstin } from '../lib/constants.js';
 import { saveParty, deleteParty, saveExpenseWithJournal, deleteExpense, savePayment, saveBankAccount, saveBankTxnWithJournal, deleteBankTxn, deletePayment, updateInvoiceStatus, saveInvoice, uploadExpenseAttachment, getExpenseAttachmentUrl } from '../lib/db.js';
 import { Badge, ModalShell, FG, EmptyState, StatCard, PillTabs } from '../components/ui.jsx';
 import { BankImportModal } from './BankImport.jsx';
@@ -76,12 +76,12 @@ export function PartiesView({ parties, businesses, activeBiz, reload }) {
           </tbody>
         </table>
       </div>
-      {showModal && <PartyModal onClose={() => setShowModal(false)} onSave={save} businesses={businesses} editData={editData} />}
+      {showModal && <PartyModal onClose={() => setShowModal(false)} onSave={save} businesses={businesses} parties={parties} editData={editData} />}
     </>
   );
 }
 
-function PartyModal({ onClose, onSave, businesses, editData }) {
+function PartyModal({ onClose, onSave, businesses, parties = [], editData }) {
   const [f, setF] = useState({
     business_id: editData?.business_id || businesses[0]?.id || '',
     name: editData?.name || '', type: editData?.type || 'client',
@@ -90,8 +90,19 @@ function PartyModal({ onClose, onSave, businesses, editData }) {
     address: editData?.address || '',
   });
   const [busy, setBusy] = useState(false);
+
+  // Duplicate guard — same GSTIN or phone already on another party in this
+  // business almost always means the same real-world party is being entered
+  // twice (or a typo carried over), which then splits their invoice/payment
+  // history across two records. Warns, doesn't block — two genuinely
+  // different divisions sharing one phone number does happen occasionally.
+  const norm = s => (s || '').replace(/\D/g, '');
+  const dupGSTIN = f.gstin.trim() && parties.find(p => p.id !== editData?.id && p.business_id === f.business_id && p.gstin && p.gstin.trim().toUpperCase() === f.gstin.trim().toUpperCase());
+  const dupPhone = norm(f.phone).length >= 10 && parties.find(p => p.id !== editData?.id && p.business_id === f.business_id && norm(p.phone) === norm(f.phone));
+
   async function save() {
     if (!f.name.trim()) return;
+    if ((dupGSTIN || dupPhone) && !confirm(`This ${dupGSTIN ? 'GSTIN' : 'phone number'} is already used by "${(dupGSTIN || dupPhone).name}". Save anyway as a separate party?`)) return;
     setBusy(true); await onSave(f, editData?.id); setBusy(false); onClose();
   }
   return (
@@ -106,11 +117,13 @@ function PartyModal({ onClose, onSave, businesses, editData }) {
         <FG label="Phone"><input value={f.phone} onChange={e => setF(x => ({ ...x, phone: e.target.value }))} /></FG>
         <FG label="Email"><input value={f.email} onChange={e => setF(x => ({ ...x, email: e.target.value }))} /></FG>
       </div>
+      {dupPhone && <div style={{ fontSize: 11, color: 'var(--amber)', marginTop: -6, marginBottom: 8 }}>⚠ This phone number is already on "{dupPhone.name}" — likely the same party.</div>}
       <div className="form-row cols-2">
         <FG label="GSTIN"><input value={f.gstin} onChange={e => setF(x => ({ ...x, gstin: e.target.value.toUpperCase() }))} /></FG>
         <FG label="PAN"><input value={f.pan} onChange={e => setF(x => ({ ...x, pan: e.target.value.toUpperCase() }))} placeholder="ABCDE1234F" /></FG>
         <FG label="State (Place of Supply)"><select value={f.state} onChange={e => setF(x => ({ ...x, state: e.target.value }))}><option value="">Select…</option>{INDIAN_STATES.map(s => <option key={s} value={s}>{s}</option>)}</select></FG>
       </div>
+      {dupGSTIN && <div style={{ fontSize: 11, color: 'var(--amber)', marginTop: -6, marginBottom: 8 }}>⚠ This GSTIN is already on "{dupGSTIN.name}" — likely the same party.</div>}
       <FG label="Address"><textarea value={f.address} onChange={e => setF(x => ({ ...x, address: e.target.value }))} /></FG>
     </ModalShell>
   );
@@ -696,13 +709,16 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz }) {
 
   const biz = activeBiz ? businesses.find(b => b.id === activeBiz) : businesses[0];
 
-  // B2B: invoices with GSTIN
-  const b2b = saleInvoices.filter(i => { const p = parties.find(pt => pt.id === i.party_id); return p?.gstin; });
+  // B2B: invoices with a GSTIN — locked to each invoice's own snapshot
+  // (see effectiveGstin in constants.js), not a live party lookup, so
+  // adding a client's GSTIN later doesn't retroactively reclassify old
+  // invoices you may have already filed.
+  const b2b = saleInvoices.filter(i => { const p = parties.find(pt => pt.id === i.party_id); return effectiveGstin(i, p); });
   // B2C Large: no GSTIN, inter-state, invoice value > B2CL_THRESHOLD
   // (₹1L effective 1 Aug 2024, Notification 12/2024-CT — was ₹2.5L before that)
-  const b2cLarge = saleInvoices.filter(i => { const p = parties.find(pt => pt.id === i.party_id); return !p?.gstin && i.is_interstate && Number(i.total) > B2CL_THRESHOLD; });
+  const b2cLarge = saleInvoices.filter(i => { const p = parties.find(pt => pt.id === i.party_id); return !effectiveGstin(i, p) && i.is_interstate && Number(i.total) > B2CL_THRESHOLD; });
   // B2C Small: rest
-  const b2cSmall = saleInvoices.filter(i => { const p = parties.find(pt => pt.id === i.party_id); return !p?.gstin && !(i.is_interstate && Number(i.total) > B2CL_THRESHOLD); });
+  const b2cSmall = saleInvoices.filter(i => { const p = parties.find(pt => pt.id === i.party_id); return !effectiveGstin(i, p) && !(i.is_interstate && Number(i.total) > B2CL_THRESHOLD); });
 
   const totalTaxable = saleInvoices.reduce((s, i) => s + Number(i.subtotal || 0), 0);
   const totalCGST = saleInvoices.reduce((s, i) => s + Number(i.cgst_amount || 0), 0);
@@ -718,7 +734,7 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz }) {
       const p = parties.find(pt => pt.id === i.party_id) || {};
       const sc = STATE_CODES[p.state] || '';
       rows.push([
-        i.invoice_number, i.issue_date, p.name || '', p.gstin || '', p.state || '', sc,
+        i.invoice_number, i.issue_date, p.name || '', effectiveGstin(i, p) || '', p.state || '', sc,
         i.subtotal, i.cgst_amount || 0, i.sgst_amount || 0, i.igst_amount || 0,
         i.total, i.is_interstate === false ? 'Intra-state' : 'Inter-state'
       ]);
@@ -765,7 +781,7 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz }) {
                       <td className="mono" style={{ color: 'var(--accent)' }}>{i.invoice_number}</td>
                       <td className="mono" style={{ fontSize: 11 }}>{fmtDate(i.issue_date)}</td>
                       <td style={{ fontWeight: 500 }}>{p.name}</td>
-                      <td className="mono" style={{ fontSize: 10 }}>{p.gstin}</td>
+                      <td className="mono" style={{ fontSize: 10 }}>{effectiveGstin(i, p)}</td>
                       <td style={{ fontSize: 11 }}>{p.state} <span className="tag">{STATE_CODES[p.state]}</span></td>
                       <td className="r mono">{fmt(i.subtotal)}</td>
                       <td className="r mono" style={{ color: 'var(--blue)', fontSize: 11 }}>{fmt(i.cgst_amount || 0)}</td>
@@ -786,7 +802,7 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz }) {
         <div className="section-title">B2C Supplies (consumer / unregistered) — {b2cSmall.length + b2cLarge.length} invoice(s)</div>
         {(b2cSmall.length + b2cLarge.length) > 0 ? (
           <div className="card">
-            <div className="ledger-row"><span>B2C Large (inter-state &gt;2.5L)</span><span className="mono">{b2cLarge.length} invoices · {fmt(b2cLarge.reduce((s, i) => s + Number(i.total), 0))}</span></div>
+            <div className="ledger-row"><span>B2C Large (inter-state &gt;₹1L)</span><span className="mono">{b2cLarge.length} invoices · {fmt(b2cLarge.reduce((s, i) => s + Number(i.total), 0))}</span></div>
             <div className="ledger-row"><span>B2C Small (rest)</span><span className="mono">{b2cSmall.length} invoices · {fmt(b2cSmall.reduce((s, i) => s + Number(i.total), 0))}</span></div>
           </div>
         ) : <div style={{ color: 'var(--text3)', fontSize: 12, fontFamily: 'var(--mono)', padding: '8px 0' }}>No B2C invoices this period</div>}
