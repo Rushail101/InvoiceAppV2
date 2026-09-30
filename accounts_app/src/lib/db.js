@@ -377,7 +377,7 @@ export async function deletePayment(id) { await supabase.from('payments').delete
 async function postPaymentJournal(payRow, isPurchase) {
   if (!payRow.business_id) return { journalId: null, skipped: true, skipReason: 'no_business_id' };
 
-  const bankAcct = await findAccount(payRow.business_id, 'Bank Account');
+  const bankAcct = await settlementAccount(payRow.business_id, payRow.method);
   const otherAcct = isPurchase
     ? await findAccount(payRow.business_id, 'Accounts Payable')
     : await findAccount(payRow.business_id, 'Sales Revenue');
@@ -571,6 +571,16 @@ async function findAccount(bizId, nameLike) {
   return data?.[0] || null;
 }
 
+// Which ledger a payment settles through. Cash payments hit "Cash in Hand";
+// everything else (UPI/NEFT/RTGS/IMPS/Cheque/Other) hits "Bank Account".
+// Cash deliberately does NOT fall back to the bank ledger when the account is
+// missing — that would silently corrupt bank reconciliation. It returns null
+// so the caller reports account_not_found and JournalHealth can re-post later.
+async function settlementAccount(bizId, method) {
+  if (method === 'Cash') return await findAccount(bizId, 'Cash in Hand');
+  return await findAccount(bizId, 'Bank Account');
+}
+
 export const CATEGORY_ACCOUNT_MAP = {
   'Raw Materials': 'Raw Materials',
   'Wages & Salaries': 'Wages',
@@ -594,8 +604,9 @@ export const CATEGORY_ACCOUNT_MAP = {
 async function postExpenseJournal(expRow) {
   const acctName = CATEGORY_ACCOUNT_MAP[expRow.category] || 'Miscellaneous';
   const expAcct = await findAccount(expRow.business_id, acctName);
-  const cashAcct = await findAccount(expRow.business_id, 'Bank Account') ||
-                   await findAccount(expRow.business_id, 'Cash');
+  const cashAcct = expRow.method === 'Cash'
+    ? await findAccount(expRow.business_id, 'Cash in Hand')
+    : (await findAccount(expRow.business_id, 'Bank Account') || await findAccount(expRow.business_id, 'Cash in Hand'));
   if (!expAcct || !cashAcct) return { journalId: null, skipped: true, skipReason: 'account_not_found' };
 
   const { data: jnl, error: je } = await supabase.from('journal_entries').insert({
@@ -726,6 +737,31 @@ export async function saveBankTxnWithJournal(txnData, accounts, bizId) {
 
   const result = await postBankTxnJournal(txnRow, accounts, bizId, overrideMapping);
   return { txnId: txnRow.id, ...result };
+}
+
+// Manual cash deposit into / withdrawal from the bank. Reuses the normal bank
+// transaction path (so it appears on the bank ledger, reconciliation and
+// duplicate detection) but forces the journal to a Bank <-> Cash in Hand
+// transfer instead of letting the rule engine guess revenue/expense.
+//   deposit    : bank credit,  Dr Bank Account / Cr Cash in Hand
+//   withdrawal : bank debit,   Dr Cash in Hand / Cr Bank Account
+export async function saveCashTransfer({ direction, bankAccountId, date, amount, reference, description }, accounts, bizId) {
+  const bizAccounts = (accounts || []).filter(a => a.business_id === bizId);
+  const hasCash = bizAccounts.some(a => a.name.toLowerCase().includes('cash in hand'));
+  const hasBank = bizAccounts.some(a => a.name.toLowerCase().includes('bank account'));
+  if (!hasCash) throw new Error('No "Cash in Hand" account found in Chart of Accounts for this business — add it first.');
+  if (!hasBank) throw new Error('No "Bank Account" ledger found in Chart of Accounts for this business.');
+  const isDeposit = direction === 'deposit';
+  return saveBankTxnWithJournal({
+    bankAccountId,
+    date,
+    description: description || (isDeposit ? 'Cash deposit' : 'Cash withdrawal'),
+    reference: reference || '',
+    type: isDeposit ? 'credit' : 'debit',
+    amount: Number(amount),
+    _overrideDebit: isDeposit ? 'Bank Account' : 'Cash in Hand',
+    _overrideCredit: isDeposit ? 'Cash in Hand' : 'Bank Account',
+  }, accounts, bizId);
 }
 
 // Retroactively post a journal entry for a bank transaction that was saved
