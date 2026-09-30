@@ -514,8 +514,9 @@ export function PaymentModal({ onClose, onSave, invoice, existingPayments }) {
       </div>
       <div className="form-row cols-2">
         <FG label="Method"><select value={f.method} onChange={e => setF(x => ({ ...x, method: e.target.value }))}>{PAY_MODES.map(m => <option key={m} value={m}>{m}</option>)}</select></FG>
-        <FG label="Reference / UTR"><input value={f.reference} onChange={e => setF(x => ({ ...x, reference: e.target.value }))} placeholder="UTR / cheque no." /></FG>
+        <FG label={f.method === 'Cash' ? 'Receipt no. (optional)' : 'Reference / UTR'}><input value={f.reference} onChange={e => setF(x => ({ ...x, reference: e.target.value }))} placeholder="UTR / cheque no." /></FG>
       </div>
+      {f.method === 'Cash' && <p style={{ fontSize: 11, color: 'var(--text3)', margin: '0 0 10px' }}>Cash payments post to <strong>Cash in Hand</strong>, not the bank ledger.</p>}
       <FG label="Notes"><textarea value={f.notes} onChange={e => setF(x => ({ ...x, notes: e.target.value }))} /></FG>
       {err && <p className="err-msg">{err}</p>}
     </ModalShell>
