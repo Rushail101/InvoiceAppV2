@@ -239,6 +239,14 @@ export function AnalysisView({ journalEntries, journalLines, accounts, businesse
     cashBalance += l.type === 'debit' ? Number(l.amount) : -Number(l.amount);
   });
 
+  // Cash in Hand — physical cash ledger, all-time (cash payments/expenses post here).
+  const cashAcctIds = new Set(accounts.filter(a => a.name.toLowerCase().includes('cash in hand')).map(a => a.id));
+  let cashInHand = 0;
+  (journalLines || []).forEach(l => {
+    if (!allJournalIds.has(l.journal_id) || !cashAcctIds.has(l.account_id)) return;
+    cashInHand += l.type === 'debit' ? Number(l.amount) : -Number(l.amount);
+  });
+
   // Burn rate & runway — only meaningful when the selected period is net
   // negative (spending more than earning). Approximated using the number
   // of months actually covered by the filter.
@@ -246,7 +254,8 @@ export function AnalysisView({ journalEntries, journalLines, accounts, businesse
     ? Math.max(1, (new Date(dateTo).getFullYear() - new Date(dateFrom).getFullYear()) * 12 + (new Date(dateTo).getMonth() - new Date(dateFrom).getMonth()) + 1)
     : 1;
   const monthlyBurn = net < 0 ? Math.abs(net) / periodMonths : 0;
-  const runwayMonths = monthlyBurn > 0 ? cashBalance / monthlyBurn : null;
+  // Runway counts all liquid cash: bank balance + physical cash in hand.
+  const runwayMonths = monthlyBurn > 0 ? (cashBalance + cashInHand) / monthlyBurn : null;
 
   // AR / AP outstanding — from invoices directly (not journal, since this
   // system doesn't book AR at invoice time — see the "how it works" note
@@ -281,6 +290,7 @@ export function AnalysisView({ journalEntries, journalLines, accounts, businesse
         <StatCard label="Gross Margin" value={grossMargin !== null ? `${grossMargin.toFixed(1)}%` : '—'} color={grossMargin === null ? 'blue' : grossMargin >= 30 ? 'green' : grossMargin >= 10 ? 'amber' : 'red'} sub="Sales Revenue − all Direct Expenses" />
         <StatCard label="Net Margin" value={netMargin !== null ? `${netMargin.toFixed(1)}%` : '—'} color={netMargin === null ? 'blue' : netMargin >= 0 ? 'green' : 'red'} sub="Net ÷ Total Earned, this period" />
         <StatCard label="Cash Balance" value={fmt(cashBalance)} color={cashBalance >= 0 ? 'blue' : 'red'} sub="Bank Account, all-time" />
+        <StatCard label="Cash in Hand" value={fmt(cashInHand)} color={cashInHand >= 0 ? 'green' : 'red'} sub="Physical cash, all-time" />
         <StatCard label="Runway" value={runwayMonths !== null ? `${runwayMonths.toFixed(1)} mo` : '—'} color={runwayMonths === null ? 'green' : runwayMonths < 3 ? 'red' : runwayMonths < 6 ? 'amber' : 'green'} sub={monthlyBurn > 0 ? `Burning ${fmt(monthlyBurn)}/mo` : 'Not burning cash this period'} />
         <StatCard label="AR Outstanding" value={fmt(arOutstanding)} color="amber" sub="Owed to you by customers" />
         <StatCard label="AP Outstanding" value={fmt(apOutstanding)} color="purple" sub="You owe on purchase bills" />
