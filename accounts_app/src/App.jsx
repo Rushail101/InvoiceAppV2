@@ -1046,6 +1046,17 @@ const SIDEBAR_CSS = `
 .table-wrap { overflow-x: auto !important; max-width: 100%; }
 .table-wrap > table, .table-wrap table { width: max-content; min-width: 100%; }
 .table-wrap td.r, .table-wrap th.r { white-space: nowrap; }
+
+/* ── Frozen columns: add className="freeze-3" to a table to pin its first 3 columns
+   (checkbox · invoice # · party). Widths are fixed so the left offsets line up. */
+.freeze-3 :is(thead, tbody) tr > :nth-child(-n+3) { position: sticky; z-index: 2; background: var(--bg2); }
+.freeze-3 thead tr > :nth-child(-n+3) { z-index: 3; }
+.freeze-3 :is(thead, tbody) tr > :nth-child(1) { left: 0;     width: 44px;  min-width: 44px;  max-width: 44px; }
+.freeze-3 :is(thead, tbody) tr > :nth-child(2) { left: 44px;  width: 120px; min-width: 120px; max-width: 120px; }
+.freeze-3 :is(thead, tbody) tr > :nth-child(3) { left: 164px; width: 190px; min-width: 190px; max-width: 190px;
+  box-shadow: 8px 0 8px -6px rgba(0,0,0,.55); }
+.freeze-3 tfoot tr > :first-child { position: sticky; left: 0; z-index: 2; background: var(--bg3);
+  box-shadow: 8px 0 8px -6px rgba(0,0,0,.55); }
 .app.sidebar-hidden { grid-template-columns: minmax(0, 1fr) !important; }
 .app.sidebar-hidden .sidebar:not(.open) { display: none !important; }
 .app.sidebar-hidden .main { margin-left: 0 !important; width: 100% !important; max-width: 100% !important; }
