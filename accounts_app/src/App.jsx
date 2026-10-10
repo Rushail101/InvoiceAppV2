@@ -1037,7 +1037,15 @@ const MOBILE_BREAKPOINT = 900;
 
 const SIDEBAR_CSS = `
 .hamburger-btn { display: inline-flex !important; align-items: center; justify-content: center; cursor: pointer; }
-.app .main { min-width: 0; }
+.app .main, .app .content { min-width: 0; max-width: 100%; }
+
+/* ── Tables: never clip, whatever the data size ───────────────────────────────
+   The table grows to the width its content needs (width: max-content) but is never
+   narrower than its card (min-width: 100%); the card scrolls sideways when the table
+   is wider. Applies to every .table-wrap in the app. */
+.table-wrap { overflow-x: auto !important; max-width: 100%; }
+.table-wrap > table, .table-wrap table { width: max-content; min-width: 100%; }
+.table-wrap td.r, .table-wrap th.r { white-space: nowrap; }
 .app.sidebar-hidden { grid-template-columns: minmax(0, 1fr) !important; }
 .app.sidebar-hidden .sidebar:not(.open) { display: none !important; }
 .app.sidebar-hidden .main { margin-left: 0 !important; width: 100% !important; max-width: 100% !important; }
