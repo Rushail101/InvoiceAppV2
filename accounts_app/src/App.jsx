@@ -1029,6 +1029,20 @@ function Dashboard({ invoices, expenses, payments, businesses, parties, activeBi
   );
 }
 
+// ─── SIDEBAR COLLAPSE ─────────────────────────────────────────────────────────
+// Must match the max-width of the media query in CSS (lib/constants.js) where the
+// sidebar turns into the slide-in mobile drawer. Below this width the ☰ button opens
+// the drawer; above it, the button hides/shows the sidebar and gives content full width.
+const MOBILE_BREAKPOINT = 900;
+
+const SIDEBAR_CSS = `
+.hamburger-btn { display: inline-flex !important; align-items: center; justify-content: center; cursor: pointer; }
+.app .main { min-width: 0; }
+.app.sidebar-hidden { grid-template-columns: minmax(0, 1fr) !important; }
+.app.sidebar-hidden .sidebar:not(.open) { display: none !important; }
+.app.sidebar-hidden .main { margin-left: 0 !important; width: 100% !important; max-width: 100% !important; }
+`;
+
 // ─── ROOT APP ─────────────────────────────────────────────────────────────────
 export default function App() {
   const [authed, setAuthed] = useState(() => localStorage.getItem('np_auth') === 'true');
@@ -1036,6 +1050,21 @@ export default function App() {
   const [view, setView] = useState('dashboard');
   const [activeBiz, setActiveBiz] = useState('');
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [sidebarHidden, setSidebarHidden] = useState(() => {
+    try { return localStorage.getItem('np_sidebar_hidden') === 'true'; } catch (_) { return false; }
+  });
+
+  function toggleNav() {
+    if (window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT}px)`).matches) {
+      setMobileNavOpen(o => !o);
+    } else {
+      setSidebarHidden(h => {
+        const next = !h;
+        try { localStorage.setItem('np_sidebar_hidden', String(next)); } catch (_) {}
+        return next;
+      });
+    }
+  }
   const [data, setData] = useState({
     businesses: [], invoices: [], parties: [], expenses: [],
     payments: [], accounts: [], journalEntries: [], journalLines: [],
@@ -1097,8 +1126,8 @@ export default function App() {
 
   return (
     <>
-      <style>{FONTS}{CSS}</style>
-      <div className="app">
+      <style>{FONTS}{CSS}{SIDEBAR_CSS}</style>
+      <div className={`app${sidebarHidden ? ' sidebar-hidden' : ''}`}>
         {mobileNavOpen && <div className="nav-overlay" onClick={() => setMobileNavOpen(false)} />}
         <aside className={`sidebar${mobileNavOpen ? ' open' : ''}`}>
           <div className="sidebar-logo">
@@ -1140,7 +1169,7 @@ export default function App() {
         <div className="main">
           <div className="topbar">
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-              <button className="hamburger-btn" onClick={() => setMobileNavOpen(o => !o)} aria-label="Toggle menu">☰</button>
+              <button className="hamburger-btn" onClick={toggleNav} aria-label="Toggle menu" title={sidebarHidden ? 'Show menu' : 'Hide menu'}>☰</button>
               <h2>{TITLES[view] || view}</h2>
             </div>
             <div className="topbar-right">
