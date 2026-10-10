@@ -792,7 +792,8 @@ export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceIte
             <div>
               {/* State-wise breakdown with 5% and 18% splits */}
               <div className="section-title" style={{ marginTop: 0 }}>State-wise GST Breakdown (with 5% &amp; 18% splits)</div>
-              <div className="table-wrap" style={{ marginBottom: 16 }}>
+              <div className="table-wrap" style={{ overflowX: 'auto', maxWidth: '100%' }}>
+              <table style={{ minWidth: 1600 }}>
                 <table>
                   <thead>
                     <tr>
