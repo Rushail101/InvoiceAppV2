@@ -1,0 +1,895 @@
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { createClient } from '@supabase/supabase-js';
+import { FONTS, CSS } from './lib/constants.js';
+import { initSupabase, loadCore, loadHeavy, saveBusiness, deleteBusiness } from './lib/db.js';
+import { InvoicesView } from './views/Invoices.jsx';
+import { PartiesView, ExpensesView, PaymentsView, BankView, ARLedgerView, APLedgerView } from './views/Operations.jsx';
+import { PartyStatementView, PaymentListView, ExportView, TDSView } from './views/ExtraViews.jsx';
+import { BulkImportView } from './views/BulkImport.jsx';
+import { ReconciliationView } from './views/Reconciliation.jsx';
+import { CashFlowView } from './views/CashFlow.jsx';
+import { ChartOfAccountsView, JournalView, GeneralLedgerView, TrialBalanceView, BalanceSheetView, PLView } from './views/Accounting.jsx';
+import { AnalysisView } from './views/Analysis.jsx';
+import { JournalHealthView } from './views/JournalHealth.jsx';
+import { GSTR1View } from './views/GSTR1.jsx';
+import { ItemsView } from './views/Items.jsx';
+import { DeliveryChallansView } from './views/DeliveryChallans.jsx';
+import { GSTR3BView, AuditTrailView, KPIDashboard } from './views/EnterpriseViews.jsx';
+import { Badge, ModalShell, FG, EmptyState } from './components/ui.jsx';
+import SCHEMA_SQL from '../sql/schema.sql?raw';
+
+// Optional/advanced screens remain hidden from nav; core sales documents
+// (Invoices, Credit Notes, Debit Notes and Delivery Challans) are visible.
+const NAV = [
+  { id: 'dashboard',   label: 'Dashboard',        icon: '◈',  group: null },
+  { id: 'invoices',    label: 'Invoices',          icon: '📄',  group: 'Sales' },
+  { id: 'proformas',   label: 'Proforma',          icon: '📋',  group: 'Sales' },
+  { id: 'challans',    label: 'Delivery Challans', icon: '🚚',  group: 'Sales' },
+  { id: 'parties',     label: 'Parties',           icon: '👥',  group: 'Sales' },
+  { id: 'items',       label: 'Item Master',       icon: '📦',  group: 'Sales' },
+  { id: 'purchasebills', label: 'Purchase Bills',   icon: '🧾',  group: 'Purchases' },
+  { id: 'expenses',    label: 'Expenses',          icon: '💸',  group: 'Purchases' },
+  { id: 'payments',    label: 'Payments',          icon: '💳',  group: 'Purchases' },
+  { id: 'bank',        label: 'Bank',              icon: '🏦',  group: 'Purchases' },
+  { id: 'ar',          label: 'AR Ledger',         icon: '🟢',  group: 'Ledgers' },
+  { id: 'ap',          label: 'AP Ledger',         icon: '🔴',  group: 'Ledgers' },
+  { id: 'statement',   label: 'Party Statement',   icon: '📋',  group: 'Ledgers' },
+  { id: 'paylist',     label: 'Payment List',      icon: '💵',  group: 'Ledgers' },
+  { id: 'tds',         label: 'TDS',               icon: '📑',  group: 'Ledgers' },
+  { id: 'accounts',    label: 'Chart of Accounts', icon: '📒',  group: 'Accounting' },
+  { id: 'journal',     label: 'Journal Vouchers',  icon: '📝',  group: 'Accounting' },
+  { id: 'ledger',      label: 'General Ledger',    icon: '📖',  group: 'Accounting' },
+  { id: 'trial',       label: 'Trial Balance',     icon: '⚖',   group: 'Accounting' },
+  { id: 'balance',     label: 'Balance Sheet',     icon: '📊',  group: 'Accounting' },
+  { id: 'analysis',    label: 'Analysis',          icon: '🔎',  group: 'Accounting' },
+  { id: 'pl',          label: 'P&L Report',        icon: '📈',  group: 'Accounting' },
+  { id: 'cashflow',    label: 'Cash Flow',         icon: '💰',  group: 'Accounting' },
+  { id: 'reconcile',  label: 'Reconciliation',    icon: '⚖️',  group: 'Accounting' },
+  { id: 'jhealth',    label: 'Journal Health',    icon: '🩺',  group: 'Accounting' },
+  { id: 'bulkimport',  label: 'Bulk Bank Import',  icon: '📥',  group: 'Accounting' },
+  { id: 'gstr1',       label: 'GSTR-1',            icon: '🧾',  group: 'GST' },
+  { id: 'gstr3b',      label: 'GSTR-3B',           icon: '🧮',  group: 'GST' },
+  { id: 'audit',       label: 'Audit Trail',        icon: '🛡',  group: 'Settings' },
+  { id: 'kpis',        label: 'Management KPIs',    icon: '📊',  group: 'Analysis' },
+  { id: 'businesses',  label: 'Businesses',        icon: '🏢',  group: 'Settings' },
+  { id: 'export',      label: 'Export Data',       icon: '↓',   group: 'Settings' },
+  { id: 'sqlsetup',    label: 'SQL Setup',         icon: '⚙',   group: 'Settings' },
+];
+const TITLES = Object.fromEntries(NAV.map(n => [n.id, n.label]));
+const GROUPS = [...new Set(NAV.filter(n => n.group).map(n => n.group))];
+
+const STATES = [
+  'Andaman and Nicobar Islands','Andhra Pradesh','Arunachal Pradesh','Assam','Bihar',
+  'Chandigarh','Chhattisgarh','Dadra and Nagar Haveli','Daman and Diu','Delhi','Goa',
+  'Gujarat','Haryana','Himachal Pradesh','Jammu and Kashmir','Jharkhand','Karnataka',
+  'Kerala','Ladakh','Lakshadweep','Madhya Pradesh','Maharashtra','Manipur','Meghalaya',
+  'Mizoram','Nagaland','Odisha','Puducherry','Punjab','Rajasthan','Sikkim','Tamil Nadu',
+  'Telangana','Tripura','Uttar Pradesh','Uttarakhand','West Bengal',
+];
+
+// ─── LOGIN SCREEN ─────────────────────────────────────────────────────────────
+function LoginScreen({ onLogin }) {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const correctUser = import.meta.env.VITE_APP_USERNAME || '';
+  const correctPass = import.meta.env.VITE_APP_PASSWORD || '';
+
+  async function login() {
+    if (!username.trim() || !password.trim()) { setErr('Enter username and password'); return; }
+    setBusy(true); setErr('');
+    try {
+      const url = import.meta.env.VITE_SUPABASE_URL || localStorage.getItem('sb_url');
+      const key = import.meta.env.VITE_SUPABASE_ANON_KEY || localStorage.getItem('sb_key');
+      // Prefer real Supabase Auth when an email is supplied. The legacy env
+      // credential remains as a local-development fallback only.
+      if (url && key && username.trim().includes('@')) {
+        const authClient = createClient(url, key, { db: { schema: 'accounts_erp' } });
+        const { error } = await authClient.auth.signInWithPassword({ email: username.trim(), password });
+        if (error) throw error;
+        localStorage.setItem('np_auth', 'true');
+        onLogin();
+      } else if (username.trim() === correctUser && password === correctPass) {
+        localStorage.setItem('np_auth', 'true');
+        onLogin();
+      } else {
+        setErr('Incorrect username or password');
+      }
+    } catch (e) {
+      setErr(e?.message || 'Sign in failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function onKey(e) { if (e.key === 'Enter') login(); }
+
+  return (
+    <div className="config-wrap">
+      <div className="config-screen">
+        <div style={{ fontSize: 42, marginBottom: 14 }}>🧵</div>
+        <h2 style={{ marginBottom: 6 }}>Needle Point</h2>
+        <p style={{ marginBottom: 24, color: 'var(--text3)', fontSize: 13 }}>Sign in to continue</p>
+        <div className="config-form">
+          <div className="form-group" style={{ marginBottom: 10 }}>
+            <label>Username</label>
+            <input
+              placeholder="Username"
+              value={username}
+              autoComplete="username"
+              onChange={e => setUsername(e.target.value)}
+              onKeyDown={onKey}
+            />
+          </div>
+          <div className="form-group" style={{ marginBottom: 18 }}>
+            <label>Password</label>
+            <input
+              type="password"
+              placeholder="Password"
+              value={password}
+              autoComplete="current-password"
+              onChange={e => setPassword(e.target.value)}
+              onKeyDown={onKey}
+            />
+          </div>
+          {err && <p className="err-msg" style={{ marginBottom: 10 }}>{err}</p>}
+          {(!correctUser || !correctPass) && (
+            <p style={{ fontSize: 11, color: 'var(--amber,#f59e0b)', marginBottom: 10 }}>
+              ⚠ VITE_APP_USERNAME / VITE_APP_PASSWORD not set in environment variables.
+            </p>
+          )}
+          <button className="btn btn-primary" style={{ width: '100%' }} onClick={login} disabled={busy}>
+            {busy ? 'Signing in…' : 'Sign In'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── BUSINESS MODAL ───────────────────────────────────────────────────────────
+function BizModal({ biz, onClose, onSave }) {
+  const [f, setF] = useState({
+    name: biz?.name || '', address: biz?.address || '', gstin: biz?.gstin || '',
+    state: biz?.state || '', phone: biz?.phone || '', email: biz?.email || '',
+    bank_account: biz?.bank_account || '', ifsc_code: biz?.ifsc_code || '',
+    bank_name: biz?.bank_name || '', upi_id: biz?.upi_id || '', logo_url: biz?.logo_url || '',
+  });
+  const [busy, setBusy] = useState(false);
+
+  const [bizErr, setBizErr] = useState('');
+  async function save() {
+    if (!f.name.trim()) { setBizErr('Business name is required'); return; }
+    setBusy(true); setBizErr('');
+    try {
+      await onSave(f, biz?.id);
+      onClose();
+    } catch (e) {
+      setBizErr(e.message || 'Save failed — check your Supabase connection');
+    }
+    setBusy(false);
+  }
+
+  return (
+    <ModalShell
+      title={biz?.id ? `Edit — ${biz.name}` : 'Add Business'} onClose={onClose}
+      foot={<><button className="btn btn-ghost" onClick={onClose}>Cancel</button><button className="btn btn-primary" onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button></>}
+    >
+      <div className="form-row cols-2">
+        <FG label="Business Name *"><input value={f.name} onChange={e => setF(x => ({ ...x, name: e.target.value }))} /></FG>
+        <FG label="GSTIN"><input value={f.gstin} onChange={e => setF(x => ({ ...x, gstin: e.target.value.toUpperCase() }))} placeholder="07AAXFN6403D1Z5" /></FG>
+      </div>
+      <div className="form-row cols-2">
+        <FG label="Home State *" note="Required for CGST/SGST vs IGST auto-detection">
+          <select value={f.state} onChange={e => setF(x => ({ ...x, state: e.target.value }))}>
+            <option value="">Select state…</option>
+            {STATES.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </FG>
+        <FG label="Phone"><input value={f.phone} onChange={e => setF(x => ({ ...x, phone: e.target.value }))} /></FG>
+      </div>
+      <div className="form-row cols-2">
+        <FG label="Email"><input value={f.email} onChange={e => setF(x => ({ ...x, email: e.target.value }))} /></FG>
+        <FG label="Logo URL"><input value={f.logo_url} onChange={e => setF(x => ({ ...x, logo_url: e.target.value }))} placeholder="https://…" /></FG>
+      </div>
+      <FG label="Address"><textarea value={f.address} onChange={e => setF(x => ({ ...x, address: e.target.value }))} /></FG>
+      {bizErr && <p className="err-msg" style={{ marginTop: 6 }}>{bizErr}</p>}
+      <div className="section-title">Bank Details (printed on PDF)</div>
+      <div className="form-row cols-2">
+        <FG label="Account No."><input value={f.bank_account} onChange={e => setF(x => ({ ...x, bank_account: e.target.value }))} /></FG>
+        <FG label="IFSC Code"><input value={f.ifsc_code} onChange={e => setF(x => ({ ...x, ifsc_code: e.target.value.toUpperCase() }))} /></FG>
+      </div>
+      <div className="form-row cols-2">
+        <FG label="Bank Name & Branch"><input value={f.bank_name} onChange={e => setF(x => ({ ...x, bank_name: e.target.value }))} placeholder="ICICI Bank, Mayapuri" /></FG>
+        <FG label="UPI ID"><input value={f.upi_id} onChange={e => setF(x => ({ ...x, upi_id: e.target.value }))} placeholder="needlepoint.ibz@icici" /></FG>
+      </div>
+    </ModalShell>
+  );
+}
+
+// ─── BUSINESSES VIEW ──────────────────────────────────────────────────────────
+function BusinessesView({ businesses, reload }) {
+  const [modal, setModal] = useState(false);
+  const [editBiz, setEditBiz] = useState(null);
+
+  async function handleSave(data, id) { await saveBusiness(data, id); reload(); }
+  async function handleDelete(id) {
+    if (!confirm('Delete this business and ALL its data? Cannot be undone.')) return;
+    await deleteBusiness(id); reload();
+  }
+
+  return (
+    <>
+      <div className="filter-bar">
+        <button className="btn btn-primary" onClick={() => { setEditBiz(null); setModal(true); }}>+ Add Business</button>
+      </div>
+      <div className="table-wrap">
+        <table>
+          <thead><tr><th>Name</th><th>Home State</th><th>GSTIN</th><th>Phone</th><th>UPI</th><th>Actions</th></tr></thead>
+          <tbody>
+            {businesses.map(b => (
+              <tr key={b.id}>
+                <td style={{ fontWeight: 600 }}>{b.name}</td>
+                <td style={{ fontSize: 11 }}>
+                  {b.state || <span style={{ color: 'var(--red)', fontSize: 10, fontFamily: 'var(--mono)' }}>⚠ Not set — GST split disabled</span>}
+                </td>
+                <td className="mono" style={{ fontSize: 11 }}>{b.gstin || '—'}</td>
+                <td style={{ fontSize: 12 }}>{b.phone || '—'}</td>
+                <td className="mono" style={{ fontSize: 11, color: 'var(--text3)' }}>{b.upi_id || '—'}</td>
+                <td>
+                  <div style={{ display: 'flex', gap: 5 }}>
+                    <button className="btn btn-ghost btn-sm" onClick={() => { setEditBiz(b); setModal(true); }}>⚙ Edit</button>
+                    <button className="btn btn-danger btn-sm" onClick={() => handleDelete(b.id)}>Del</button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+            {businesses.length === 0 && (
+              <tr><td colSpan={6}><EmptyState icon="🏢" message="No businesses yet" sub='Click "+ Add Business" to get started' /></td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      {modal && <BizModal biz={editBiz} onClose={() => setModal(false)} onSave={handleSave} />}
+    </>
+  );
+}
+
+// ─── SQL SETUP ────────────────────────────────────────────────────────────────
+
+function SqlSetupView({ invoices = [], payments = [] }) {
+  const [copied, setCopied] = useState(false);
+  const [fixing, setFixing] = useState(false);
+  const [fixResult, setFixResult] = useState(null);
+  function copy() { navigator.clipboard.writeText(SCHEMA_SQL).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); }); }
+  return (
+    <div style={{ maxWidth: 760 }}>
+      <div className="card" style={{ marginBottom: 18 }}>
+        <div className="card-head">First-time Setup</div>
+        <ol style={{ color: 'var(--text2)', fontSize: 13, lineHeight: 2.2, paddingLeft: 20 }}>
+          <li>Go to <strong style={{ color: 'var(--text)' }}>Supabase → SQL Editor</strong> → paste the SQL below → Run</li>
+          <li>Go to <strong style={{ color: 'var(--text)' }}>Settings → Businesses</strong> → add your business, set the <span style={{ color: 'var(--accent)' }}>Home State</span></li>
+          <li>Go to <strong style={{ color: 'var(--text)' }}>Accounting → Chart of Accounts</strong> → click <strong style={{ color: 'var(--text)' }}>Seed Default Accounts</strong></li>
+          <li>Add parties (clients/vendors) — set their <strong style={{ color: 'var(--text)' }}>State</strong> for correct GST</li>
+          <li>Start creating invoices</li>
+        </ol>
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <span style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>schema.sql</span>
+        <button className="btn btn-ghost btn-sm" onClick={copy}>{copied ? '✓ Copied!' : 'Copy SQL'}</button>
+      </div>
+      <div className="sql-box">{SCHEMA_SQL}</div>
+
+      {/* ── One-time proforma date fix ── */}
+      {(() => {
+        // Find invoices that: have a real invoice number (not PI-), are paid, and likely converted from proforma
+        // We identify them as invoices whose issue_date is suspiciously old relative to their payment date
+        const converted = invoices.filter(inv =>
+          inv.status === 'paid' &&
+          inv.invoice_number &&
+          !inv.invoice_number.startsWith('PI-') &&
+          !inv.invoice_number.startsWith('PF-')
+        );
+
+        // For each, find the latest payment and check if issue_date differs from payment date
+        const needsFix = converted.filter(inv => {
+          const invPayments = payments
+            .filter(p => p.invoice_id === inv.id)
+            .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+          if (!invPayments.length) return false;
+          const lastPmtDate = invPayments[0].created_at?.split('T')[0];
+          return lastPmtDate && lastPmtDate !== inv.issue_date;
+        });
+
+        async function runFix() {
+          if (!needsFix.length) return;
+          if (!confirm(`This will update issue_date for ${needsFix.length} invoice(s) to match when payment was recorded.\n\nThis affects GSTR-1 filing months. Continue?`)) return;
+          setFixing(true);
+          setFixResult(null);
+          const { supabase } = await import('./lib/db.js');
+          let fixed = 0, failed = 0;
+          for (const inv of needsFix) {
+            const lastPmt = payments
+              .filter(p => p.invoice_id === inv.id)
+              .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+            const newDate = lastPmt.created_at?.split('T')[0];
+            const { error } = await supabase.from('invoices')
+              .update({ issue_date: newDate })
+              .eq('id', inv.id);
+            if (error) failed++;
+            else fixed++;
+          }
+          setFixing(false);
+          setFixResult({ fixed, failed });
+        }
+
+        return (
+          <div className="card" style={{ marginTop: 24, borderColor: needsFix.length ? 'var(--amber)' : 'var(--border1)' }}>
+            <div className="card-head" style={{ color: needsFix.length ? 'var(--amber)' : 'var(--text2)' }}>
+              🔧 One-time Fix — Proforma Conversion Dates
+            </div>
+            <p style={{ fontSize: 13, color: 'var(--text2)', marginBottom: 12, lineHeight: 1.6 }}>
+              Finds paid invoices where the <code>issue_date</code> doesn't match the date payment was recorded —
+              these were likely converted from proformas before the fix was applied.
+              Updates their date to when the final payment hit, so GSTR-1 shows the correct month.
+            </p>
+
+            {needsFix.length > 0 ? (
+              <>
+                <div style={{ marginBottom: 12, background: 'var(--bg2)', borderRadius: 8, overflow: 'hidden' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                    <thead>
+                      <tr style={{ borderBottom: '1px solid var(--border1)' }}>
+                        <th style={{ padding: '7px 12px', textAlign: 'left', color: 'var(--text3)', fontWeight: 500 }}>Invoice #</th>
+                        <th style={{ padding: '7px 12px', textAlign: 'left', color: 'var(--text3)', fontWeight: 500 }}>Current Date</th>
+                        <th style={{ padding: '7px 12px', textAlign: 'left', color: 'var(--text3)', fontWeight: 500 }}>→ Will be updated to</th>
+                        <th style={{ padding: '7px 12px', textAlign: 'right', color: 'var(--text3)', fontWeight: 500 }}>Amount</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {needsFix.map(inv => {
+                        const lastPmt = payments
+                          .filter(p => p.invoice_id === inv.id)
+                          .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+                        const newDate = lastPmt?.created_at?.split('T')[0];
+                        return (
+                          <tr key={inv.id} style={{ borderBottom: '1px solid var(--border1)' }}>
+                            <td style={{ padding: '7px 12px', fontFamily: 'var(--mono)', color: 'var(--text1)' }}>{inv.invoice_number}</td>
+                            <td style={{ padding: '7px 12px', fontFamily: 'var(--mono)', color: 'var(--red)', textDecoration: 'line-through', opacity: 0.7 }}>{inv.issue_date}</td>
+                            <td style={{ padding: '7px 12px', fontFamily: 'var(--mono)', color: '#4ade80' }}>{newDate}</td>
+                            <td style={{ padding: '7px 12px', fontFamily: 'var(--mono)', color: 'var(--text1)', textAlign: 'right' }}>₹{Number(inv.total).toLocaleString('en-IN')}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <button
+                  className="btn btn-warning"
+                  onClick={runFix}
+                  disabled={fixing}
+                  style={{ fontSize: 13 }}
+                >
+                  {fixing ? '⏳ Updating…' : `Fix ${needsFix.length} Invoice${needsFix.length !== 1 ? 's' : ''}`}
+                </button>
+              </>
+            ) : (
+              <div style={{ fontSize: 13, color: '#4ade80' }}>
+                ✅ All invoice dates look correct — nothing to fix.
+              </div>
+            )}
+
+            {fixResult && (
+              <div style={{ marginTop: 12, fontSize: 13, color: fixResult.failed ? 'var(--amber)' : '#4ade80' }}>
+                {fixResult.fixed > 0 && `✅ ${fixResult.fixed} invoice${fixResult.fixed !== 1 ? 's' : ''} updated. `}
+                {fixResult.failed > 0 && `⚠️ ${fixResult.failed} failed — check Supabase logs.`}
+                {fixResult.fixed > 0 && ' Refresh the page to see updated GSTR-1 data.'}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+    </div>
+  );
+}
+
+// ─── MINI BAR CHART ──────────────────────────────────────────────────────────
+function MiniBarChart({ data, color = 'var(--accent)', label }) {
+  const max = Math.max(...data.map(d => d.value), 1);
+  return (
+    <div>
+      <div style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 8 }}>{label}</div>
+      <div style={{ display: 'flex', gap: 4, alignItems: 'flex-end', height: 60 }}>
+        {data.map((d, i) => (
+          <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3 }}>
+            <div title={`${d.label}: ₹${Number(d.value).toLocaleString('en-IN')}`}
+              style={{ width: '100%', background: color, borderRadius: '3px 3px 0 0', height: `${Math.max(3, (d.value / max) * 52)}px`, transition: 'height .3s', cursor: 'default', opacity: i === data.length - 1 ? 1 : 0.55 }} />
+            <div style={{ fontSize: 8, color: 'var(--text4)', fontFamily: 'var(--mono)', whiteSpace: 'nowrap' }}>{d.label}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── DASHBOARD ────────────────────────────────────────────────────────────────
+function Dashboard({ invoices, expenses, payments, businesses, parties, activeBiz, setView }) {
+  const bi = activeBiz ? invoices.filter(i => i.business_id === activeBiz) : invoices;
+  const be = activeBiz ? expenses.filter(e => e.business_id === activeBiz) : expenses;
+
+  const fmtN = n => `₹${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 0 })}`;
+  const fmtD = d => d ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—';
+  const fmtM = n => `₹${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`;
+
+  const paysByInv = {};
+  payments.forEach(p => { if (!paysByInv[p.invoice_id]) paysByInv[p.invoice_id] = []; paysByInv[p.invoice_id].push(p); });
+
+  // Invoiced revenue (accrual) — excludes proforma/draft/cancelled
+  const saleInvs = bi.filter(i => i.type === 'sale' && !['cancelled','proforma','draft'].includes(i.status));
+  // All active sale invoices including proforma — for cash tracking
+  const allSaleInvs = bi.filter(i => i.type === 'sale' && !['cancelled','draft'].includes(i.status));
+
+  const revenue = saleInvs.reduce((s, i) => s + Number(i.subtotal || 0), 0);
+  // Collected = all cash received including advances against proformas
+  const collected = allSaleInvs.reduce((s, i) => s + (paysByInv[i.id]||[]).reduce((ps,p)=>ps+Number(p.amount),0), 0);
+  const pending = allSaleInvs.filter(i => ['sent','partially_paid','proforma'].includes(i.status)).reduce((s,i)=>{
+    const paid = (paysByInv[i.id]||[]).reduce((ps,p)=>ps+Number(p.amount),0);
+    return s + Math.max(0, Number(i.total) - paid);
+  }, 0);
+  const overdue = saleInvs.filter(i => i.status === 'overdue').reduce((s,i)=>s+Number(i.total),0);
+  const totalExp = be.reduce((s, e) => s + Number(e.amount), 0);
+  const overdueInvs = bi.filter(i => i.due_date && new Date(i.due_date) < new Date() && !['paid','cancelled','proforma'].includes(i.status));
+
+  // Monthly revenue — last 6 months (cash basis — what was actually received)
+  const monthlyData = (() => {
+    const months = [];
+    for (let m = 5; m >= 0; m--) {
+      const d = new Date(); d.setMonth(d.getMonth() - m);
+      const yr = d.getFullYear(); const mo = d.getMonth();
+      const label = d.toLocaleDateString('en-IN', { month: 'short' });
+      // Use payments received in that month rather than invoice date
+      const value = payments
+        .filter(p => {
+          const pd = new Date(p.payment_date);
+          return pd.getFullYear()===yr && pd.getMonth()===mo
+            && allSaleInvs.some(i => i.id === p.invoice_id);
+        })
+        .reduce((s,p) => s + Number(p.amount||0), 0);
+      months.push({ label, value });
+    }
+    return months;
+  })();
+
+  // Top 5 clients by revenue (include proforma payments)
+  const clientRevenue = {};
+  allSaleInvs.forEach(i => {
+    const p = parties.find(pt => pt.id === i.party_id);
+    const paid = (paysByInv[i.id]||[]).reduce((ps,p)=>ps+Number(p.amount),0);
+    if (p && paid > 0) clientRevenue[p.name] = (clientRevenue[p.name] || 0) + paid;
+    else if (p && i.status !== 'proforma') clientRevenue[p.name] = (clientRevenue[p.name] || 0) + Number(i.subtotal || 0);
+  });
+  const top5 = Object.entries(clientRevenue).sort((a,b)=>b[1]-a[1]).slice(0,5);
+  const maxClient = top5[0]?.[1] || 1;
+
+  const missingState = businesses.some(b => !b.state);
+
+  return (
+    <>
+      {missingState && (
+        <div style={{ background: '#1a1000', border: '1px solid #3a2800', borderRadius: 'var(--r)', padding: '10px 14px', marginBottom: 16, fontSize: 12, color: 'var(--amber)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span>⚠ Some businesses are missing <strong>Home State</strong> — CGST/SGST auto-split is disabled for those businesses.</span>
+          <button className="btn btn-warning btn-sm" style={{ marginLeft: 12, flexShrink: 0 }} onClick={() => setView('businesses')}>Fix Now →</button>
+        </div>
+      )}
+
+      <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(5,1fr)' }}>
+        <div className="stat-card green"><div className="stat-label">Revenue (Taxable)</div><div className="stat-val green">{fmtN(revenue)}</div><div className="stat-sub">{saleInvs.length} invoices</div></div>
+        <div className="stat-card blue"><div className="stat-label">Collected</div><div className="stat-val blue">{fmtN(collected)}</div><div className="stat-sub">cash received</div></div>
+        <div className="stat-card amber"><div className="stat-label">Outstanding</div><div className="stat-val amber">{fmtN(pending)}</div><div className="stat-sub">pending payment</div></div>
+        <div className="stat-card red"><div className="stat-label">Overdue</div><div className="stat-val red">{fmtN(overdue)}</div><div className="stat-sub">{overdueInvs.length} invoice(s)</div></div>
+        <div className="stat-card purple"><div className="stat-label">Expenses</div><div className="stat-val purple">{fmtN(totalExp)}</div><div className="stat-sub">all categories</div></div>
+      </div>
+
+      {/* Charts row */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 20 }}>
+        <div className="card">
+          <div className="card-head">Monthly Revenue (last 6 months)</div>
+          <MiniBarChart data={monthlyData} color="var(--accent)" label="₹ taxable value" />
+        </div>
+        <div className="card">
+          <div className="card-head">Top Clients by Revenue</div>
+          {top5.length > 0 ? (
+            <div>
+              {top5.map(([name, val]) => (
+                <div key={name} style={{ marginBottom: 8 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 3 }}>
+                    <span style={{ color: 'var(--text2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '60%' }}>{name}</span>
+                    <span style={{ fontFamily: 'var(--mono)', color: 'var(--text)', fontSize: 11 }}>{fmtN(val)}</span>
+                  </div>
+                  <div style={{ background: 'var(--bg3)', borderRadius: 3, height: 5 }}>
+                    <div style={{ background: 'var(--accent)', borderRadius: 3, height: 5, width: `${(val/maxClient)*100}%`, transition: 'width .3s' }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : <div style={{ color: 'var(--text3)', fontSize: 12, padding: '8px 0' }}>No data yet</div>}
+        </div>
+      </div>
+
+      {overdueInvs.length > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 10, color: 'var(--red)', fontFamily: 'var(--mono)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 7 }}>
+            Overdue ({overdueInvs.length})
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>Invoice #</th><th>Party</th><th>Due Date</th><th className="r">Amount</th></tr></thead>
+              <tbody>
+                {overdueInvs.slice(0, 5).map(inv => (
+                  <tr key={inv.id}>
+                    <td className="mono" style={{ color: 'var(--accent)' }}>{inv.invoice_number}</td>
+                    <td style={{ fontWeight: 500 }}>{parties.find(p => p.id === inv.party_id)?.name || '—'}</td>
+                    <td className="mono" style={{ color: 'var(--red)', fontSize: 11 }}>{fmtD(inv.due_date)}</td>
+                    <td className="r mono" style={{ color: 'var(--red)' }}>{fmtM(inv.total)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      <div className="table-wrap">
+        <div className="table-toolbar"><h3>Recent Invoices</h3></div>
+        <table>
+          <thead><tr><th>Invoice #</th><th>Party</th><th>Date</th><th className="r">Total</th><th>GST</th><th>Status</th></tr></thead>
+          <tbody>
+            {bi.slice(0, 10).map(inv => {
+              const gstMode = inv.is_interstate === false ? 'intra' : 'inter';
+              return (
+                <tr key={inv.id}>
+                  <td className="mono" style={{ color: 'var(--accent)' }}>{inv.invoice_number}</td>
+                  <td style={{ fontWeight: 500 }}>{parties.find(p => p.id === inv.party_id)?.name || '—'}</td>
+                  <td className="mono" style={{ fontSize: 11 }}>{fmtD(inv.issue_date)}</td>
+                  <td className="r mono">{fmtM(inv.total)}</td>
+                  <td><span className={`gst-chip ${gstMode === 'intra' ? 'cgst' : 'igst'}`} style={{ fontSize: 9 }}>{gstMode === 'intra' ? 'C+S GST' : 'IGST'}</span></td>
+                  <td><Badge status={inv.status} /></td>
+                </tr>
+              );
+            })}
+            {bi.length === 0 && <tr><td colSpan={6}><EmptyState icon="📄" message="No invoices yet" sub='Go to Sales → Invoices to create your first invoice' /></td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+}
+
+// ─── LAZY DATA ────────────────────────────────────────────────────────────────
+// The big tables are only fetched the first time a screen that needs them opens
+// (then kept fresh by every refresh). Everything else loads up front via loadCore().
+//   journal      -> journal entries + lines
+//   bankTxns     -> bank transactions
+//   invoiceItems -> invoice line items
+const VIEW_NEEDS = {
+  expenses: ['journal'], payments: ['journal'],
+  bank: ['bankTxns'],
+  journal: ['journal'], analysis: ['journal'], ledger: ['journal'], trial: ['journal'],
+  balance: ['journal'], pl: ['journal'],
+  cashflow: ['journal', 'bankTxns'], reconcile: ['journal', 'bankTxns'],
+  jhealth: ['journal', 'bankTxns'], bulkimport: ['journal', 'bankTxns'],
+  gstr1: ['invoiceItems'],
+};
+
+// ─── SIDEBAR COLLAPSE ─────────────────────────────────────────────────────────
+// Must match the max-width of the media query in CSS (lib/constants.js) where the
+// sidebar turns into the slide-in mobile drawer. Below this width the ☰ button opens
+// the drawer; above it, the button hides/shows the sidebar and gives content full width.
+const MOBILE_BREAKPOINT = 900;
+
+const SIDEBAR_CSS = `
+.hamburger-btn { display: inline-flex !important; align-items: center; justify-content: center; cursor: pointer; }
+.app .main, .app .content { min-width: 0; max-width: 100%; }
+
+/* ── Tables: never clip, whatever the data size ───────────────────────────────
+   The table grows to the width its content needs (width: max-content) but is never
+   narrower than its card (min-width: 100%); the card scrolls sideways when the table
+   is wider. Applies to every .table-wrap in the app. */
+.table-wrap { overflow-x: auto !important; max-width: 100%; }
+.table-wrap > table, .table-wrap table { width: max-content; min-width: 100%; }
+.table-wrap td.r, .table-wrap th.r { white-space: nowrap; }
+
+/* ── Frozen columns: add className="freeze-3" to a table to pin its first 3 columns
+   (checkbox · invoice # · party). Widths are fixed so the left offsets line up. */
+.freeze-3 :is(thead, tbody) tr > :nth-child(-n+3) { position: sticky; z-index: 2; background: var(--bg2); }
+.freeze-3 thead tr > :nth-child(-n+3) { z-index: 3; }
+.freeze-3 :is(thead, tbody) tr > :nth-child(1) { left: 0;     width: 44px;  min-width: 44px;  max-width: 44px; }
+.freeze-3 :is(thead, tbody) tr > :nth-child(2) { left: 44px;  width: 120px; min-width: 120px; max-width: 120px; }
+.freeze-3 :is(thead, tbody) tr > :nth-child(3) { left: 164px; width: 190px; min-width: 190px; max-width: 190px;
+  box-shadow: 8px 0 8px -6px rgba(0,0,0,.55); }
+.freeze-3 tfoot tr > :first-child { position: sticky; left: 0; z-index: 2; background: var(--bg3);
+  box-shadow: 8px 0 8px -6px rgba(0,0,0,.55); }
+.app.sidebar-hidden { grid-template-columns: minmax(0, 1fr) !important; }
+.app.sidebar-hidden .sidebar:not(.open) { display: none !important; }
+.app.sidebar-hidden .main { margin-left: 0 !important; width: 100% !important; max-width: 100% !important; }
+`;
+
+// ─── ROOT APP ─────────────────────────────────────────────────────────────────
+export default function App() {
+  const [authed, setAuthed] = useState(() => localStorage.getItem('np_auth') === 'true');
+  const [client, setClient] = useState(null);
+  const [view, setView] = useState('dashboard');
+  const [activeBiz, setActiveBiz] = useState('');
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [sidebarHidden, setSidebarHidden] = useState(() => {
+    try { return localStorage.getItem('np_sidebar_hidden') === 'true'; } catch (_) { return false; }
+  });
+
+  function toggleNav() {
+    if (window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT}px)`).matches) {
+      setMobileNavOpen(o => !o);
+    } else {
+      setSidebarHidden(h => {
+        const next = !h;
+        try { localStorage.setItem('np_sidebar_hidden', String(next)); } catch (_) {}
+        return next;
+      });
+    }
+  }
+  const [data, setData] = useState({
+    businesses: [], invoices: [], parties: [], expenses: [],
+    payments: [], accounts: [], journalEntries: [], journalLines: [],
+    creditNotes: [], debitNotes: [], bankAccounts: [], bankTransactions: [], items: [], challans: [],
+    invoiceItems: [],
+  });
+  const [coreLoading, setCoreLoading] = useState(false);   // first load only — blanks the screen
+  const [refreshing, setRefreshing] = useState(false);     // later reloads — screen stays up
+  const [heavyReady, setHeavyReady] = useState({});
+  const heavyRequested = useRef({});
+  const coreLoaded = useRef(false);
+
+  // Auto-connect Supabase from env vars
+  useEffect(() => {
+    const url = import.meta.env.VITE_SUPABASE_URL || localStorage.getItem('sb_url');
+    const key = import.meta.env.VITE_SUPABASE_ANON_KEY || localStorage.getItem('sb_key');
+    if (url && key) {
+      const c = createClient(url, key, { db: { schema: 'accounts_erp' } });
+      initSupabase(c);
+      setClient(c);
+      c.auth.getSession().then(({ data }) => {
+        if (data?.session) {
+          localStorage.setItem('np_auth', 'true');
+          setAuthed(true);
+        }
+      }).catch(() => {});
+      const { data: listener } = c.auth.onAuthStateChange((_event, session) => {
+        if (session) { localStorage.setItem('np_auth', 'true'); setAuthed(true); }
+      });
+      return () => listener?.subscription?.unsubscribe();
+    }
+  }, []);
+
+  const loadGroup = useCallback(async (g) => {
+    const part = await loadHeavy(g);
+    setData(d => ({ ...d, ...part }));
+    setHeavyReady(r => ({ ...r, [g]: true }));
+  }, []);
+
+  const ensureGroups = useCallback((groups) => {
+    groups.forEach(g => {
+      if (heavyRequested.current[g]) return;
+      heavyRequested.current[g] = loadGroup(g).catch(e => {
+        console.error('Load error:', g, e);
+        delete heavyRequested.current[g];
+      });
+    });
+  }, [loadGroup]);
+
+  // Reload = refetch the core tables plus any heavy group already opened. Only the very
+  // first load replaces the screen with a spinner; after that the current screen stays
+  // mounted and simply updates when the data lands, so saving something doesn't blank the page.
+  const reload = useCallback(async () => {
+    if (!client) return;
+    const first = !coreLoaded.current;
+    if (first) setCoreLoading(true); else setRefreshing(true);
+    try {
+      const [core] = await Promise.all([
+        loadCore(),
+        ...Object.keys(heavyRequested.current).map(g => loadGroup(g)),
+      ]);
+      setData(d => ({ ...d, ...core }));
+      coreLoaded.current = true;
+    } catch (e) { console.error('Load error:', e); }
+    if (first) setCoreLoading(false); else setRefreshing(false);
+  }, [client, loadGroup]);
+
+  useEffect(() => { if (client && authed) reload(); }, [client, authed, reload]);
+
+  const viewNeeds = VIEW_NEEDS[view] || [];
+  useEffect(() => { if (client && authed && viewNeeds.length) ensureGroups(viewNeeds); }, [view, client, authed]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function handleLogin() { setAuthed(true); }
+
+  async function handleLogout() {
+    try { await client?.auth?.signOut(); } catch (_) {}
+    localStorage.removeItem('np_auth');
+    setAuthed(false);
+  }
+
+  if (!authed) return <><style>{FONTS}{CSS}</style><LoginScreen onLogin={handleLogin} /></>;
+
+  const { businesses, invoices, parties, expenses, payments,
+    accounts, journalEntries, journalLines, creditNotes, debitNotes,
+    bankAccounts, bankTransactions, items, challans, invoiceItems } = data;
+
+  // true while the first load runs, or while this screen's big tables are still being fetched
+  const loading = coreLoading || !viewNeeds.every(g => heavyReady[g]);
+
+  const cp = { businesses, activeBiz, reload };
+
+  return (
+    <>
+      <style>{FONTS}{CSS}{SIDEBAR_CSS}</style>
+      <div className={`app${sidebarHidden ? ' sidebar-hidden' : ''}`}>
+        {mobileNavOpen && <div className="nav-overlay" onClick={() => setMobileNavOpen(false)} />}
+        <aside className={`sidebar${mobileNavOpen ? ' open' : ''}`}>
+          <div className="sidebar-logo">
+            <h1>Accounts</h1>
+            <p>{businesses.find(b => b.id === activeBiz)?.name || 'All Businesses'}</p>
+          </div>
+          <div className="sidebar-biz">
+            <label>Business</label>
+            <select className="biz-select" value={activeBiz} onChange={e => setActiveBiz(e.target.value)}>
+              <option value="">All Businesses</option>
+              {businesses.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+            </select>
+          </div>
+          <nav className="nav">
+            {NAV.filter(n => !n.group).map(n => (
+              <button key={n.id} className={`nav-item${view === n.id ? ' active' : ''}`} onClick={() => { setView(n.id); setMobileNavOpen(false); }}>
+                <span className="icon">{n.icon}</span>{n.label}
+              </button>
+            ))}
+            {GROUPS.map(grp => (
+              <div key={grp}>
+                <div className="nav-label">{grp}</div>
+                {NAV.filter(n => n.group === grp).map(n => (
+                  <button key={n.id} className={`nav-item${view === n.id ? ' active' : ''}`} onClick={() => { setView(n.id); setMobileNavOpen(false); }}>
+                    <span className="icon">{n.icon}</span>{n.label}
+                  </button>
+                ))}
+              </div>
+            ))}
+          </nav>
+          <div className="sidebar-foot">
+            <button className="btn btn-ghost btn-sm" style={{ width: '100%', fontSize: 11, color: 'var(--text4)' }}
+              onClick={handleLogout}>
+              ⏏ Logout
+            </button>
+          </div>
+        </aside>
+
+        <div className="main">
+          <div className="topbar">
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+              <button className="hamburger-btn" onClick={toggleNav} aria-label="Toggle menu" title={sidebarHidden ? 'Show menu' : 'Hide menu'}>☰</button>
+              <h2>{TITLES[view] || view}</h2>
+            </div>
+            <div className="topbar-right">
+              <button className="btn btn-ghost btn-sm" onClick={reload} disabled={loading || refreshing}>
+                {loading || refreshing ? 'Loading…' : '↻ Refresh'}
+              </button>
+            </div>
+          </div>
+          <div className="content">
+            {loading && <div className="loading">Loading data…</div>}
+
+            {!loading && view === 'dashboard' && (
+              <Dashboard invoices={invoices} expenses={expenses} payments={payments}
+                businesses={businesses} parties={parties} activeBiz={activeBiz} setView={setView} />
+            )}
+            {!loading && (view === 'invoices' || view === 'proformas') && (
+              <InvoicesView invoices={invoices} parties={parties} creditNotes={creditNotes}
+                payments={payments} isProforma={view === 'proformas'} catalogItems={items} {...cp} />
+            )}
+            {!loading && view === 'challans' && (
+              <DeliveryChallansView challans={challans} parties={parties} invoices={invoices} {...cp} />
+            )}
+            {!loading && view === 'parties' && <PartiesView parties={parties} {...cp} />}
+            {!loading && view === 'items' && <ItemsView items={items} {...cp} />}
+            {!loading && view === 'purchasebills' && (
+              <InvoicesView invoices={invoices} parties={parties} creditNotes={creditNotes}
+                payments={payments} purchaseMode={true} catalogItems={items} {...cp} />
+            )}
+            {!loading && view === 'expenses' && <ExpensesView expenses={expenses} parties={parties} accounts={accounts} journalEntries={journalEntries} journalLines={journalLines} invoices={invoices} {...cp} />}
+            {!loading && view === 'payments' && (
+              <PaymentsView payments={payments} invoices={invoices} parties={parties} journalEntries={journalEntries} journalLines={journalLines} {...cp} />
+            )}
+            {!loading && view === 'bank' && (
+              <BankView bankAccounts={bankAccounts} bankTransactions={bankTransactions} payments={payments} parties={parties} invoices={invoices} accounts={accounts} {...cp} />
+            )}
+            {!loading && view === 'statement' && (
+              <PartyStatementView parties={parties} invoices={invoices} payments={payments} creditNotes={creditNotes} debitNotes={debitNotes} businesses={businesses} activeBiz={activeBiz} />
+            )}
+            {!loading && view === 'paylist' && (
+              <PaymentListView payments={payments} parties={parties} businesses={businesses} activeBiz={activeBiz} />
+            )}
+            {!loading && view === 'tds' && (
+              <TDSView invoices={invoices} payments={payments} parties={parties} businesses={businesses} activeBiz={activeBiz} />
+            )}
+            {!loading && view === 'export' && (
+              <ExportView invoices={invoices} expenses={expenses} payments={payments} parties={parties} businesses={businesses} activeBiz={activeBiz} />
+            )}
+            {!loading && view === 'accounts' && <ChartOfAccountsView accounts={accounts} {...cp} />}
+            {!loading && view === 'journal' && (
+              <JournalView journalEntries={journalEntries} journalLines={journalLines} accounts={accounts}
+                expenses={expenses} payments={payments} {...cp} />
+            )}
+            {!loading && view === 'analysis' && (
+              <AnalysisView journalEntries={journalEntries} journalLines={journalLines} accounts={accounts}
+                parties={parties} invoices={invoices} payments={payments} {...cp} />
+            )}
+            {!loading && view === 'ledger' && (
+              <GeneralLedgerView accounts={accounts} journalLines={journalLines} journalEntries={journalEntries} {...cp} />
+            )}
+            {!loading && view === 'trial' && (
+              <TrialBalanceView accounts={accounts} journalLines={journalLines} journalEntries={journalEntries}
+                invoices={invoices} payments={payments} expenses={expenses} creditNotes={creditNotes} debitNotes={debitNotes} {...cp} />
+            )}
+            {!loading && view === 'balance' && (
+              <BalanceSheetView accounts={accounts} journalLines={journalLines} journalEntries={journalEntries}
+                invoices={invoices} payments={payments} expenses={expenses} {...cp} />
+            )}
+            {!loading && view === 'gstr1' && (
+              <GSTR1View invoices={invoices} parties={parties} businesses={businesses}
+                activeBiz={activeBiz} invoiceItems={invoiceItems} payments={payments} creditNotes={creditNotes} debitNotes={debitNotes} />
+            )}
+            {!loading && view === 'ar' && (
+              <ARLedgerView invoices={invoices} payments={payments} creditNotes={creditNotes} debitNotes={debitNotes}
+                parties={parties} businesses={businesses} activeBiz={activeBiz} />
+            )}
+            {!loading && view === 'ap' && (
+              <APLedgerView invoices={invoices} expenses={expenses} payments={payments}
+                parties={parties} businesses={businesses} activeBiz={activeBiz} />
+            )}
+            {!loading && view === 'pl' && (
+              <PLView accounts={accounts} journalLines={journalLines} journalEntries={journalEntries}
+                invoices={invoices} expenses={expenses} payments={payments}
+                businesses={businesses} activeBiz={activeBiz} />
+            )}
+            {!loading && view === 'cashflow' && (
+              <CashFlowView journalEntries={journalEntries} journalLines={journalLines}
+                accounts={accounts} bankTransactions={bankTransactions} activeBiz={activeBiz} />
+            )}
+            {!loading && view === 'reconcile' && (
+              <ReconciliationView
+                bankAccounts={bankAccounts} bankTransactions={bankTransactions}
+                journalEntries={journalEntries} journalLines={journalLines}
+                payments={payments} invoices={invoices} parties={parties}
+                accounts={accounts} activeBiz={activeBiz} reload={reload} />
+            )}
+            {!loading && view === 'jhealth' && (
+              <JournalHealthView
+                expenses={expenses} payments={payments} bankTransactions={bankTransactions}
+                journalEntries={journalEntries} journalLines={journalLines} invoices={invoices} accounts={accounts}
+                bankAccounts={bankAccounts} {...cp} />
+            )}
+            {!loading && view === 'bulkimport' && (
+              <BulkImportView
+                bankAccounts={bankAccounts} bankTransactions={bankTransactions} accounts={accounts} invoices={invoices}
+                payments={payments} parties={parties} journalEntries={journalEntries} journalLines={journalLines}
+                activeBiz={activeBiz} reload={reload} />
+            )}
+            {!loading && view === 'gstr3b' && <GSTR3BView activeBiz={activeBiz} businesses={businesses} invoices={invoices} creditNotes={creditNotes} reload={reload} />}
+            {!loading && view === 'audit' && <AuditTrailView activeBiz={activeBiz} />}
+            {!loading && view === 'kpis' && <KPIDashboard activeBiz={activeBiz} invoices={invoices} expenses={expenses} payments={payments} parties={parties} />}
+            {!loading && view === 'businesses' && <BusinessesView businesses={businesses} reload={reload} />}
+            {!loading && view === 'sqlsetup' && <SqlSetupView invoices={invoices} payments={payments} />}
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
