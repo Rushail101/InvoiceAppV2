@@ -54,7 +54,7 @@ async function fetchAll(table, { order, select } = {}) {
 //   loadHeavy() — the big tables (journal lines, bank transactions, invoice line items),
 //                 fetched only the first time a screen that needs them is opened.
 export async function loadCore() {
-  const [biz, inv, par, exp, pay, accs, banks, itms, dcs] = await Promise.all([
+  const [biz, inv, par, exp, pay, accs, banks, itms, dcs, cns, dns] = await Promise.all([
     fetchAll('businesses', { order: { column: 'name', ascending: true } }),
     fetchAll('invoices', { order: { column: 'created_at', ascending: false } }),
     fetchAll('parties', { order: { column: 'name', ascending: true } }),
@@ -64,10 +64,13 @@ export async function loadCore() {
     fetchAll('bank_accounts', { order: { column: 'name', ascending: true } }),
     fetchAll('items', { order: { column: 'name', ascending: true } }),
     fetchAll('delivery_challans', { order: { column: 'challan_date', ascending: false } }),
+    fetchAll('credit_notes', { order: [{ column: 'cn_date', ascending: false }, { column: 'created_at', ascending: false }] }),
+    fetchAll('debit_notes', { order: [{ column: 'dn_date', ascending: false }, { column: 'created_at', ascending: false }] }),
   ]);
   return {
     businesses: biz, invoices: inv, parties: par, expenses: exp, payments: pay,
     accounts: accs, bankAccounts: banks, items: itms, challans: dcs,
+    creditNotes: cns, debitNotes: dns,
   };
 }
 

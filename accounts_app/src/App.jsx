@@ -14,6 +14,8 @@ import { JournalHealthView } from './views/JournalHealth.jsx';
 import { GSTR1View } from './views/GSTR1.jsx';
 import { ItemsView } from './views/Items.jsx';
 import { DeliveryChallansView } from './views/DeliveryChallans.jsx';
+import { CreditNotesView } from './views/CreditNotes.jsx';
+import { DebitNotesView } from './views/DebitNotes.jsx';
 import { GSTR3BView, AuditTrailView, KPIDashboard } from './views/EnterpriseViews.jsx';
 import { Badge, ModalShell, FG, EmptyState } from './components/ui.jsx';
 import SCHEMA_SQL from '../sql/schema.sql?raw';
@@ -24,6 +26,8 @@ const NAV = [
   { id: 'dashboard',   label: 'Dashboard',        icon: '◈',  group: null },
   { id: 'invoices',    label: 'Invoices',          icon: '📄',  group: 'Sales' },
   { id: 'proformas',   label: 'Proforma',          icon: '📋',  group: 'Sales' },
+  { id: 'creditnotes', label: 'Credit Notes',      icon: '↩',   group: 'Sales' },
+  { id: 'debitnotes',  label: 'Debit Notes',       icon: '↗',   group: 'Sales' },
   { id: 'challans',    label: 'Delivery Challans', icon: '🚚',  group: 'Sales' },
   { id: 'parties',     label: 'Parties',           icon: '👥',  group: 'Sales' },
   { id: 'items',       label: 'Item Master',       icon: '📦',  group: 'Sales' },
@@ -793,6 +797,12 @@ export default function App() {
             {!loading && (view === 'invoices' || view === 'proformas') && (
               <InvoicesView invoices={invoices} parties={parties} creditNotes={creditNotes}
                 payments={payments} isProforma={view === 'proformas'} catalogItems={items} {...cp} />
+            )}
+            {!loading && view === 'creditnotes' && (
+              <CreditNotesView creditNotes={creditNotes} invoices={invoices} parties={parties} {...cp} />
+            )}
+            {!loading && view === 'debitnotes' && (
+              <DebitNotesView debitNotes={debitNotes} invoices={invoices} businesses={businesses} parties={parties} activeBiz={activeBiz} reload={reload} />
             )}
             {!loading && view === 'challans' && (
               <DeliveryChallansView challans={challans} parties={parties} invoices={invoices} {...cp} />
