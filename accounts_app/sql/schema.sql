@@ -455,3 +455,21 @@ CREATE INDEX IF NOT EXISTS idx_invoices_purchase ON invoices(business_id, type, 
 CREATE INDEX IF NOT EXISTS idx_invoices_journal_posted ON invoices(journal_posted);
 
 -- End Phase 3
+
+-- ── Bank credit <-> payment links (also in migrations/002_bank_txn_links.sql) ──
+CREATE TABLE IF NOT EXISTS bank_txn_links (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  bank_txn_id uuid NOT NULL REFERENCES bank_transactions(id) ON DELETE CASCADE,
+  payment_id  uuid NOT NULL REFERENCES payments(id) ON DELETE CASCADE,
+  amount      numeric(12,2) NOT NULL CHECK (amount > 0),
+  source      text NOT NULL DEFAULT 'manual',   -- 'auto' | 'manual' | 'import' | 'created'
+  created_at  timestamptz DEFAULT now(),
+  UNIQUE (bank_txn_id, payment_id)
+);
+CREATE INDEX IF NOT EXISTS idx_btl_bank_txn ON bank_txn_links(bank_txn_id);
+CREATE INDEX IF NOT EXISTS idx_btl_payment  ON bank_txn_links(payment_id);
+
+-- Credits that are not customer receipts (loan, capital introduced, refund, interest...) can be
+-- dismissed so they stop showing up as "needs linking".
+ALTER TABLE bank_transactions ADD COLUMN IF NOT EXISTS link_dismissed boolean DEFAULT false;
+ALTER TABLE bank_transactions ADD COLUMN IF NOT EXISTS link_note text;

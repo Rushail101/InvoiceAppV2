@@ -11,11 +11,12 @@ import { CashFlowView } from './views/CashFlow.jsx';
 import { ChartOfAccountsView, JournalView, GeneralLedgerView, TrialBalanceView, BalanceSheetView, PLView } from './views/Accounting.jsx';
 import { AnalysisView } from './views/Analysis.jsx';
 import { JournalHealthView } from './views/JournalHealth.jsx';
+import { BankLinksView } from './views/BankLinks.jsx';
+import { CreditNotesView } from './views/CreditNotes.jsx';
+import { DebitNotesView } from './views/DebitNotes.jsx';
 import { GSTR1View } from './views/GSTR1.jsx';
 import { ItemsView } from './views/Items.jsx';
 import { DeliveryChallansView } from './views/DeliveryChallans.jsx';
-import { CreditNotesView } from './views/CreditNotes.jsx';
-import { DebitNotesView } from './views/DebitNotes.jsx';
 import { GSTR3BView, AuditTrailView, KPIDashboard } from './views/EnterpriseViews.jsx';
 import { Badge, ModalShell, FG, EmptyState } from './components/ui.jsx';
 import SCHEMA_SQL from '../sql/schema.sql?raw';
@@ -25,9 +26,9 @@ import SCHEMA_SQL from '../sql/schema.sql?raw';
 const NAV = [
   { id: 'dashboard',   label: 'Dashboard',        icon: '◈',  group: null },
   { id: 'invoices',    label: 'Invoices',          icon: '📄',  group: 'Sales' },
-  { id: 'proformas',   label: 'Proforma',          icon: '📋',  group: 'Sales' },
   { id: 'creditnotes', label: 'Credit Notes',      icon: '↩',   group: 'Sales' },
   { id: 'debitnotes',  label: 'Debit Notes',       icon: '↗',   group: 'Sales' },
+  { id: 'proformas',   label: 'Proforma',          icon: '📋',  group: 'Sales' },
   { id: 'challans',    label: 'Delivery Challans', icon: '🚚',  group: 'Sales' },
   { id: 'parties',     label: 'Parties',           icon: '👥',  group: 'Sales' },
   { id: 'items',       label: 'Item Master',       icon: '📦',  group: 'Sales' },
@@ -35,6 +36,7 @@ const NAV = [
   { id: 'expenses',    label: 'Expenses',          icon: '💸',  group: 'Purchases' },
   { id: 'payments',    label: 'Payments',          icon: '💳',  group: 'Purchases' },
   { id: 'bank',        label: 'Bank',              icon: '🏦',  group: 'Purchases' },
+  { id: 'bankreceipts', label: 'Bank Receipts',    icon: '🔗',  group: 'Purchases' },
   { id: 'ar',          label: 'AR Ledger',         icon: '🟢',  group: 'Ledgers' },
   { id: 'ap',          label: 'AP Ledger',         icon: '🔴',  group: 'Ledgers' },
   { id: 'statement',   label: 'Party Statement',   icon: '📋',  group: 'Ledgers' },
@@ -579,11 +581,12 @@ function Dashboard({ invoices, expenses, payments, businesses, parties, activeBi
 //   invoiceItems -> invoice line items
 const VIEW_NEEDS = {
   expenses: ['journal'], payments: ['journal'],
-  bank: ['bankTxns'],
+  bank: ['bankTxns', 'bankLinks'],
+  bankreceipts: ['bankTxns', 'bankLinks', 'journal'],
   journal: ['journal'], analysis: ['journal'], ledger: ['journal'], trial: ['journal'],
   balance: ['journal'], pl: ['journal'],
   cashflow: ['journal', 'bankTxns'], reconcile: ['journal', 'bankTxns'],
-  jhealth: ['journal', 'bankTxns'], bulkimport: ['journal', 'bankTxns'],
+  jhealth: ['journal', 'bankTxns', 'bankLinks'], bulkimport: ['journal', 'bankTxns', 'bankLinks'],
   gstr1: ['invoiceItems'],
 };
 
@@ -646,7 +649,7 @@ export default function App() {
     businesses: [], invoices: [], parties: [], expenses: [],
     payments: [], accounts: [], journalEntries: [], journalLines: [],
     creditNotes: [], debitNotes: [], bankAccounts: [], bankTransactions: [], items: [], challans: [],
-    invoiceItems: [],
+    invoiceItems: [], bankLinks: [], bankLinksReady: true, bankLinksError: '',
   });
   const [coreLoading, setCoreLoading] = useState(false);   // first load only — blanks the screen
   const [refreshing, setRefreshing] = useState(false);     // later reloads — screen stays up
@@ -726,7 +729,7 @@ export default function App() {
 
   const { businesses, invoices, parties, expenses, payments,
     accounts, journalEntries, journalLines, creditNotes, debitNotes,
-    bankAccounts, bankTransactions, items, challans, invoiceItems } = data;
+    bankAccounts, bankTransactions, items, challans, invoiceItems, bankLinks, bankLinksReady, bankLinksError } = data;
 
   // true while the first load runs, or while this screen's big tables are still being fetched
   const loading = coreLoading || !viewNeeds.every(g => heavyReady[g]);
@@ -818,7 +821,12 @@ export default function App() {
               <PaymentsView payments={payments} invoices={invoices} parties={parties} journalEntries={journalEntries} journalLines={journalLines} {...cp} />
             )}
             {!loading && view === 'bank' && (
-              <BankView bankAccounts={bankAccounts} bankTransactions={bankTransactions} payments={payments} parties={parties} invoices={invoices} accounts={accounts} {...cp} />
+              <BankView bankAccounts={bankAccounts} bankTransactions={bankTransactions} payments={payments} parties={parties} invoices={invoices} accounts={accounts} bankLinks={bankLinks} {...cp} />
+            )}
+            {!loading && view === 'bankreceipts' && (
+              <BankLinksView bankTransactions={bankTransactions} bankAccounts={bankAccounts} payments={payments} invoices={invoices}
+                parties={parties} journalEntries={journalEntries} bankLinks={bankLinks} bankLinksReady={bankLinksReady}
+                bankLinksError={bankLinksError} activeBiz={activeBiz} reload={reload} />
             )}
             {!loading && view === 'statement' && (
               <PartyStatementView parties={parties} invoices={invoices} payments={payments} creditNotes={creditNotes} debitNotes={debitNotes} businesses={businesses} activeBiz={activeBiz} />
@@ -884,13 +892,13 @@ export default function App() {
               <JournalHealthView
                 expenses={expenses} payments={payments} bankTransactions={bankTransactions}
                 journalEntries={journalEntries} journalLines={journalLines} invoices={invoices} accounts={accounts}
-                bankAccounts={bankAccounts} {...cp} />
+                bankAccounts={bankAccounts} bankLinks={bankLinks} {...cp} />
             )}
             {!loading && view === 'bulkimport' && (
               <BulkImportView
                 bankAccounts={bankAccounts} bankTransactions={bankTransactions} accounts={accounts} invoices={invoices}
                 payments={payments} parties={parties} journalEntries={journalEntries} journalLines={journalLines}
-                activeBiz={activeBiz} reload={reload} />
+                bankLinksReady={bankLinksReady} activeBiz={activeBiz} reload={reload} />
             )}
             {!loading && view === 'gstr3b' && <GSTR3BView activeBiz={activeBiz} businesses={businesses} invoices={invoices} creditNotes={creditNotes} reload={reload} />}
             {!loading && view === 'audit' && <AuditTrailView activeBiz={activeBiz} />}

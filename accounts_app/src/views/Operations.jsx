@@ -448,7 +448,7 @@ function ExpenseModal({ onClose, onSave, businesses, parties, activeBiz, expense
 }
 
 // ─── BANK RECONCILIATION ─────────────────────────────────────────────────────
-export function BankView({ bankAccounts, bankTransactions, businesses, parties, invoices, payments, accounts, activeBiz, reload }) {
+export function BankView({ bankAccounts, bankTransactions, businesses, parties, invoices, payments, accounts, bankLinks = [], activeBiz, reload }) {
   const [selectedBank, setSelectedBank] = useState('');
   const [showAddBank, setShowAddBank] = useState(false);
   const [showAddTxn, setShowAddTxn] = useState(false);
@@ -481,6 +481,9 @@ export function BankView({ bankAccounts, bankTransactions, businesses, parties, 
   }
   async function delTxn(id) { if (!confirm('Delete?')) return; await deleteBankTxn(id); reload(); }
 
+  const linkedAmt = {};
+  bankLinks.forEach(l => { linkedAmt[l.bank_txn_id] = (linkedAmt[l.bank_txn_id] || 0) + Number(l.amount || 0); });
+
   return (
     <div>
       <div className="filter-bar">
@@ -511,7 +514,7 @@ export function BankView({ bankAccounts, bankTransactions, businesses, parties, 
           </div>
           <div className="table-wrap">
             <table>
-              <thead><tr><th>Date</th><th>Description</th><th>Reference</th><th>Type</th><th className="r">Amount</th><th className="r">Balance</th><th></th></tr></thead>
+              <thead><tr><th>Date</th><th>Description</th><th>Reference</th><th>Type</th><th className="r">Amount</th><th className="r">Balance</th><th title="Credits tied to an invoice / proforma payment (Bank Receipts)">Linked</th><th></th></tr></thead>
               <tbody>
                 {(() => {
                   let runBal = selBank.opening_balance || 0;
@@ -525,6 +528,11 @@ export function BankView({ bankAccounts, bankTransactions, businesses, parties, 
                         <td><span className={`tag`} style={{ color: t.type === 'credit' ? 'var(--green)' : 'var(--red)', borderColor: t.type === 'credit' ? 'var(--green)' : 'var(--red)' }}>{t.type}</span></td>
                         <td className="r mono" style={{ color: t.type === 'credit' ? 'var(--green)' : 'var(--red)' }}>{t.type === 'credit' ? '+' : '-'}{fmt(t.amount)}</td>
                         <td className="r mono" style={{ fontWeight: 600, color: runBal >= 0 ? 'var(--text)' : 'var(--red)' }}>{fmt(runBal)}</td>
+                        <td style={{ fontSize: 11 }}>
+                          {t.type !== 'credit' ? '' : t.link_dismissed ? <span style={{ color: 'var(--text3)' }}>not a receipt</span>
+                            : linkedAmt[t.id] > 0 ? <span style={{ color: linkedAmt[t.id] >= Number(t.amount) - 0.01 ? '#4ade80' : '#fbbf24' }}>{linkedAmt[t.id] >= Number(t.amount) - 0.01 ? '🔗 linked' : '🔗 part'}</span>
+                            : <span style={{ color: 'var(--text3)' }}>—</span>}
+                        </td>
                         <td style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
                           {t.reconciled && <span title="Imported from bank statement" style={{ color: '#4ade80', fontSize: 14 }}>●</span>}
                           <button className="btn btn-danger btn-sm" onClick={() => delTxn(t.id)}>Del</button>
@@ -533,7 +541,7 @@ export function BankView({ bankAccounts, bankTransactions, businesses, parties, 
                     );
                   });
                 })()}
-                {bankTxns.length === 0 && <tr><td colSpan={7}><EmptyState icon="🏦" message="No transactions" /></td></tr>}
+                {bankTxns.length === 0 && <tr><td colSpan={8}><EmptyState icon="🏦" message="No transactions" /></td></tr>}
               </tbody>
             </table>
           </div>

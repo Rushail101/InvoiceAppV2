@@ -64,8 +64,8 @@ export async function loadCore() {
     fetchAll('bank_accounts', { order: { column: 'name', ascending: true } }),
     fetchAll('items', { order: { column: 'name', ascending: true } }),
     fetchAll('delivery_challans', { order: { column: 'challan_date', ascending: false } }),
-    fetchAll('credit_notes', { order: [{ column: 'cn_date', ascending: false }, { column: 'created_at', ascending: false }] }),
-    fetchAll('debit_notes', { order: [{ column: 'dn_date', ascending: false }, { column: 'created_at', ascending: false }] }),
+    fetchAll('credit_notes', { order: { column: 'created_at', ascending: false } }),
+    fetchAll('debit_notes', { order: { column: 'created_at', ascending: false } }),
   ]);
   return {
     businesses: biz, invoices: inv, parties: par, expenses: exp, payments: pay,
@@ -87,6 +87,19 @@ const HEAVY_LOADERS = {
     bankTransactions: await fetchAll('bank_transactions', { order: { column: 'txn_date', ascending: false } }),
   }),
   invoiceItems: async () => ({ invoiceItems: await fetchAll('invoice_items') }),
+  // bank_txn_links comes from sql/migrations/002_bank_txn_links.sql. Until that has been run the
+  // app must keep working, so a missing table is reported as "not ready" instead of throwing.
+  bankLinks: async () => {
+    try {
+      return { bankLinks: await fetchAll('bank_txn_links'), bankLinksReady: true, bankLinksError: '' };
+    } catch (e) {
+      const msg = e?.message || String(e);
+      if (/does not exist|schema cache|could not find the table|relation/i.test(msg)) {
+        return { bankLinks: [], bankLinksReady: false, bankLinksError: msg };
+      }
+      throw e;
+    }
+  },
 };
 export const HEAVY_GROUPS = Object.keys(HEAVY_LOADERS);
 export async function loadHeavy(group) { return HEAVY_LOADERS[group](); }
@@ -405,6 +418,68 @@ export async function savePaymentWithJournal(data) {
 
   const result = await postPaymentJournal(payRow, isPurchase);
   return { id: payRow.id, ...result };
+}
+
+// ── Bank credit <-> payment links ──────────────────────────────────────────────
+// Links only TAG existing records (see sql/migrations/002_bank_txn_links.sql). They never create
+// or change journal entries. The one exception is recordReceiptFromBank below, which creates the
+// payment that was missing — using the same two code paths the app already uses for payments.
+export const AUTO_IMPORT_NOTE = 'Auto-imported from bank statement';
+
+export async function addBankLinks(rows) {
+  if (!rows?.length) return [];
+  const { data, error } = await supabase.from('bank_txn_links').insert(rows).select();
+  if (error) throw error;
+  return data || [];
+}
+export async function deleteBankLink(id) {
+  const { error } = await supabase.from('bank_txn_links').delete().eq('id', id);
+  if (error) throw error;
+}
+export async function dismissBankCredit(id, dismissed, note = null) {
+  const { error } = await supabase.from('bank_transactions')
+    .update({ link_dismissed: !!dismissed, link_note: dismissed ? (note || null) : null }).eq('id', id);
+  if (error) throw new Error(`${error.message} — run sql/migrations/002_bank_txn_links.sql in Supabase first.`);
+}
+
+// A bank credit has no payment recorded yet: create one against the invoice / proforma and link it.
+//   hasJournal = the bank row already has its own journal entry (source 'bank_import').
+//     true  -> payment is saved WITHOUT a journal entry (the bank entry already booked the money;
+//              exactly what the statement import does), and tagged so Journal Health knows.
+//     false -> payment is saved the normal way, with its Dr Bank / Cr Sales Revenue entry.
+// Invoice status: a normal invoice becomes partially_paid / paid. A proforma stays a proforma —
+// converting it to a tax invoice is still done from the Proforma screen.
+export async function recordReceiptFromBank({ txn, invoice, amount, hasJournal, allPayments = [] }) {
+  const amt = Math.round(Number(amount) * 100) / 100;
+  if (!(amt > 0)) throw new Error('Enter an amount greater than zero.');
+  const rec = {
+    invoice_id: invoice.id, business_id: invoice.business_id, party_id: invoice.party_id || null,
+    amount: amt, payment_date: txn.txn_date || txn.date, method: 'Bank Transfer',
+    reference: txn.reference || '',
+    notes: hasJournal ? AUTO_IMPORT_NOTE : 'Linked from bank statement',
+  };
+  let payment;
+  if (hasJournal) {
+    const { data, error } = await supabase.from('payments').insert(rec).select().single();
+    if (error) throw error;
+    payment = data;
+  } else {
+    const res = await savePaymentWithJournal({ ...rec, invoice_type: invoice.type });
+    const { data, error } = await supabase.from('payments').select('*').eq('id', res.id).single();
+    if (error) throw error;
+    payment = data;
+  }
+  let link;
+  try {
+    [link] = await addBankLinks([{ bank_txn_id: txn.id, payment_id: payment.id, amount: amt, source: 'created' }]);
+  } catch (e) {
+    throw new Error(`Payment was recorded but could not be linked (${e.message}). It will show up under payments not in bank — link it there.`);
+  }
+  if (invoice.status !== 'proforma') {
+    const already = allPayments.filter(p => p.invoice_id === invoice.id).reduce((t, p) => t + Number(p.amount), 0);
+    await updateInvoiceStatus(invoice.id, already + amt >= Number(invoice.total) - 0.01 ? 'paid' : 'partially_paid');
+  }
+  return { payment, link };
 }
 
 // Retroactively post a journal entry for a payment that was saved without one

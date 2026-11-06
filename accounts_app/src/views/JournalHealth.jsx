@@ -30,7 +30,7 @@ function reasonText(r) {
 
 export function JournalHealthView({
   expenses, payments, bankTransactions, journalEntries, journalLines = [], invoices, accounts, bankAccounts,
-  businesses, activeBiz, reload,
+  bankLinks = [], businesses, activeBiz, reload,
 }) {
   const [busyId, setBusyId] = useState(null);
   const [bulkBusy, setBulkBusy] = useState(false);
@@ -60,8 +60,11 @@ export function JournalHealthView({
       (activeBiz ? bankAccounts.filter(b => b.business_id === activeBiz) : bankAccounts).map(b => b.id)
     );
     const postedKeys = new Set(journalEntries.map(je => `${je.source}:${je.source_id}`));
-    return bankTransactions.filter(t => bizBankAccountIds.has(t.bank_account_id) && !postedKeys.has(`bank_import:${t.id}`));
-  }, [bankTransactions, bankAccounts, activeBiz, journalEntries]);
+    // A credit linked to a payment (Bank Receipts) is already in the books through that payment's own
+    // journal entry — it intentionally has no bank_import entry, and re-posting one would double-count it.
+    const linkedBankIds = new Set(bankLinks.map(l => l.bank_txn_id));
+    return bankTransactions.filter(t => bizBankAccountIds.has(t.bank_account_id) && !postedKeys.has(`bank_import:${t.id}`) && !linkedBankIds.has(t.id));
+  }, [bankTransactions, bankAccounts, activeBiz, journalEntries, bankLinks]);
 
   const totalOrphans = orphanExpenses.length + orphanPayments.length + orphanBankTxns.length;
   const totalOrphanAmount =

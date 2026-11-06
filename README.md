@@ -10,7 +10,7 @@ All app code lives in [`accounts_app/`](accounts_app/).
 | Area | Screens |
 |---|---|
 | **Sales** | Invoices, Proforma (converts to a tax invoice, keeping the PI number), Credit Notes, Debit Notes, Delivery Challans, Parties, Item Master (per-brand items and prices) |
-| **Purchases** | Purchase Bills, Expenses, Payments, Bank |
+| **Purchases** | Purchase Bills, Expenses, Payments, Bank, Bank Receipts (link bank credits to invoices / proformas) |
 | **Ledgers** | AR Ledger, AP Ledger, Party Statement, Payment List, TDS |
 | **Accounting** | Chart of Accounts, Journal Vouchers, General Ledger, Trial Balance, Balance Sheet, P&L, Cash Flow, Analysis, Reconciliation, Journal Health, Bulk Bank Import |
 | **GST** | GSTR-1 (invoice-date or payment-date mode, B2B / B2C, HSN summary), GSTR-3B review |
@@ -22,7 +22,7 @@ Notes on behaviour:
 - Invoice totals round to the nearest rupee by default, shown as a separate "Rounding Off" line.
 - Invoice PDFs / downloads are named `<doc number>_<client>` (e.g. `PI_26_27_1012_Cayani`).
 - The UPI QR on an invoice is generated in the browser. The UPI ID and amount are not sent to any outside service.
-- Aging, Bulk Payment and Recurring invoices were removed from the app. Credit and Debit Notes are available again under Sales.
+- Aging, Bulk Payment and Recurring invoices were removed from the app.
 
 ## Setup
 
