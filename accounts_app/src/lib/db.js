@@ -139,6 +139,11 @@ export async function deleteItem(id) {
 }
 
 // ── Parties ────────────────────────────────────────────────────────────────────
+export async function saveNewParty(data) {
+  const { data: row, error } = await supabase.from('parties').insert(data).select().single();
+  if (error) throw error;
+  return row;
+}
 export async function saveParty(data, id) {
   if (id) {
     const { error } = await supabase.from('parties').update(data).eq('id', id);
@@ -819,6 +824,60 @@ export async function saveBankTxnHeld(txnData) {
   }).select().single();
   if (error) throw new Error(`${error.message} — run sql/migrations/003_bank_pending_link.sql in Supabase first.`);
   return { txnId: data.id };
+}
+
+// Import a parsed statement as held rows (no journal entries). Duplicates must be filtered by the caller.
+export async function saveBankTxnsHeldBulk(rows, bankAccountId) {
+  if (!rows.length) return 0;
+  const payload = rows.map(t => ({
+    bank_account_id: bankAccountId, txn_date: t.date, description: t.description, reference: t.reference || '',
+    type: t.type, amount: t.amount, reconciled: true, party_id: null, journal_posted: false, pending_link: true,
+  }));
+  let n = 0;
+  for (let i = 0; i < payload.length; i += 200) {
+    const { data, error } = await supabase.from('bank_transactions').insert(payload.slice(i, i + 200)).select('id');
+    if (error) throw new Error(`${error.message}${n ? ` (${n} rows were saved before this)` : ''} — make sure sql/migrations/003_bank_pending_link.sql has been run.`);
+    n += data.length;
+  }
+  return n;
+}
+
+// Tag bank rows with the client / vendor they belong to (drives the grouping in Bank -> Import & Link).
+export async function setBankTxnParty(ids, partyId) {
+  if (!ids.length) return;
+  const { error } = await supabase.from('bank_transactions').update({ party_id: partyId || null }).in('id', ids);
+  if (error) throw error;
+}
+
+// Post a held row to the books against two accounts you pick (rent, salary, loan, charges…).
+export async function postHeldBankTxn(txn, debitAcct, creditAcct, accounts, bizId) {
+  const res = await postBankTxnJournal(txn, accounts, bizId, { debitAcct, creditAcct, confidence: 'high', method: 'user' });
+  if (!res.skipped) await supabase.from('bank_transactions').update({ pending_link: false }).eq('id', txn.id);
+  return res;
+}
+
+// Self-contained loader for the "Link bank payment" button on the Invoices page, so Invoices itself
+// doesn't have to load every bank row up front. Returns bank rows of one direction for the given
+// business, their links, and the ids of bank rows that already have their own journal entry.
+export async function loadLinkableBankData(businessId, type) {
+  const { data: accts, error: aErr } = await supabase.from('bank_accounts').select('id').eq('business_id', businessId);
+  if (aErr) throw aErr;
+  const ids = (accts || []).map(a => a.id);
+  if (!ids.length) return { txns: [], links: [], journalIds: new Set() };
+  const pageAll = async (build) => {
+    let all = [];
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await build().order('id').range(from, from + 999);
+      if (error) throw error;
+      all = all.concat(data || []);
+      if (!data || data.length < 1000) break;
+    }
+    return all;
+  };
+  const txns = await pageAll(() => supabase.from('bank_transactions').select('*').in('bank_account_id', ids).eq('type', type));
+  const links = await pageAll(() => supabase.from('bank_txn_links').select('*'));
+  const je = await pageAll(() => supabase.from('journal_entries').select('id,source_id').eq('source', 'bank_import'));
+  return { txns, links, journalIds: new Set(je.map(j => j.source_id)) };
 }
 
 // Manual cash deposit into / withdrawal from the bank. Reuses the normal bank

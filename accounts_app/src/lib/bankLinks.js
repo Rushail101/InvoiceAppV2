@@ -268,3 +268,83 @@ export function journalKeys(journalEntries = []) {
 export function isDoubleBooked(txn, payment, keys) {
   return keys.has(`bank_import:${txn.id}`) && keys.has(`payment:${payment.id}`);
 }
+
+// ── grouping by client / vendor (Bank → Import & Link) ───────────────────────
+const NOISE = new Set(['upi','neft','imps','rtgs','mmt','ach','nach','ecs','pos','atm','paid','pay','payment','to','from','by','transfer','trf','ref','inb','bil','bank','icici','hdfc','sbi','axis','kotak','yesb','idfb','utib','cnrb','ibkl','ioba','pnb','cr','dr','credit','debit','received','towards','invoice','inv','cash','chq','cheque']);
+
+// Best-effort payee name out of an ICICI-style narration (UPI/NEFT/IMPS/…).
+export function counterpartyOf(txn) {
+  const desc = String(txn.description || '');
+  const parts = desc.split(/[\/\-|]/).map(x => x.trim()).filter(Boolean);
+  for (const part of parts) {
+    const letters = part.replace(/[^A-Za-z ]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (letters.length < 3) continue;
+    if (/\d/.test(part) && !/\s/.test(part)) continue;                 // reference-like token (ABC123456)
+    const words = letters.split(' ').filter(w => !NOISE.has(w.toLowerCase()));
+    if (!words.length) continue;
+    const name = words.join(' ');
+    if (name.length >= 3) return name.toUpperCase();
+  }
+  return 'UNKNOWN';
+}
+
+// Group bank rows by the party they belong to: the row's own party_id first, then a name match against
+// your parties, then the payee text from the narration. Never guesses a party it can't back up.
+export function groupBankTxns(txns = [], parties = []) {
+  const partyById = new Map(parties.map(p => [p.id, p]));
+  const groups = new Map();
+  const put = (key, init, t) => {
+    let g = groups.get(key);
+    if (!g) { g = { key, partyId: null, name: '', matched: false, txns: [], ...init }; groups.set(key, g); }
+    g.txns.push(t);
+  };
+  for (const t of txns) {
+    if (t.party_id && partyById.has(t.party_id)) {
+      put('p:' + t.party_id, { partyId: t.party_id, name: partyById.get(t.party_id).name, matched: true }, t);
+      continue;
+    }
+    const narration = `${t.description || ''} ${t.reference || ''}`;
+    const sc = partyScores(narration, parties);
+    let best = null, bestS = 0;
+    for (const [id, v] of sc) if (v > bestS) { best = id; bestS = v; }
+    if (best && bestS >= 20) {
+      put('p:' + best, { partyId: best, name: partyById.get(best).name, matched: true, auto: true }, t);
+      continue;
+    }
+    const cp = counterpartyOf(t);
+    put('n:' + norm(cp), { name: cp, matched: false }, t);
+  }
+  const arr = [...groups.values()];
+  for (const g of arr) g.txns.sort((a, b) => String(txnDate(a)).localeCompare(String(txnDate(b))));
+  return arr.sort((a, b) => (Number(b.matched) - Number(a.matched)) || (b.txns.length - a.txns.length) || a.name.localeCompare(b.name));
+}
+
+// Which party a bank row belongs to: its own party_id, else an unambiguous name match, else null.
+export function txnPartyId(txn, parties = []) {
+  if (txn.party_id) return txn.party_id;
+  const sc = partyScores(`${txn.description || ''} ${txn.reference || ''}`, parties);
+  let best = null, bestS = 0;
+  for (const [id, v] of sc) if (v > bestS) { best = id; bestS = v; }
+  return best && bestS >= 20 ? best : null;
+}
+
+// Rows from a freshly parsed statement that are NOT already saved for this bank account.
+// A row is a duplicate if its bank reference already exists, or — when it has no reference — if the same
+// date + amount + direction already exists (counted, so two genuine same-day same-amount rows both survive
+// unless both were already imported).
+export function filterNewRows(parsed = [], existing = []) {
+  const refs = new Set(existing.filter(e => e.reference).map(e => String(e.reference)));
+  const counts = new Map();
+  for (const e of existing) {
+    const k = `${e.txn_date}|${Number(e.amount)}|${e.type}`;
+    counts.set(k, (counts.get(k) || 0) + 1);
+  }
+  const fresh = [], dupes = [];
+  for (const t of parsed) {
+    if (t.reference && refs.has(String(t.reference))) { dupes.push(t); continue; }
+    const k = `${t.date}|${Number(t.amount)}|${t.type}`;
+    if (!t.reference && (counts.get(k) || 0) > 0) { counts.set(k, counts.get(k) - 1); dupes.push(t); continue; }
+    fresh.push(t);
+  }
+  return { fresh, dupes };
+}

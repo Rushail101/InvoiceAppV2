@@ -2,7 +2,6 @@ import { useState, useMemo, useEffect } from 'react';
 import { fmt, fmtDate, today, PAY_MODES, INDIAN_STATES, STATE_CODES, EXPENSE_CATEGORIES, B2CL_THRESHOLD, effectiveGstin } from '../lib/constants.js';
 import { saveParty, deleteParty, saveExpenseWithJournal, deleteExpense, savePayment, saveBankAccount, saveBankTxnWithJournal, deleteBankTxn, deletePayment, updateInvoiceStatus, saveInvoice, uploadExpenseAttachment, getExpenseAttachmentUrl } from '../lib/db.js';
 import { Badge, ModalShell, FG, EmptyState, StatCard, PillTabs } from '../components/ui.jsx';
-import { BankImportModal } from './BankImport.jsx';
 import { tallyExpense, tallyPayment, tallySummary, findDuplicateExpense } from '../lib/tally.js';
 
 // Shared pill shown in the Journal column once a Tally check has run.
@@ -452,7 +451,6 @@ export function BankView({ bankAccounts, bankTransactions, businesses, parties, 
   const [selectedBank, setSelectedBank] = useState('');
   const [showAddBank, setShowAddBank] = useState(false);
   const [showAddTxn, setShowAddTxn] = useState(false);
-  const [showImport, setShowImport] = useState(false);
 
   const filteredBanks = activeBiz ? bankAccounts.filter(b => b.business_id === activeBiz) : bankAccounts;
   const bankTxns = selectedBank ? bankTransactions.filter(t => t.bank_account_id === selectedBank) : [];
@@ -493,15 +491,6 @@ export function BankView({ bankAccounts, bankTransactions, businesses, parties, 
         </select>
         <button className="btn btn-ghost btn-sm" onClick={() => setShowAddBank(true)}>+ Add Bank</button>
         {selectedBank && <button className="btn btn-ghost btn-sm" onClick={() => setShowAddTxn(true)}>+ Add Transaction</button>}
-        {selectedBank && (
-          <button
-            className="btn btn-primary"
-            onClick={() => setShowImport(true)}
-            style={{ display: 'flex', alignItems: 'center', gap: 6 }}
-          >
-            ⬆ Import PDF Statement
-          </button>
-        )}
       </div>
 
       {selBank && (
@@ -552,28 +541,6 @@ export function BankView({ bankAccounts, bankTransactions, businesses, parties, 
 
       {showAddBank && <BankModal onClose={() => setShowAddBank(false)} onSave={saveBank} businesses={businesses} activeBiz={activeBiz} />}
       {showAddTxn && <BankTxnModal onClose={() => setShowAddTxn(false)} onSave={addTxn} bankAccountId={selectedBank} />}
-      {showImport && selBank && (
-        <BankImportModal
-          onClose={() => setShowImport(false)}
-          bankAccountId={selectedBank}
-          bankAccountName={selBank.name}
-          parties={parties}
-          invoices={invoices}
-          payments={payments}
-          accounts={accounts}
-          businesses={businesses}
-          // Already-imported transactions for THIS bank account, so the importer can
-          // detect and skip rows that were already entered instead of duplicating them.
-          existingTxns={bankTxns}
-          // Use the bank account's OWN business_id, not the global "activeBiz" filter.
-          // When the sidebar is set to "All Businesses", activeBiz is '' — and account
-          // lookup inside saveBankTxnWithJournal filters by business_id === bizId, so an
-          // empty bizId matches zero accounts and the journal entry gets silently skipped
-          // even though the bank_transactions row is saved fine.
-          activeBiz={selBank.business_id}
-          reload={() => { setShowImport(false); reload(); }}
-        />
-      )}
     </div>
   );
 }

@@ -3,6 +3,7 @@ import { fmt, fmtDate, today, GST_RATES, PAY_MODES, INDIAN_STATES, gstType, calc
 import { saveInvoice, getInvoiceItems, updateInvoiceStatus, deleteInvoice, cancelInvoice, savePaymentWithJournal } from '../lib/db.js';
 import { printInvoice } from '../lib/pdf.js';
 import { Badge, ModalShell, FG, PayHistory, EmptyState } from '../components/ui.jsx';
+import { LinkBankPaymentModal } from '../components/LinkBankPayment.jsx';
 
 // ─── LINE ITEM CALCULATION ─────────────────────────────────────────────────────
 // priceMode: 'exclusive' (default) — unit_price is the pre-tax rate, GST is
@@ -472,7 +473,8 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
 }
 
 // ─── PAYMENT MODAL ─────────────────────────────────────────────────────────────
-export function PaymentModal({ onClose, onSave, invoice, existingPayments }) {
+export function PaymentModal({ onClose, onSave, invoice, existingPayments, parties = [], allPayments = [], onLinked }) {
+  const [linkOpen, setLinkOpen] = useState(false);
   const totalPaid = existingPayments.reduce((s, p) => s + Number(p.amount), 0);
   const balance = Number(invoice.total) - totalPaid;
   const [f, setF] = useState({ amount: balance.toFixed(2), payment_date: today(), method: 'UPI', reference: '', notes: '' });
@@ -523,6 +525,10 @@ export function PaymentModal({ onClose, onSave, invoice, existingPayments }) {
         );
       })()}
       <PayHistory payments={existingPayments} invoiceTotal={Number(invoice.total)} />
+      <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <button type="button" className="btn btn-primary btn-sm" onClick={() => setLinkOpen(true)}>🔗 Link bank payment</button>
+        <span style={{ fontSize: 11.5, color: 'var(--text3)' }}>Pick the imported bank transaction(s) that paid this, instead of typing the payment in.</span>
+      </div>
       <div style={{ marginTop: 14 }} className="form-row cols-2">
         <FG label="Amount (₹) *"><input type="number" value={f.amount} onChange={e => setF(x => ({ ...x, amount: e.target.value }))} /></FG>
         <FG label="Date *"><input type="date" value={f.payment_date} onChange={e => setF(x => ({ ...x, payment_date: e.target.value }))} /></FG>
@@ -533,6 +539,7 @@ export function PaymentModal({ onClose, onSave, invoice, existingPayments }) {
       </div>
       <FG label="Notes"><textarea value={f.notes} onChange={e => setF(x => ({ ...x, notes: e.target.value }))} /></FG>
       {err && <p className="err-msg">{err}</p>}
+      {linkOpen && <LinkBankPaymentModal invoice={invoice} parties={parties} allPayments={allPayments} onClose={() => setLinkOpen(false)} onLinked={onLinked} />}
     </ModalShell>
   );
 }
@@ -616,31 +623,31 @@ export function InvoicesView({ invoices, businesses, parties, activeBiz, reload,
     reload();
   }
 
-  async function handlePayment(data) {
-    const amt = Number(data.amount);
-    await savePaymentWithJournal(data);
-    const inv = invoices.find(i => i.id === data.invoice_id);
-    const prev = (paysByInv[data.invoice_id] || []).reduce((s, p) => s + Number(p.amount), 0);
-    const totalPaid = prev + amt;
-    const isFullyPaid = totalPaid >= Number(inv?.total) - 0.01;
-
+  // After a payment exists (typed in, or linked from the bank): raise the tax invoice when a proforma is
+  // fully paid, otherwise keep the invoice's paid / partially-paid status in step.
+  async function afterPayment(invoiceId, amt, paymentDate, { skipStatus = false } = {}) {
+    const inv = invoices.find(i => i.id === invoiceId);
+    const prev = (paysByInv[invoiceId] || []).reduce((s, p) => s + Number(p.amount), 0);
+    const isFullyPaid = prev + amt >= Number(inv?.total) - 0.01;
     if (inv?.status === 'proforma') {
       if (isFullyPaid) {
         // Auto-convert: assign next invoice number, mark paid, use date of final payment as invoice date
         const newNum = nextInvNum(invoices.filter(i => i.business_id === inv.business_id), false);
-        const invoiceDate = data.payment_date || today();
+        const invoiceDate = paymentDate || today();
         const { supabase } = await import('../lib/db.js');
         await supabase.from('invoices')
           .update({ status: 'paid', invoice_number: newNum, proforma_number: inv.invoice_number, issue_date: invoiceDate })
-          .eq('id', data.invoice_id);
+          .eq('id', invoiceId);
         alert(`✅ Full payment received!\nTax Invoice ${newNum} raised on ${invoiceDate}.\nThis invoice will now appear in GSTR-1 for the current month.`);
       }
-      // Partial advance on proforma — record payment, keep as proforma, show running total
-    } else {
-      const newStatus = isFullyPaid ? 'paid' : 'partially_paid';
-      await updateInvoiceStatus(data.invoice_id, newStatus);
+    } else if (!skipStatus) {
+      await updateInvoiceStatus(invoiceId, isFullyPaid ? 'paid' : 'partially_paid');
     }
     reload();
+  }
+  async function handlePayment(data) {
+    await savePaymentWithJournal(data);
+    await afterPayment(data.invoice_id, Number(data.amount), data.payment_date);
   }
 
   async function convertProforma(inv) {
@@ -903,7 +910,8 @@ export function InvoicesView({ invoices, businesses, parties, activeBiz, reload,
       {/* ── Modals ── */}
       {showInv && <InvoiceModal onClose={() => setShowInv(false)} onSave={handleSave} businesses={businesses} parties={parties} editData={editData} allInvoices={invoices} catalogItems={catalogItems} activeBiz={activeBiz} purchaseMode={purchaseMode} />}
       {showPF && <InvoiceModal onClose={() => setShowPF(false)} onSave={handleSave} businesses={businesses} parties={parties} editData={null} allInvoices={invoices} isProforma={true} catalogItems={catalogItems} activeBiz={activeBiz} />}
-      {payInv && <PaymentModal onClose={() => setPayInv(null)} onSave={handlePayment} invoice={payInv} existingPayments={paysByInv[payInv.id] || []} />}
+      {payInv && <PaymentModal onClose={() => setPayInv(null)} onSave={handlePayment} invoice={payInv} existingPayments={paysByInv[payInv.id] || []}
+        parties={parties} allPayments={payments} onLinked={(amt, date) => afterPayment(payInv.id, amt, date, { skipStatus: true })} />}
     </>
   );
 }

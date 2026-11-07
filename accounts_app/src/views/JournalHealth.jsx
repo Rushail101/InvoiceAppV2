@@ -63,7 +63,7 @@ export function JournalHealthView({
     // A credit linked to a payment (Bank Receipts) is already in the books through that payment's own
     // journal entry — it intentionally has no bank_import entry, and re-posting one would double-count it.
     const linkedBankIds = new Set(bankLinks.map(l => l.bank_txn_id));
-    return bankTransactions.filter(t => bizBankAccountIds.has(t.bank_account_id) && !postedKeys.has(`bank_import:${t.id}`) && !linkedBankIds.has(t.id) && !t.pending_link);
+    return bankTransactions.filter(t => bizBankAccountIds.has(t.bank_account_id) && !postedKeys.has(`bank_import:${t.id}`) && !linkedBankIds.has(t.id) && !t.pending_link && !t.link_dismissed);
   }, [bankTransactions, bankAccounts, activeBiz, journalEntries, bankLinks]);
 
   const totalOrphans = orphanExpenses.length + orphanPayments.length + orphanBankTxns.length;

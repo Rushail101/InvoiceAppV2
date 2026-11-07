@@ -112,7 +112,7 @@ export async function parseICICIXls(file) {
 // ══════════════════════════════════════════════════════════════════════════════
 // PDF PARSER (fallback) — extract text via pdfjs, parse with regex
 // ══════════════════════════════════════════════════════════════════════════════
-async function parseICICIPdf(file) {
+export async function parseICICIPdf(file) {
   if (!window.pdfjsLib) {
     await new Promise((resolve, reject) => {
       const script = document.createElement('script');

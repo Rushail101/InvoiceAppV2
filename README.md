@@ -10,9 +10,9 @@ All app code lives in [`accounts_app/`](accounts_app/).
 | Area | Screens |
 |---|---|
 | **Sales** | Invoices, Proforma (converts to a tax invoice, keeping the PI number), Credit Notes, Debit Notes, Delivery Challans, Parties, Item Master (per-brand items and prices) |
-| **Purchases** | Purchase Bills, Expenses, Payments, Bank, Bank Receipts (link bank credits to sales invoices / proformas and bank debits to purchase bills; shows Total / Paid / Balance) |
+| **Purchases** | Purchase Bills, Expenses, Payments, Bank (statement import, grouped by client / vendor, plus the ledger) |
 | **Ledgers** | AR Ledger, AP Ledger, Party Statement, Payment List, TDS |
-| **Accounting** | Chart of Accounts, Journal Vouchers, General Ledger, Trial Balance, Balance Sheet, P&L, Cash Flow, Analysis, Reconciliation, Journal Health, Bulk Bank Import |
+| **Accounting** | Chart of Accounts, Journal Vouchers, General Ledger, Trial Balance, Balance Sheet, P&L, Cash Flow, Analysis, Reconciliation, Journal Health |
 | **GST** | GSTR-1 (invoice-date or payment-date mode, B2B / B2C, HSN summary), GSTR-3B review |
 | **Settings** | Businesses, Export Data, SQL Setup |
 
@@ -89,8 +89,12 @@ Tables over 1,000 rows are paged in parallel (Supabase caps a single request at 
 ## Bank import → linking workflow
 
 1. Run migrations `002_bank_txn_links.sql` and `003_bank_pending_link.sql` once in the Supabase SQL editor.
-2. Import the statement with **Bulk Bank Import**. Rows you classify get a journal entry as before; unclassified groups can be
-   **Held for linking** (saved with no journal entry, so Journal Health leaves them alone).
-3. Open **Bank Receipts**. Choose *Money in* (sales / proformas) or *Money out* (purchase bills) and link each row to an invoice, bill or
-   existing payment. Linking creates the payment (and its journal entry if the bank row has none), so the invoice's Paid / Balance update.
-4. Proformas are never auto-converted by linking; convert from the Proforma screen when fully paid.
+2. **Bank → Grouped**: *Import statement* (ICICI XLS / PDF). Rows are saved with no journal entry, duplicates are skipped, and
+   the rows are merged into one card per client / vendor (name taken from the narration or matched to your parties).
+   Type a party name in a card and press Enter to attach the whole group to it.
+3. Route each group: link to invoices / bills (below), post the whole group to two accounts you pick (rent, salary, charges…), or ignore it.
+4. **Invoices / Purchase Bills → Record Payment → 🔗 Link bank payment**: pick the bank transactions that paid that document and the amount of each.
+   Nothing is matched automatically. Linking creates the payment (with its journal entry if the bank row has none yet), so Paid / Balance update.
+   To undo a link, delete the payment on the invoice.
+5. Rows that were already imported with a journal entry before are shown as "already in books" and are hidden unless you untick the filter.
+6. A proforma is converted to a tax invoice when linked payments cover it (same rule as typing a payment in).
