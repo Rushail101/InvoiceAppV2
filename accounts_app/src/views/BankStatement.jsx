@@ -16,7 +16,6 @@ import { parseICICIXls, parseICICIPdf } from './BankImport.jsx';
 import { saveBankTxnsHeldBulk, setBankTxnParty, saveNewParty, postHeldBankTxn, dismissBankCredit } from '../lib/db.js';
 import { EPS, buildCoverage, creditRemaining, groupBankTxns, filterNewRows, txnDate, journalKeys } from '../lib/bankLinks.js';
 
-const CAP = 150;
 const variantKey = d => String(d || '').toLowerCase().replace(/\d+/g, '').replace(/[^a-z ]/g, ' ').replace(/\s+/g, ' ').trim();
 
 export function BankStatementView(props) {
@@ -143,53 +142,49 @@ function GroupedTab({ bankAccounts, bankTransactions = [], businesses, parties =
           <input type="checkbox" checked={pendingOnly} onChange={e => setPendingOnly(e.target.checked)} /> Only groups with rows still waiting
         </label>
       </div>
+      <p style={{ ...dim, margin: '4px 2px 12px' }}>Link a group to invoices from <strong>Invoices / Purchase Bills → 💰 Record Payment → 🔗 Link bank payment</strong>. Nothing is matched automatically.</p>
       {!scopedAccts.length && <EmptyState icon="🏦" message="No bank account yet" sub="Add one in the Ledger tab, then import a statement here." />}
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        {shown.slice(0, CAP).map(g => {
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {shown.map(g => {
           const rt = route[g.key] || 'invoice';
           const isOpen = open.has(g.key);
           const bizAccts = accounts.filter(a => a.business_id === bizOf(g));
           const a = accts[g.key] || {};
           return (
-            <div key={g.key} className="config-card" style={{ padding: 16, marginBottom: 0 }}>
-              <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', alignItems: 'flex-end', justifyContent: 'space-between' }}>
-                <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+            <div key={g.key} style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 12, padding: '16px 20px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: 20, flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap', minWidth: 0 }}>
                   <div>
                     <div style={lbl}>{g.matched ? 'Client / vendor' : 'Name this group'}</div>
-                    <input key={g.key + g.name} list="bank-party-names" defaultValue={g.name} style={{ ...fld, minWidth: 260, fontWeight: 600 }}
+                    <input key={g.key + g.name} list="bank-party-names" defaultValue={g.name} style={{ ...fld, width: 230, fontWeight: 600 }}
+                      title="Type a client / vendor name and press Enter to attach this whole group to it"
                       onKeyDown={e => { if (e.key === 'Enter') saveName(g, e.currentTarget.value); }} />
-                    <div style={{ ...dim, marginTop: 4 }}>{g.matched ? 'Press Enter to rename / move to another party' : 'Type an existing client / vendor (or a new name) and press Enter to save'}</div>
+                    <div style={{ ...dim, marginTop: 6 }}>{g.matched ? 'Press Enter to rename / move to another party' : 'Press Enter to save name'}</div>
                   </div>
                   <div>
                     <div style={lbl}>Route</div>
-                    <select value={rt} onChange={e => setRoute(r => ({ ...r, [g.key]: e.target.value }))} style={{ ...fld, minWidth: 230 }}>
+                    <select value={rt} onChange={e => setRoute(r => ({ ...r, [g.key]: e.target.value }))} style={{ ...fld, width: 230 }}>
                       <option value="invoice">Link to invoices / bills</option>
                       <option value="journal">Post as journal entry…</option>
                       <option value="ignore">Ignore (no entry)</option>
                     </select>
                   </div>
                 </div>
-                <div style={{ display: 'flex', gap: 22, fontFamily: 'var(--mono)', fontSize: 12 }}>
-                  <div><div style={lbl}>PAID</div><div style={{ color: 'var(--red)', fontWeight: 700 }}>{fmt(g.paid)}</div></div>
-                  <div><div style={lbl}>RECEIVED</div><div style={{ color: 'var(--green)', fontWeight: 700 }}>{fmt(g.received)}</div></div>
-                  <div><div style={lbl}>TXNS</div><div style={{ fontWeight: 700 }}>{g.txns.length}</div></div>
-                  <div><div style={lbl}>WAITING</div><div style={{ color: g.pending.length ? 'var(--amber)' : 'var(--text3)', fontWeight: 700 }}>{g.pending.length}</div></div>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ display: 'flex', gap: 22, fontFamily: 'var(--mono)', fontSize: 13, justifyContent: 'flex-end', marginBottom: 10 }}>
+                    <div><div style={lbl}>PAID</div><div style={{ color: g.paid ? 'var(--red)' : 'var(--text3)', fontWeight: 700 }}>{fmt(g.paid)}</div></div>
+                    <div><div style={lbl}>RECEIVED</div><div style={{ color: g.received ? 'var(--green)' : 'var(--text3)', fontWeight: 700 }}>{fmt(g.received)}</div></div>
+                    <div><div style={lbl}>TXNS</div><div style={{ fontWeight: 700 }}>{g.txns.length}</div></div>
+                    <div><div style={lbl}>WAITING</div><div style={{ color: g.pending.length ? 'var(--amber)' : 'var(--text3)', fontWeight: 700 }}>{g.pending.length}</div></div>
+                  </div>
+                  <button className="btn btn-ghost btn-sm" onClick={() => setOpen(o => { const n = new Set(o); n.has(g.key) ? n.delete(g.key) : n.add(g.key); return n; })}>
+                    {isOpen ? 'Hide' : 'Show'} transactions
+                  </button>
                 </div>
               </div>
+              {g.variants > 1 && <div style={{ ...dim, marginTop: 4 }}>Merged from {g.variants} narration variations</div>}
 
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 8, gap: 10, flexWrap: 'wrap' }}>
-                <span style={dim}>{g.variants > 1 ? `Merged from ${g.variants} narration variations` : ' '}</span>
-                <button className="btn btn-ghost btn-sm" onClick={() => setOpen(o => { const n = new Set(o); n.has(g.key) ? n.delete(g.key) : n.add(g.key); return n; })}>
-                  {isOpen ? 'Hide' : 'Show'} transactions
-                </button>
-              </div>
-
-              {rt === 'invoice' && g.pending.length > 0 && (
-                <p style={{ ...dim, marginTop: 6 }}>
-                  To link these to {g.received >= g.paid ? 'sales invoices / proformas' : 'purchase bills'}: open the invoice → <strong>Record Payment</strong> → <strong>🔗 Link bank payment</strong>.
-                </p>
-              )}
               {rt === 'journal' && (
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 10 }}>
                   <select value={a.dr || ''} onChange={e => setAccts(x => ({ ...x, [g.key]: { ...a, dr: e.target.value } }))} style={{ ...fld, flex: 1, minWidth: 170 }}>
@@ -246,7 +241,6 @@ function GroupedTab({ bankAccounts, bankTransactions = [], businesses, parties =
           );
         })}
         {shown.length === 0 && scopedAccts.length > 0 && <EmptyState icon="✅" message={txns.length ? 'Nothing waiting' : 'No bank transactions yet'} sub={txns.length ? 'Untick “Only groups with rows still waiting” to see everything.' : 'Use “Import statement” to bring in a bank statement.'} />}
-        {shown.length > CAP && <p style={dim}>Showing {CAP} of {shown.length} groups — use search to narrow.</p>}
       </div>
       <datalist id="bank-party-names">{parties.map(p => <option key={p.id} value={p.name} />)}</datalist>
 
