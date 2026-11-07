@@ -6,7 +6,7 @@
  */
 import { useState, useCallback, useRef } from 'react';
 import { fmt } from '../lib/constants.js';
-import { saveBankTxnWithJournal, savePayment, updateInvoiceStatus } from '../lib/db.js';
+import { saveBankTxnWithJournal, saveBankTxnHeld, savePayment, updateInvoiceStatus } from '../lib/db.js';
 import { matchBankToPayments, matchBankToJE } from './Reconciliation.jsx';
 
 // ── XLS Parser (same as BankImport, extracted) ────────────────────────────────
@@ -229,29 +229,45 @@ export function BulkImportView({ bankAccounts, bankTransactions = [], accounts, 
     setGroups(prev => prev.map((g2, i) => i !== groupIdx ? g2 : { ...g2, assigned: true, skipped: true }));
   }
 
+  // Hold for linking: saved later with no journal entry; the entry comes when linked in Bank Receipts.
+  function holdGroup(groupIdx) {
+    const g = groups[groupIdx];
+    const txnKeys = new Set(g.txns.map(dedupeKey));
+    setAllTxns(prev => prev.map(t => txnKeys.has(dedupeKey(t)) ? { ...t, hold: true, approved: true, skip: false } : t));
+    setGroups(prev => prev.map((g2, i) => i !== groupIdx ? g2 : { ...g2, assigned: true, held: true }));
+  }
+  function holdAllRemaining() {
+    const open = new Set(groups.filter(g => !g.assigned).flatMap(g => g.txns.map(dedupeKey)));
+    setAllTxns(prev => prev.map(t => open.has(dedupeKey(t)) ? { ...t, hold: true, approved: true, skip: false } : t));
+    setGroups(prev => prev.map(g2 => g2.assigned ? g2 : { ...g2, assigned: true, held: true }));
+  }
+
   async function handlePostAll() {
     const toPost = allTxns.filter(t => t.approved && !t.skip);
     if (!toPost.length) { setError('No transactions approved.'); return; }
     setStep('posting');
-    let posted = 0, jePosted = 0, skipped = 0;
+    let posted = 0, jePosted = 0, skipped = 0, held = 0;
     const errors = [];
 
     for (let i = 0; i < toPost.length; i++) {
       if (i % 10 === 0) setProgress(`Posting ${i + 1} / ${toPost.length}…`);
       const t = toPost[i];
       try {
-        const result = await saveBankTxnWithJournal(
-          { ...t, partyId: null, _overrideDebit: t.cls.dr, _overrideCredit: t.cls.cr },
-          accounts, selectedBankBiz
-        );
-        if (result.journalId) jePosted++; else skipped++;
+        const result = t.hold
+          ? await saveBankTxnHeld(t)
+          : await saveBankTxnWithJournal(
+              { ...t, partyId: null, _overrideDebit: t.cls.dr, _overrideCredit: t.cls.cr },
+              accounts, selectedBankBiz
+            );
+        if (result.journalId) jePosted++; else if (!t.hold) skipped++;
+        if (t.hold) held++;
         posted++;
       } catch (e) {
         errors.push(`${t.date} ₹${t.amount}: ${e.message}`);
       }
     }
 
-    setResults({ posted, jePosted, skipped, errors });
+    setResults({ posted, jePosted, skipped, held, errors });
     setStep('done');
     reload();
   }
@@ -378,7 +394,8 @@ export function BulkImportView({ bankAccounts, bankTransactions = [], accounts, 
           {groups.filter(g => !g.assigned).length > 0 && (
             <div style={{ marginBottom: 20 }}>
               <div style={{ fontSize: 13, fontWeight: 600, color: '#fbbf24', marginBottom: 10 }}>
-                ⚠ {unassignedGroups} unclassified group{unassignedGroups !== 1 ? 's' : ''} — assign accounts or skip
+                ⚠ {unassignedGroups} unclassified group{unassignedGroups !== 1 ? 's' : ''} — assign accounts, hold for linking, or skip
+                <button className="btn btn-ghost btn-sm" onClick={holdAllRemaining} style={{ fontSize: 11, marginLeft: 12 }}>Hold all remaining for linking</button>
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {groups.map((g, gi) => g.assigned ? null : (
@@ -388,6 +405,7 @@ export function BulkImportView({ bankAccounts, bankTransactions = [], accounts, 
                     accounts={bizAccounts}
                     onAssign={(dr, cr) => applyGroupAssignment(gi, dr, cr)}
                     onSkip={() => skipGroup(gi)}
+                    onHold={() => holdGroup(gi)}
                   />
                 ))}
               </div>
@@ -437,6 +455,7 @@ export function BulkImportView({ bankAccounts, bankTransactions = [], accounts, 
             {[
               { label: 'Transactions posted', val: results.posted, color: '#4ade80' },
               { label: 'Journal entries created', val: results.jePosted, color: '#60a5fa' },
+              ...(results.held ? [{ label: 'Held for linking (Bank Receipts)', val: results.held, color: '#fbbf24' }] : []),
               { label: 'JEs skipped (no account)', val: results.skipped, color: '#fbbf24' },
               { label: 'Errors', val: results.errors.length, color: '#f87171' },
             ].map(s => (
@@ -464,7 +483,7 @@ export function BulkImportView({ bankAccounts, bankTransactions = [], accounts, 
   );
 }
 
-function UnclassifiedGroup({ group, accounts, onAssign, onSkip }) {
+function UnclassifiedGroup({ group, accounts, onAssign, onSkip, onHold }) {
   const [dr, setDr] = useState('');
   const [cr, setCr] = useState('');
   const total = group.txns.reduce((s, t) => s + t.amount, 0);
@@ -505,6 +524,7 @@ function UnclassifiedGroup({ group, accounts, onAssign, onSkip }) {
         <button className="btn btn-primary btn-sm" onClick={() => onAssign(dr, cr)} disabled={!dr || !cr} style={{ fontSize: 11 }}>
           Apply to all {group.txns.length}
         </button>
+        <button className="btn btn-ghost btn-sm" onClick={onHold} style={{ fontSize: 11 }} title="Save without a journal entry; link it to an invoice/bill in Bank Receipts">Hold for linking</button>
         <button className="btn btn-ghost btn-sm" onClick={onSkip} style={{ fontSize: 11 }}>Skip</button>
       </div>
     </div>

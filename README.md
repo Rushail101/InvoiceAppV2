@@ -10,7 +10,7 @@ All app code lives in [`accounts_app/`](accounts_app/).
 | Area | Screens |
 |---|---|
 | **Sales** | Invoices, Proforma (converts to a tax invoice, keeping the PI number), Credit Notes, Debit Notes, Delivery Challans, Parties, Item Master (per-brand items and prices) |
-| **Purchases** | Purchase Bills, Expenses, Payments, Bank, Bank Receipts (link bank credits to invoices / proformas) |
+| **Purchases** | Purchase Bills, Expenses, Payments, Bank, Bank Receipts (link bank credits to sales invoices / proformas and bank debits to purchase bills; shows Total / Paid / Balance) |
 | **Ledgers** | AR Ledger, AP Ledger, Party Statement, Payment List, TDS |
 | **Accounting** | Chart of Accounts, Journal Vouchers, General Ledger, Trial Balance, Balance Sheet, P&L, Cash Flow, Analysis, Reconciliation, Journal Health, Bulk Bank Import |
 | **GST** | GSTR-1 (invoice-date or payment-date mode, B2B / B2C, HSN summary), GSTR-3B review |
@@ -85,3 +85,12 @@ Tables over 1,000 rows are paged in parallel (Supabase caps a single request at 
 - Spreadsheet import (`BankImport`, `BulkImport`) still loads SheetJS 0.18.5 from cdnjs. Upgrade to the
   official 0.20.x build from `cdn.sheetjs.com` after testing a bank-statement import.
 - No automated tests yet (GST split, rounding, FY numbering and proforma conversion are the first candidates).
+
+## Bank import → linking workflow
+
+1. Run migrations `002_bank_txn_links.sql` and `003_bank_pending_link.sql` once in the Supabase SQL editor.
+2. Import the statement with **Bulk Bank Import**. Rows you classify get a journal entry as before; unclassified groups can be
+   **Held for linking** (saved with no journal entry, so Journal Health leaves them alone).
+3. Open **Bank Receipts**. Choose *Money in* (sales / proformas) or *Money out* (purchase bills) and link each row to an invoice, bill or
+   existing payment. Linking creates the payment (and its journal entry if the bank row has none), so the invoice's Paid / Balance update.
+4. Proformas are never auto-converted by linking; convert from the Proforma screen when fully paid.

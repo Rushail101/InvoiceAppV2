@@ -16,7 +16,7 @@ import { ModalShell, StatCard, EmptyState, PillTabs } from '../components/ui.jsx
 import { addBankLinks, deleteBankLink, dismissBankCredit, recordReceiptFromBank } from '../lib/db.js';
 import {
   EPS, buildCoverage, creditRemaining, paymentRemaining, autoMatch, suggestInvoices, paymentChoicesForCredit,
-  creditChoicesForPayment, paymentsNotInBank, journalKeys, isDoubleBooked, paidByInvoice, businessOfAccounts, txnDate,
+  creditChoicesForPayment, paymentsNotInBank, txnTypeFor, journalKeys, isDoubleBooked, paidByInvoice, businessOfAccounts, txnDate,
 } from '../lib/bankLinks.js';
 
 const ROW_CAP = 200;
@@ -32,6 +32,8 @@ export function BankLinksView({
   bankTransactions = [], bankAccounts = [], payments = [], invoices = [], parties = [], journalEntries = [],
   bankLinks = [], bankLinksReady = true, bankLinksError = '', activeBiz, reload,
 }) {
+  const [dir, setDir] = useState('in');            // 'in' = receipts vs sales, 'out' = payments vs purchase bills
+  const isOut = dir === 'out';
   const [tab, setTab] = useState('needs');
   const [search, setSearch] = useState('');
   const [autoOpen, setAutoOpen] = useState(false);
@@ -51,17 +53,17 @@ export function BankLinksView({
   const invoiceById = useMemo(() => new Map(invoices.map(i => [i.id, i])), [invoices]);
   const partyById = useMemo(() => new Map(parties.map(p => [p.id, p])), [parties]);
   const paymentById = useMemo(() => new Map(payments.map(p => [p.id, p])), [payments]);
-  const ctx = useMemo(() => ({ invoices: scopedInvoices, payments, parties, bankAccounts, links: bankLinks, bankTxns: txns }),
-    [scopedInvoices, payments, parties, bankAccounts, bankLinks, txns]);
+  const ctx = useMemo(() => ({ invoices: scopedInvoices, payments, parties, bankAccounts, links: bankLinks, bankTxns: txns, dir }),
+    [scopedInvoices, payments, parties, bankAccounts, bankLinks, txns, dir]);
 
-  const credits = useMemo(() => txns.filter(t => t.type === 'credit'), [txns]);
+  const credits = useMemo(() => txns.filter(t => t.type === txnTypeFor(dir)), [txns, dir]);
   const needs = useMemo(() => credits.filter(t => !t.link_dismissed && creditRemaining(t, cov) > EPS)
     .sort((a, b) => String(txnDate(b)).localeCompare(String(txnDate(a)))), [credits, cov]);
   const linkedRows = useMemo(() => credits.filter(t => (cov.byBank.get(t.id) || 0) > 0)
     .sort((a, b) => String(txnDate(b)).localeCompare(String(txnDate(a)))), [credits, cov]);
   const dismissed = useMemo(() => credits.filter(t => t.link_dismissed), [credits]);
-  const notInBank = useMemo(() => paymentsNotInBank({ payments: scopedPayments, invoices, bankTxns: txns, bankAccounts, links: bankLinks })
-    .sort((a, b) => String(b.payment.payment_date).localeCompare(String(a.payment.payment_date))), [scopedPayments, invoices, txns, bankAccounts, bankLinks]);
+  const notInBank = useMemo(() => paymentsNotInBank({ payments: scopedPayments, invoices, bankTxns: txns, bankAccounts, links: bankLinks, dir })
+    .sort((a, b) => String(b.payment.payment_date).localeCompare(String(a.payment.payment_date))), [scopedPayments, invoices, txns, bankAccounts, bankLinks, dir]);
 
   const q = search.trim().toLowerCase();
   const match = (t) => !q || `${t.description || ''} ${t.reference || ''} ${t.amount}`.toLowerCase().includes(q);
@@ -70,14 +72,16 @@ export function BankLinksView({
   const needsAmt = needs.reduce((s, t) => s + creditRemaining(t, cov), 0);
   const linksByBank = useMemo(() => { const m = new Map(); bankLinks.forEach(l => (m.get(l.bank_txn_id) || m.set(l.bank_txn_id, []).get(l.bank_txn_id)).push(l)); return m; }, [bankLinks]);
 
+  const paidAll = useMemo(() => paidByInvoice(payments), [payments]);
   const hasBankJournal = t => keys.has(`bank_import:${t.id}`) || (!journalEntries.length && t.journal_posted === true);
 
   async function doRecord(txn, inv, amount) {
     const amt = r2(amount);
     const jr = hasBankJournal(txn);
-    const msg = `Record ${fmt(amt)} received (${fmtDate(txnDate(txn))}) against ${inv.status === 'proforma' ? 'proforma ' : 'invoice '}${inv.invoice_number}?\n\n` +
-      (jr ? 'This bank credit already has its own journal entry, so the payment is saved WITHOUT a second entry.'
-          : 'This bank credit has no journal entry yet, so the payment is saved with its normal entry (Dr Bank / Cr Sales Revenue).');
+    const msg = `Record ${fmt(amt)} ${isOut ? 'paid' : 'received'} (${fmtDate(txnDate(txn))}) against ${inv.status === 'proforma' ? 'proforma ' : 'invoice '}${inv.invoice_number}?\n\n` +
+      (jr ? 'This bank row already has its own journal entry, so the payment is saved WITHOUT a second entry.'
+          : isOut ? 'This bank row has no journal entry yet, so the payment is saved with its normal entry (Dr Payable / Cr Bank).'
+                  : 'This bank row has no journal entry yet, so the payment is saved with its normal entry (Dr Bank / Cr Sales Revenue).');
     if (!confirm(msg)) return false;
     setBusy(txn.id + inv.id);
     try {
@@ -107,7 +111,7 @@ export function BankLinksView({
     try { await deleteBankLink(l.id); await reload(); } catch (e) { alert(e.message || String(e)); }
   }
   async function dismiss(t) {
-    const note = prompt('Why is this credit not an invoice receipt? (loan, capital introduced, refund, interest…)', '');
+    const note = prompt('Why is this not an invoice ' + (isOut ? 'payment? (salary, tax, loan repayment, charges…)' : 'receipt? (loan, capital introduced, refund, interest…)') + '', '');
     if (note === null) return;
     try { await dismissBankCredit(t.id, true, note); await reload(); } catch (e) { alert(e.message || String(e)); }
   }
@@ -131,13 +135,16 @@ export function BankLinksView({
     { id: 'needs', label: `Needs linking (${needs.length})` },
     { id: 'linked', label: `Linked (${linkedRows.length})` },
     { id: 'notinbank', label: `Payments not in bank (${notInBank.length})` },
-    { id: 'dismissed', label: `Not a receipt (${dismissed.length})` },
+    { id: 'dismissed', label: `${isOut ? 'Not a bill payment' : 'Not a receipt'} (${dismissed.length})` },
   ];
 
   return (
     <div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+        <PillTabs tabs={[{ id: 'in', label: 'Money in — sales / proformas' }, { id: 'out', label: 'Money out — purchase bills' }]} active={dir} onChange={d => { setDir(d); setTab('needs'); }} />
+      </div>
       <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(4,1fr)', marginBottom: 14 }}>
-        <StatCard label="Bank credits" value={credits.length} sub={fmt(totalCredit)} color="blue" />
+        <StatCard label={isOut ? 'Bank debits' : 'Bank credits'} value={credits.length} sub={fmt(totalCredit)} color="blue" />
         <StatCard label="Linked" value={linkedRows.length} sub={fmt(credits.reduce((s, t) => s + (cov.byBank.get(t.id) || 0), 0))} color="green" />
         <StatCard label="Needs linking" value={needs.length} sub={fmt(needsAmt)} color={needs.length ? 'amber' : 'green'} />
         <StatCard label="Payments not in bank" value={notInBank.length} sub="non-cash, in statement range" color="purple" />
@@ -157,13 +164,13 @@ export function BankLinksView({
       {tab === 'linked' && (
         <div className="table-wrap">
           <table>
-            <thead><tr><th>Date</th><th>Bank narration</th><th className="r">Credit</th><th>Linked to</th></tr></thead>
+            <thead><tr><th>Date</th><th>Bank narration</th><th className="r">{isOut ? 'Debit' : 'Credit'}</th><th>Linked to</th></tr></thead>
             <tbody>
               {linkedRows.filter(match).slice(0, ROW_CAP).map(t => (
                 <tr key={t.id}>
                   <td className="mono" style={{ fontSize: 11 }}>{fmtDate(txnDate(t))}</td>
                   <td style={{ fontSize: 12.5, maxWidth: 280 }}>{t.description}<div style={sty.dim}>{t.reference || ''}</div></td>
-                  <td className="r mono" style={{ color: 'var(--green)' }}>{fmt(t.amount)}
+                  <td className="r mono" style={{ color: isOut ? 'var(--red)' : 'var(--green)' }}>{fmt(t.amount)}
                     {creditRemaining(t, cov) > EPS && <div style={sty.warn}>{fmt(creditRemaining(t, cov))} still unlinked</div>}</td>
                   <td>
                     {(linksByBank.get(t.id) || []).map(l => {
@@ -176,6 +183,7 @@ export function BankLinksView({
                             <strong>{inv?.invoice_number || '—'}</strong>
                             <span style={sty.dim}>{partyById.get(p?.party_id || inv?.party_id)?.name || ''}</span>
                             <span className="mono">{fmt(l.amount)}</span>
+                            {inv && <span style={sty.dim} title="Invoice total / paid so far / balance">of {fmt(inv.total)} · paid {fmt(paidAll.get(inv.id) || 0)} · bal {fmt(Math.max(0, Number(inv.total) - (paidAll.get(inv.id) || 0)))}</span>}
                             <span style={sty.dim}>{l.source}</span>
                           </span>
                           {dbl && <span style={sty.warn} title="This bank row and the payment each have their own journal entry — the receipt is in the books twice. Linking doesn't change that.">⚠ in books twice?</span>}
@@ -201,7 +209,7 @@ export function BankLinksView({
           </p>
           <div className="table-wrap">
             <table>
-              <thead><tr><th>Date</th><th>Document</th><th>Customer</th><th>Method / ref</th><th className="r">Amount</th><th></th></tr></thead>
+              <thead><tr><th>Date</th><th>Document</th><th>{isOut ? 'Vendor' : 'Customer'}</th><th>Method / ref</th><th className="r">Amount</th><th></th></tr></thead>
               <tbody>
                 {notInBank.filter(({ payment: p, invoice: i }) => !q || `${i?.invoice_number || ''} ${p.reference || ''} ${p.amount} ${partyById.get(p.party_id)?.name || ''}`.toLowerCase().includes(q)).slice(0, ROW_CAP).map(({ payment: p, invoice: i, remaining }) => (
                   <tr key={p.id}>
@@ -223,7 +231,7 @@ export function BankLinksView({
       {tab === 'dismissed' && (
         <div className="table-wrap">
           <table>
-            <thead><tr><th>Date</th><th>Bank narration</th><th className="r">Credit</th><th>Note</th><th></th></tr></thead>
+            <thead><tr><th>Date</th><th>Bank narration</th><th className="r">{isOut ? 'Debit' : 'Credit'}</th><th>Note</th><th></th></tr></thead>
             <tbody>
               {dismissed.filter(match).map(t => (
                 <tr key={t.id}>
@@ -262,13 +270,14 @@ export function BankLinksView({
 
 // ── Needs linking ───────────────────────────────────────────────────────────
 function NeedsList({ rows, cov, ctx, busy, partyById, onSuggest, onInvoice, onPayment, onDismiss }) {
+  const out = ctx.dir === 'out';
   const shown = rows.slice(0, ROW_CAP);
   const suggestions = useMemo(() => new Map(shown.map(t => [t.id, suggestInvoices(t, ctx)])), [shown, ctx]); // eslint-disable-line react-hooks/exhaustive-deps
-  if (!rows.length) return <EmptyState icon="✅" message="Every bank credit is linked" sub="New statement imports will appear here when they need attention." />;
+  if (!rows.length) return <EmptyState icon="✅" message={out ? "Every bank debit is linked" : "Every bank credit is linked"} sub="New statement imports will appear here when they need attention." />;
   return (
     <>
       <p style={{ ...sty.dim, marginBottom: 8 }}>
-        Bank credits not yet tied to an invoice or proforma. Linking only tags — nothing is posted twice.
+        {out ? 'Bank debits not yet tied to a purchase bill.' : 'Bank credits not yet tied to an invoice or proforma.'} Held rows from the import land here; linking one creates its journal entry (rows that already have one are never posted twice).
       </p>
       <div style={{ display: 'grid', gap: 8 }}>
         {shown.map(t => {
@@ -278,8 +287,8 @@ function NeedsList({ rows, cov, ctx, busy, partyById, onSuggest, onInvoice, onPa
               <div style={{ display: 'grid', gridTemplateColumns: '92px 1fr auto', gap: 10, alignItems: 'center' }}>
                 <div className="mono" style={{ fontSize: 11, color: 'var(--text3)' }}>{fmtDate(txnDate(t))}</div>
                 <div style={{ fontSize: 12.5, minWidth: 0 }}>{t.description}<div style={sty.dim}>{t.reference || ''}</div></div>
-                <div className="mono" style={{ fontWeight: 700, color: 'var(--green)', textAlign: 'right' }}>
-                  +{fmt(rem)}{rem < Number(t.amount) - EPS && <div style={sty.dim}>of {fmt(t.amount)}</div>}
+                <div className="mono" style={{ fontWeight: 700, color: out ? 'var(--red)' : 'var(--green)', textAlign: 'right' }}>
+                  {out ? '−' : '+'}{fmt(rem)}{rem < Number(t.amount) - EPS && <div style={sty.dim}>of {fmt(t.amount)}</div>}
                 </div>
               </div>
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8, alignItems: 'center' }}>
@@ -289,13 +298,13 @@ function NeedsList({ rows, cov, ctx, busy, partyById, onSuggest, onInvoice, onPa
                     <button key={s.invoice.id} className="btn btn-ghost btn-sm" disabled={busy === t.id + s.invoice.id}
                       onClick={() => onSuggest(t, s.invoice, amt)} title={s.reasons.join(' · ')}>
                       {s.isProforma && <span className="badge badge-proforma" style={{ marginRight: 4 }}>PI</span>}
-                      {s.invoice.invoice_number} · {partyById.get(s.invoice.party_id)?.name || ''} · {fmt(amt)} →
+                      {s.invoice.invoice_number} · {partyById.get(s.invoice.party_id)?.name || ''} · {fmt(amt)} of {fmt(s.total)} (paid {fmt(s.paid)}, bal {fmt(s.outstanding)}) →
                     </button>
                   );
                 })}
-                <button className="btn btn-ghost btn-sm" onClick={() => onInvoice(t)}>Invoice / proforma…</button>
+                <button className="btn btn-ghost btn-sm" onClick={() => onInvoice(t)}>{out ? 'Purchase bill…' : 'Invoice / proforma…'}</button>
                 <button className="btn btn-ghost btn-sm" onClick={() => onPayment(t)}>Existing payment…</button>
-                <button className="btn btn-ghost btn-sm" onClick={() => onDismiss(t)} style={{ marginLeft: 'auto' }}>Not a receipt</button>
+                <button className="btn btn-ghost btn-sm" onClick={() => onDismiss(t)} style={{ marginLeft: 'auto' }}>{out ? 'Not a bill payment' : 'Not a receipt'}</button>
               </div>
             </div>
           );
@@ -308,7 +317,7 @@ function NeedsList({ rows, cov, ctx, busy, partyById, onSuggest, onInvoice, onPa
 
 // ── Auto-link preview ───────────────────────────────────────────────────────
 function AutoLinkModal({ ctx, cov, keys, journalLoaded, partyById, invoiceById, onClose, onDone }) {
-  const res = useMemo(() => autoMatch({ bankTxns: ctx.bankTxns, payments: ctx.payments, invoices: ctx.invoices, bankAccounts: ctx.bankAccounts, links: ctx.links }), [ctx]);
+  const res = useMemo(() => autoMatch({ bankTxns: ctx.bankTxns, payments: ctx.payments, invoices: ctx.invoices, bankAccounts: ctx.bankAccounts, links: ctx.links, dir: ctx.dir }), [ctx]);
   const [off, setOff] = useState(() => new Set());          // exact matches the user un-ticked
   const [comboOn, setComboOn] = useState(() => new Set());  // combos the user ticked (default off)
   const [busy, setBusy] = useState(false);
@@ -418,7 +427,7 @@ function InvoicePickModal({ txn, cov, ctx, partyById, busy, onRecord, onClose })
   const ranked = useMemo(() => {
     const sg = new Map(suggestInvoices(txn, ctx, 50).map(s => [s.invoice.id, s.score]));
     return ctx.invoices
-      .filter(i => i.type !== 'purchase' && !['cancelled', 'draft'].includes(i.status) && (!biz || i.business_id === biz))
+      .filter(i => (i.type === 'purchase') === (ctx.dir === 'out') && !['cancelled', 'draft'].includes(i.status) && (!biz || i.business_id === biz))
       .map(i => ({ inv: i, out: r2(Number(i.total) - (paid.get(i.id) || 0)), score: sg.get(i.id) || 0 }))
       .filter(x => x.out > EPS)
       .sort((a, b) => b.score - a.score || String(b.inv.issue_date).localeCompare(String(a.inv.issue_date)));
@@ -427,7 +436,7 @@ function InvoicePickModal({ txn, cov, ctx, partyById, busy, onRecord, onClose })
   const list = ranked.filter(x => !ql || `${x.inv.invoice_number} ${x.inv.proforma_number || ''} ${partyById.get(x.inv.party_id)?.name || ''}`.toLowerCase().includes(ql)).slice(0, 60);
 
   return (
-    <ModalShell title={`Record receipt — ${fmt(rem)} left to link`} size="modal-lg" onClose={onClose} foot={<button className="btn btn-ghost" onClick={onClose}>Close</button>}>
+    <ModalShell title={`${ctx.dir === 'out' ? 'Record payment' : 'Record receipt'} — ${fmt(rem)} left to link`} size="modal-lg" onClose={onClose} foot={<button className="btn btn-ghost" onClick={onClose}>Close</button>}>
       <p style={{ ...sty.dim, marginBottom: 8 }}>{fmtDate(txnDate(txn))} · {txn.description}</p>
       <p style={{ ...sty.dim, marginBottom: 10 }}>
         Pick the invoice or proforma this money paid for. Change the amount to link only part of it — the rest stays here for another invoice.
@@ -436,7 +445,7 @@ function InvoicePickModal({ txn, cov, ctx, partyById, busy, onRecord, onClose })
       <input placeholder="Search invoice no. or customer…" value={q} onChange={e => setQ(e.target.value)} style={{ width: '100%', marginBottom: 8 }} />
       <div className="table-wrap" style={{ maxHeight: 360, overflow: 'auto' }}>
         <table>
-          <thead><tr><th>Document</th><th>Customer</th><th className="r">Due</th><th className="r">Amount to link</th><th></th></tr></thead>
+          <thead><tr><th>Document</th><th>{ctx.dir === 'out' ? 'Vendor' : 'Customer'}</th><th className="r">Total</th><th className="r">Paid</th><th className="r">Balance</th><th className="r">Amount to link</th><th></th></tr></thead>
           <tbody>
             {list.map(({ inv, out, score }) => {
               const val = amts[inv.id] ?? String(Math.min(rem, out));
@@ -444,7 +453,9 @@ function InvoicePickModal({ txn, cov, ctx, partyById, busy, onRecord, onClose })
                 <tr key={inv.id}>
                   <td>{inv.status === 'proforma' && <span className="badge badge-proforma" style={{ marginRight: 6 }}>PI</span>}{inv.invoice_number}{score >= 45 && <span style={{ ...sty.warn, color: '#4ade80' }}> ★</span>}</td>
                   <td>{partyById.get(inv.party_id)?.name || '—'}</td>
-                  <td className="r mono">{fmt(out)}</td>
+                  <td className="r mono">{fmt(inv.total)}</td>
+                  <td className="r mono">{fmt(paid.get(inv.id) || 0)}</td>
+                  <td className="r mono" style={{ fontWeight: 700 }}>{fmt(out)}</td>
                   <td className="r"><input type="number" min="0" step="0.01" value={val} style={{ width: 110, textAlign: 'right' }} onChange={e => setAmts(a => ({ ...a, [inv.id]: e.target.value }))} /></td>
                   <td><button className="btn btn-primary btn-sm" disabled={busy === txn.id + inv.id || !(Number(val) > 0)}
                     onClick={() => {
@@ -456,7 +467,7 @@ function InvoicePickModal({ txn, cov, ctx, partyById, busy, onRecord, onClose })
                 </tr>
               );
             })}
-            {list.length === 0 && <tr><td colSpan={5}><EmptyState icon="🔍" message="No open invoices or proformas match" /></td></tr>}
+            {list.length === 0 && <tr><td colSpan={7}><EmptyState icon="🔍" message="No open invoices or bills match" /></td></tr>}
           </tbody>
         </table>
       </div>

@@ -473,3 +473,6 @@ CREATE INDEX IF NOT EXISTS idx_btl_payment  ON bank_txn_links(payment_id);
 -- dismissed so they stop showing up as "needs linking".
 ALTER TABLE bank_transactions ADD COLUMN IF NOT EXISTS link_dismissed boolean DEFAULT false;
 ALTER TABLE bank_transactions ADD COLUMN IF NOT EXISTS link_note text;
+
+-- Rows held for linking at import (see migrations/003_bank_pending_link.sql)
+ALTER TABLE bank_transactions ADD COLUMN IF NOT EXISTS pending_link boolean DEFAULT false;

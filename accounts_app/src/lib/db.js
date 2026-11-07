@@ -438,7 +438,7 @@ export async function deleteBankLink(id) {
 }
 export async function dismissBankCredit(id, dismissed, note = null) {
   const { error } = await supabase.from('bank_transactions')
-    .update({ link_dismissed: !!dismissed, link_note: dismissed ? (note || null) : null }).eq('id', id);
+    .update({ link_dismissed: !!dismissed, link_note: dismissed ? (note || null) : null, pending_link: false }).eq('id', id);
   if (error) throw new Error(`${error.message} — run sql/migrations/002_bank_txn_links.sql in Supabase first.`);
 }
 
@@ -800,6 +800,25 @@ export async function saveBankTxnWithJournal(txnData, accounts, bizId) {
 
   const result = await postBankTxnJournal(txnRow, accounts, bizId, overrideMapping);
   return { txnId: txnRow.id, ...result };
+}
+
+// Save a bank row "on hold": no journal entry, flagged pending_link so Journal Health leaves it alone
+// until it is linked to an invoice / bill in Bank Receipts (the link creates the entry).
+export async function saveBankTxnHeld(txnData) {
+  const { data, error } = await supabase.from('bank_transactions').insert({
+    bank_account_id: txnData.bankAccountId,
+    txn_date: txnData.date,
+    description: txnData.description,
+    reference: txnData.reference || '',
+    type: txnData.type,
+    amount: txnData.amount,
+    reconciled: true,
+    party_id: null,
+    journal_posted: false,
+    pending_link: true,
+  }).select().single();
+  if (error) throw new Error(`${error.message} — run sql/migrations/003_bank_pending_link.sql in Supabase first.`);
+  return { txnId: data.id };
 }
 
 // Manual cash deposit into / withdrawal from the bank. Reuses the normal bank

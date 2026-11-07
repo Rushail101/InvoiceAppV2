@@ -20,6 +20,10 @@ const ts = s => (s ? new Date(s).getTime() : NaN);
 const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 const round2 = n => Math.round((n + Number.EPSILON) * 100) / 100;
 
+// Direction: 'in' = money received (bank credits <-> sale payments), 'out' = money paid
+// (bank debits <-> purchase-bill payments). Everything below defaults to 'in'.
+export const txnTypeFor = dir => (dir === 'out' ? 'debit' : 'credit');
+
 export const isCashMethod = m => /cash/i.test(String(m || ''));
 export const txnDate = t => t.txn_date || t.date;
 
@@ -47,10 +51,11 @@ export function paidByInvoice(payments = []) {
 
 // ── eligibility ─────────────────────────────────────────────────────────────
 // Payments that could appear in a bank statement: customer receipts that weren't cash.
-export function isLinkablePayment(p, invoiceById) {
+export function isLinkablePayment(p, invoiceById, dir = 'in') {
   if (isCashMethod(p.method)) return false;
   const inv = invoiceById.get(p.invoice_id);
-  if (inv && inv.type === 'purchase') return false;   // money OUT — not a credit
+  const isPurchase = !!inv && inv.type === 'purchase';
+  if (isPurchase !== (dir === 'out')) return false;   // sale payments pair with credits, purchase payments with debits
   if (inv && inv.status === 'cancelled') return false;
   return true;
 }
@@ -76,13 +81,13 @@ const cmpScore = (a, b) => (a[0] - b[0]) || (a[1] - b[1]);
 // "best" for BOTH sides). Equal-amount repeats that can't be told apart go to `ambiguous` —
 // never guessed. One credit that equals the sum of several of a customer's payments goes to
 // `combos` as a suggestion (only when exactly one such combination exists).
-export function autoMatch({ bankTxns = [], payments = [], invoices = [], bankAccounts = [], links = [] }) {
+export function autoMatch({ bankTxns = [], payments = [], invoices = [], bankAccounts = [], links = [], dir = 'in' }) {
   const cov = buildCoverage(links);
   const acctBiz = businessOfAccounts(bankAccounts);
   const invoiceById = new Map(invoices.map(i => [i.id, i]));
 
-  const credits = bankTxns.filter(t => t.type === 'credit' && !t.link_dismissed && creditRemaining(t, cov) > EPS);
-  const pays = payments.filter(p => isLinkablePayment(p, invoiceById) && paymentRemaining(p, cov) > EPS);
+  const credits = bankTxns.filter(t => t.type === txnTypeFor(dir) && !t.link_dismissed && creditRemaining(t, cov) > EPS);
+  const pays = payments.filter(p => isLinkablePayment(p, invoiceById, dir) && paymentRemaining(p, cov) > EPS);
 
   // candidate pairs
   const candsByCredit = new Map(credits.map(c => [c.id, []]));
@@ -176,7 +181,7 @@ function partyScores(narration, parties) {
   return out;
 }
 
-export function suggestInvoices(txn, { invoices = [], payments = [], parties = [], bankAccounts = [], links = [] }, max = 3) {
+export function suggestInvoices(txn, { invoices = [], payments = [], parties = [], bankAccounts = [], links = [], dir = 'in' }, max = 3) {
   const cov = buildCoverage(links);
   const rem = creditRemaining(txn, cov);
   if (rem <= EPS) return [];
@@ -189,7 +194,7 @@ export function suggestInvoices(txn, { invoices = [], payments = [], parties = [
 
   const out = [];
   for (const inv of invoices) {
-    if (inv.type === 'purchase' || ['cancelled', 'draft'].includes(inv.status)) continue;
+    if ((inv.type === 'purchase') !== (dir === 'out') || ['cancelled', 'draft'].includes(inv.status)) continue;
     if (biz && inv.business_id && biz !== inv.business_id) continue;
     const outstanding = round2(num(inv.total) - (paid.get(inv.id) || 0));
     if (outstanding <= EPS) continue;
@@ -205,29 +210,29 @@ export function suggestInvoices(txn, { invoices = [], payments = [], parties = [
     if (d <= EPS) { score += 45; reasons.push('exact amount'); }
     else if (outstanding > 0 && d / outstanding <= 0.01) { score += 38; reasons.push('amount within 1%'); }
     else if (rem < outstanding && pScore > 0) { score += 5; reasons.push('part payment'); }
-    if (score >= 45) out.push({ invoice: inv, outstanding, score, reasons, isProforma: inv.status === 'proforma' });
+    if (score >= 45) out.push({ invoice: inv, outstanding, paid: paid.get(inv.id) || 0, total: num(inv.total), score, reasons, isProforma: inv.status === 'proforma' });
   }
   out.sort((a, b) => b.score - a.score);
   return out.slice(0, max);
 }
 
 // unlinked payments a credit could be tied to by hand (closest amount/date first)
-export function paymentChoicesForCredit(txn, { payments = [], invoices = [], bankAccounts = [], links = [] }) {
+export function paymentChoicesForCredit(txn, { payments = [], invoices = [], bankAccounts = [], links = [], dir = 'in' }) {
   const cov = buildCoverage(links);
   const acctBiz = businessOfAccounts(bankAccounts);
   const invoiceById = new Map(invoices.map(i => [i.id, i]));
   return payments
-    .filter(p => isLinkablePayment(p, invoiceById) && paymentRemaining(p, cov) > EPS && sameBusiness(txn, p, acctBiz))
+    .filter(p => isLinkablePayment(p, invoiceById, dir) && paymentRemaining(p, cov) > EPS && sameBusiness(txn, p, acctBiz))
     .map(p => ({ payment: p, remaining: paymentRemaining(p, cov), invoice: invoiceById.get(p.invoice_id),
       rank: Math.abs(paymentRemaining(p, cov) - creditRemaining(txn, cov)) / Math.max(1, num(txn.amount)) + dayDiff(txnDate(txn), p.payment_date) / 365 }))
     .sort((a, b) => a.rank - b.rank);
 }
 
-export function creditChoicesForPayment(payment, { bankTxns = [], bankAccounts = [], links = [] }) {
+export function creditChoicesForPayment(payment, { bankTxns = [], bankAccounts = [], links = [], dir = 'in' }) {
   const cov = buildCoverage(links);
   const acctBiz = businessOfAccounts(bankAccounts);
   return bankTxns
-    .filter(t => t.type === 'credit' && !t.link_dismissed && creditRemaining(t, cov) > EPS && sameBusiness(t, payment, acctBiz))
+    .filter(t => t.type === txnTypeFor(dir) && !t.link_dismissed && creditRemaining(t, cov) > EPS && sameBusiness(t, payment, acctBiz))
     .map(t => ({ txn: t, remaining: creditRemaining(t, cov),
       rank: Math.abs(creditRemaining(t, cov) - paymentRemaining(payment, cov)) / Math.max(1, num(payment.amount)) + dayDiff(txnDate(t), payment.payment_date) / 365 }))
     .sort((a, b) => a.rank - b.rank);
@@ -235,7 +240,7 @@ export function creditChoicesForPayment(payment, { bankTxns = [], bankAccounts =
 
 // payments that look like bank receipts but have no credit linked, restricted to dates the
 // imported statement actually covers (so history you never imported isn't reported as "missing")
-export function paymentsNotInBank({ payments = [], invoices = [], bankTxns = [], bankAccounts = [], links = [] }) {
+export function paymentsNotInBank({ payments = [], invoices = [], bankTxns = [], bankAccounts = [], links = [], dir = 'in' }) {
   const cov = buildCoverage(links);
   const acctBiz = businessOfAccounts(bankAccounts);
   const invoiceById = new Map(invoices.map(i => [i.id, i]));
@@ -248,7 +253,7 @@ export function paymentsNotInBank({ payments = [], invoices = [], bankTxns = [],
   }
   return payments
     .filter(p => {
-      if (!isLinkablePayment(p, invoiceById) || paymentRemaining(p, cov) <= EPS) return false;
+      if (!isLinkablePayment(p, invoiceById, dir) || paymentRemaining(p, cov) <= EPS) return false;
       const r = range.get(p.business_id); const d = ts(p.payment_date);
       return r && !isNaN(d) && d >= r[0] - 3 * DAY && d <= r[1] + 3 * DAY;
     })
