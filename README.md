@@ -88,13 +88,15 @@ Tables over 1,000 rows are paged in parallel (Supabase caps a single request at 
 
 ## Bank import → linking workflow
 
-1. Run migrations `002_bank_txn_links.sql` and `003_bank_pending_link.sql` once in the Supabase SQL editor.
-2. **Bank → Grouped**: *Import statement* (ICICI XLS / PDF). Rows are saved with no journal entry, duplicates are skipped, and
-   the rows are merged into one card per client / vendor (name taken from the narration or matched to your parties).
-   Type a party name in a card and press Enter to attach the whole group to it.
-3. Route each group: link to invoices / bills (below), post the whole group to two accounts you pick (rent, salary, charges…), or ignore it.
-4. **Invoices / Purchase Bills → Record Payment → 🔗 Link bank payment**: pick the bank transactions that paid that document and the amount of each.
-   Nothing is matched automatically. Linking creates the payment (with its journal entry if the bank row has none yet), so Paid / Balance update.
+1. Run migrations `002_bank_txn_links.sql`, `003_bank_pending_link.sql` and `004_bank_group_name.sql` once in the Supabase SQL editor.
+2. **Bank → Grouped → Import statement** (ICICI XLS / PDF). Rows are saved with no journal entry and duplicates are skipped.
+   Every transaction appears as its own **unnamed, unlabeled card** — nothing is grouped automatically.
+3. Type a name on a card and press Enter, and pick a category. Cards given the same name merge into one group
+   (PAID / RECEIVED / TXNS totals, "Show transactions"). Name suggestions come from your existing names and parties.
+4. Customer / Vendor groups: open the invoice / purchase bill → 💰 Record Payment → **🔗 Link bank payment**. The popup lists the
+   bank rows you named after that client / vendor first (tick "Show other…" for the rest), you set the amount per row and press Link.
+   Linking creates the payment (with its journal entry if the bank row has none yet), so Paid / Balance update. Nothing is matched automatically.
    To undo a link, delete the payment on the invoice.
-5. Rows that were already imported with a journal entry before are shown as "already in books" and are hidden unless you untick the filter.
-6. A proforma is converted to a tax invoice when linked payments cover it (same rule as typing a payment in).
+5. Other categories (staff, rent, loan, tax…): choose a debit and credit account and post the whole group, or ignore it.
+6. Rows imported earlier with a journal entry show as "already in books" and are hidden unless you untick "Only rows still waiting".
+7. A proforma is converted to a tax invoice when linked payments cover it (same rule as typing a payment in).

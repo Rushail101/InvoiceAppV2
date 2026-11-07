@@ -476,3 +476,7 @@ ALTER TABLE bank_transactions ADD COLUMN IF NOT EXISTS link_note text;
 
 -- Rows held for linking at import (see migrations/003_bank_pending_link.sql)
 ALTER TABLE bank_transactions ADD COLUMN IF NOT EXISTS pending_link boolean DEFAULT false;
+
+-- Names / categories you give bank rows (see migrations/004_bank_group_name.sql)
+ALTER TABLE bank_transactions ADD COLUMN IF NOT EXISTS group_name text;
+ALTER TABLE bank_transactions ADD COLUMN IF NOT EXISTS group_category text;

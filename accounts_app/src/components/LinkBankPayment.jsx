@@ -5,13 +5,14 @@ import { useState, useEffect, useMemo } from 'react';
 import { fmt, fmtDate } from '../lib/constants.js';
 import { ModalShell, EmptyState } from './ui.jsx';
 import { loadLinkableBankData, recordReceiptFromBank } from '../lib/db.js';
-import { EPS, buildCoverage, creditRemaining, txnPartyId, txnDate } from '../lib/bankLinks.js';
+import { EPS, buildCoverage, creditRemaining, txnNamedFor, txnDate } from '../lib/bankLinks.js';
 
 const r2 = n => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 
 export function LinkBankPaymentModal({ invoice, parties = [], allPayments = [], onClose, onLinked }) {
   const isPurchase = invoice.type === 'purchase';
-  const partyName = parties.find(p => p.id === invoice.party_id)?.name || '';
+  const party = parties.find(p => p.id === invoice.party_id);
+  const partyName = party?.name || '';
   const [data, setData] = useState(null);
   const [err, setErr] = useState('');
   const [q, setQ] = useState('');
@@ -33,14 +34,14 @@ export function LinkBankPaymentModal({ invoice, parties = [], allPayments = [], 
     const ql = q.trim().toLowerCase();
     return data.txns
       .filter(t => !t.link_dismissed && creditRemaining(t, cov) > EPS)
-      .map(t => ({ t, rem: creditRemaining(t, cov), mine: txnPartyId(t, parties) === invoice.party_id }))
+      .map(t => ({ t, rem: creditRemaining(t, cov), mine: txnNamedFor(t, party) }))
       .filter(x => (others || x.mine) && (!ql || `${x.t.description} ${x.t.reference} ${x.t.amount}`.toLowerCase().includes(ql)))
       .sort((a, b) => String(txnDate(b.t)).localeCompare(String(txnDate(a.t))));
-  }, [data, q, others, parties, invoice.party_id]);
+  }, [data, q, others, party]);
   const mineCount = useMemo(() => !data ? 0 : (() => {
     const cov = buildCoverage(data.links);
-    return data.txns.filter(t => !t.link_dismissed && creditRemaining(t, cov) > EPS && txnPartyId(t, parties) === invoice.party_id).length;
-  })(), [data, parties, invoice.party_id]);
+    return data.txns.filter(t => !t.link_dismissed && creditRemaining(t, cov) > EPS && txnNamedFor(t, party)).length;
+  })(), [data, party]);
 
   async function link(t, rem) {
     const amt = r2(amts[t.id] ?? Math.min(rem, due));
@@ -73,7 +74,7 @@ export function LinkBankPaymentModal({ invoice, parties = [], allPayments = [], 
         </label>
       </div>
       <p style={{ fontSize: 11.5, color: 'var(--text3)', marginBottom: 8 }}>
-        {others ? `Showing every unlinked bank ${isPurchase ? 'debit' : 'credit'}.` : `${mineCount} unlinked bank ${isPurchase ? 'payment(s) to' : 'receipt(s) from'} ${partyName || 'this party'}.`}{' '}
+        {others ? `Showing every unlinked bank ${isPurchase ? 'debit' : 'credit'}.` : `${mineCount} unlinked bank ${isPurchase ? 'payment(s) to' : 'receipt(s) from'} ${partyName || 'this party'} (rows you named “${partyName}” in Bank).`}{' '}
         Change the amount to link only part of a payment — the rest stays available for another invoice. Paid through a different name? Tick “Show other {isPurchase ? 'vendors' : 'clients'}' payments”.
         Rows already in your books are linked without a second journal entry; the others get their entry when linked.
       </p>

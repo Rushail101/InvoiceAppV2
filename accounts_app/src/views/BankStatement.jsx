@@ -1,11 +1,11 @@
 // BankStatement.jsx — the single Bank page.
 //
-//   Grouped  : import a statement, rows are MERGED BY CLIENT / VENDOR (like NovaGeo's Bank Statement).
-//              Name a group to attach it to a client / vendor, then route it:
-//                • invoices / bills -> done from the invoice's Record Payment popup ("Link bank payment")
-//                • journal entry    -> post the whole group to two accounts you choose
-//                • ignore           -> keep the rows, book nothing
-//   Ledger   : the plain running-balance bank ledger (add bank, add transaction).
+//   Grouped : every imported bank transaction shows up UNNAMED. You type a name (and pick a category) and press Enter;
+//             rows given the same name are merged into one group — nothing is grouped automatically.
+//             • Customer / Vendor groups are linked to invoices / bills from the invoice's Record Payment popup
+//               ("Link bank payment"); the popup lists the rows you named after that client / vendor first.
+//             • Other categories (staff, rent, loan, tax…) can be posted to two accounts you choose, or ignored.
+//   Ledger  : the plain running-balance bank ledger (add bank, add transaction).
 //
 // Nothing here matches or fills in invoice payments automatically.
 import { useState, useMemo, useRef } from 'react';
@@ -13,19 +13,31 @@ import { fmt, fmtDate } from '../lib/constants.js';
 import { ModalShell, StatCard, EmptyState, PillTabs } from '../components/ui.jsx';
 import { BankView } from './Operations.jsx';
 import { parseICICIXls, parseICICIPdf } from './BankImport.jsx';
-import { saveBankTxnsHeldBulk, setBankTxnParty, saveNewParty, postHeldBankTxn, dismissBankCredit } from '../lib/db.js';
-import { EPS, buildCoverage, creditRemaining, groupBankTxns, filterNewRows, txnDate, journalKeys } from '../lib/bankLinks.js';
+import { saveBankTxnsHeldBulk, setBankTxnGroup, postHeldBankTxn, dismissBankCredit } from '../lib/db.js';
+import { EPS, buildCoverage, creditRemaining, filterNewRows, txnDate, journalKeys, normName } from '../lib/bankLinks.js';
 
+const CATEGORIES = [
+  { id: '', label: 'Unlabeled' },
+  { id: 'customer', label: 'Customer / Buyer' },
+  { id: 'vendor', label: 'Vendor / Supplier' },
+  { id: 'staff', label: 'Staff / Labour' },
+  { id: 'owner', label: 'Owner / Capital' },
+  { id: 'loan', label: 'Loan / Bank' },
+  { id: 'utility', label: 'Utility / Rent' },
+  { id: 'tax', label: 'Tax / Government' },
+  { id: 'other', label: 'Other' },
+];
+const INVOICE_CATS = new Set(['customer', 'vendor']);
 const variantKey = d => String(d || '').toLowerCase().replace(/\d+/g, '').replace(/[^a-z ]/g, ' ').replace(/\s+/g, ' ').trim();
 
 export function BankStatementView(props) {
-  const { bankAccounts, bankTransactions = [], bankLinks = [], bankLinksReady = true, activeBiz, reload } = props;
+  const { bankLinksReady = true } = props;
   const [tab, setTab] = useState('groups');
   if (!bankLinksReady) {
     return (
       <div style={{ maxWidth: 720, background: '#2b1f08', border: '1px solid #5c3d0a', color: '#fbbf24', borderRadius: 8, padding: '10px 14px', fontSize: 12 }}>
-        <strong>One-time setup needed.</strong> Run <code>accounts_app/sql/migrations/002_bank_txn_links.sql</code> and <code>003_bank_pending_link.sql</code> in the
-        Supabase SQL editor, then press Refresh.
+        <strong>One-time setup needed.</strong> Run <code>accounts_app/sql/migrations/002</code>, <code>003</code> and <code>004</code> (bank_txn_links, pending_link,
+        group_name) in the Supabase SQL editor, then press Refresh.
       </div>
     );
   }
@@ -39,18 +51,22 @@ export function BankStatementView(props) {
   );
 }
 
-function GroupedTab({ bankAccounts, bankTransactions = [], businesses, parties = [], invoices = [], payments = [], accounts = [], journalEntries = [], bankLinks = [], activeBiz, reload }) {
+function GroupedTab({ bankAccounts, bankTransactions = [], parties = [], invoices = [], payments = [], accounts = [], journalEntries = [], bankLinks = [], activeBiz, reload }) {
   const [search, setSearch] = useState('');
   const [pendingOnly, setPendingOnly] = useState(true);
+  const [nameFilter, setNameFilter] = useState('all');     // all | unnamed | named
   const [open, setOpen] = useState(() => new Set());
-  const [route, setRoute] = useState({});            // group key -> 'invoice' | 'journal' | 'ignore'
-  const [accts, setAccts] = useState({});            // group key -> { dr, cr }
+  const [ov, setOv] = useState({});                        // optimistic name / category edits: txn id -> { group_name, group_category }
+  const [accts, setAccts] = useState({});                  // group key -> { dr, cr }
   const [importOpen, setImportOpen] = useState(false);
   const [busy, setBusy] = useState('');
 
   const scopedAccts = useMemo(() => bankAccounts.filter(b => !activeBiz || b.business_id === activeBiz), [bankAccounts, activeBiz]);
   const acctById = useMemo(() => new Map(bankAccounts.map(b => [b.id, b])), [bankAccounts]);
-  const txns = useMemo(() => { const ids = new Set(scopedAccts.map(b => b.id)); return bankTransactions.filter(t => ids.has(t.bank_account_id)); }, [bankTransactions, scopedAccts]);
+  const txns = useMemo(() => {
+    const ids = new Set(scopedAccts.map(b => b.id));
+    return bankTransactions.filter(t => ids.has(t.bank_account_id)).map(t => (ov[t.id] ? { ...t, ...ov[t.id] } : t));
+  }, [bankTransactions, scopedAccts, ov]);
 
   const cov = useMemo(() => buildCoverage(bankLinks), [bankLinks]);
   const keys = useMemo(() => journalKeys(journalEntries), [journalEntries]);
@@ -58,7 +74,6 @@ function GroupedTab({ bankAccounts, bankTransactions = [], businesses, parties =
   const payById = useMemo(() => new Map(payments.map(p => [p.id, p])), [payments]);
   const linksByBank = useMemo(() => { const m = new Map(); bankLinks.forEach(l => (m.get(l.bank_txn_id) || m.set(l.bank_txn_id, []).get(l.bank_txn_id)).push(l)); return m; }, [bankLinks]);
 
-  // status of one bank row
   const statusOf = t => {
     if (t.link_dismissed) return 'ignored';
     const linked = cov.byBank.get(t.id) || 0;
@@ -68,37 +83,59 @@ function GroupedTab({ bankAccounts, bankTransactions = [], businesses, parties =
   };
   const isPending = t => { const s = statusOf(t); return s === 'pending' || s === 'part'; };
 
-  const groups = useMemo(() => groupBankTxns(txns, parties).map(g => ({
-    ...g,
-    pending: g.txns.filter(isPending),
-    paid: g.txns.filter(t => t.type === 'debit').reduce((s, t) => s + Number(t.amount), 0),
-    received: g.txns.filter(t => t.type === 'credit').reduce((s, t) => s + Number(t.amount), 0),
-    unlinked: g.txns.filter(isPending).reduce((s, t) => s + creditRemaining(t, cov), 0),
-    variants: new Set(g.txns.map(t => variantKey(t.description))).size,
-  })), [txns, parties, cov, keys]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Group ONLY by the name you typed. Rows with no name are one card each.
+  const groups = useMemo(() => {
+    const m = new Map();
+    for (const t of txns) {
+      const nm = normName(t.group_name);
+      const key = nm ? 'n:' + nm : 'u:' + t.id;
+      let g = m.get(key);
+      if (!g) { g = { key, named: !!nm, name: (t.group_name || '').trim(), txns: [] }; m.set(key, g); }
+      g.txns.push(t);
+    }
+    return [...m.values()].map(g => {
+      g.txns.sort((a, b) => String(txnDate(b)).localeCompare(String(txnDate(a))));
+      const pend = g.txns.filter(isPending);
+      return {
+        ...g,
+        category: g.txns.find(t => t.group_category)?.group_category || '',
+        latest: txnDate(g.txns[0]) || '',
+        pending: pend,
+        paid: g.txns.filter(t => t.type === 'debit').reduce((s, t) => s + Number(t.amount), 0),
+        received: g.txns.filter(t => t.type === 'credit').reduce((s, t) => s + Number(t.amount), 0),
+        variants: new Set(g.txns.map(t => variantKey(t.description))).size,
+      };
+    }).sort((a, b) => String(b.latest).localeCompare(String(a.latest)) || a.key.localeCompare(b.key));
+  }, [txns, cov, keys]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const q = search.trim().toLowerCase();
   const shown = groups.filter(g => (!pendingOnly || g.pending.length) &&
-    (!q || g.name.toLowerCase().includes(q) || g.txns.some(t => `${t.description} ${t.reference}`.toLowerCase().includes(q))));
+    (nameFilter === 'all' || (nameFilter === 'named') === g.named) &&
+    (!q || g.name.toLowerCase().includes(q) || g.txns.some(t => `${t.description} ${t.reference} ${t.amount}`.toLowerCase().includes(q))));
   const pendingTotal = groups.reduce((s, g) => s + g.pending.length, 0);
+  const namedNames = useMemo(() => [...new Set([...txns.map(t => (t.group_name || '').trim()).filter(Boolean), ...parties.map(p => p.name)])].sort(), [txns, parties]);
 
   const bizOf = g => acctById.get(g.txns[0]?.bank_account_id)?.business_id || activeBiz;
+  const patchLocal = (ids, patch) => setOv(o => { const n = { ...o }; ids.forEach(id => { n[id] = { ...(n[id] || {}), ...patch }; }); return n; });
 
   async function saveName(g, raw) {
     const name = raw.trim();
-    if (!name || name === g.name) return;
-    const biz = bizOf(g);
-    let party = parties.find(p => p.business_id === biz && p.name.trim().toLowerCase() === name.toLowerCase());
-    try {
-      if (!party) {
-        const credits = g.txns.filter(t => t.type === 'credit').length;
-        const type = credits >= g.txns.length / 2 ? 'client' : 'vendor';
-        if (!confirm(`No client or vendor named “${name}”. Create it as a new ${type}?`)) return;
-        party = await saveNewParty({ business_id: biz, name, type });
-      }
-      await setBankTxnParty(g.txns.map(t => t.id), party.id);
-      await reload();
-    } catch (e) { alert(e.message || String(e)); }
+    if (name === g.name) return;
+    const ids = g.txns.map(t => t.id);
+    const patch = { group_name: name || null };
+    const dbPatch = { name };
+    // joining an existing group inherits its category when this row has none
+    if (name && !g.category) {
+      const other = groups.find(x => x.key !== g.key && x.named && normName(x.name) === normName(name));
+      if (other?.category) { patch.group_category = other.category; dbPatch.category = other.category; }
+    }
+    try { await setBankTxnGroup(ids, dbPatch); patchLocal(ids, patch); }
+    catch (e) { alert(e.message || String(e)); }
+  }
+  async function saveCategory(g, category) {
+    const ids = g.txns.map(t => t.id);
+    try { await setBankTxnGroup(ids, { category }); patchLocal(ids, { group_category: category || null }); }
+    catch (e) { alert(e.message || String(e)); }
   }
 
   async function postGroup(g) {
@@ -117,7 +154,6 @@ function GroupedTab({ bankAccounts, bankTransactions = [], businesses, parties =
     await reload();
     alert(`${ok} posted${errs.length ? `, ${errs.length} failed:\n${errs.slice(0, 5).join('\n')}` : '.'}`);
   }
-
   async function ignoreGroup(g) {
     if (!confirm(`Ignore ${g.pending.length} transaction(s)? They stay in the ledger but no journal entry is made.`)) return;
     setBusy(g.key);
@@ -130,44 +166,47 @@ function GroupedTab({ bankAccounts, bankTransactions = [], businesses, parties =
   return (
     <div>
       <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(4,1fr)', marginBottom: 14 }}>
-        <StatCard label="Groups" value={groups.length} sub={`${shown.length} shown`} color="blue" />
-        <StatCard label="Transactions" value={txns.length} color="purple" />
+        <StatCard label="Groups / cards" value={groups.length} sub={`${shown.length} shown`} color="blue" />
+        <StatCard label="Transactions" value={txns.length} sub={`${txns.filter(t => !normName(t.group_name)).length} unnamed`} color="purple" />
         <StatCard label="Waiting to be linked / booked" value={pendingTotal} color={pendingTotal ? 'amber' : 'green'} />
         <StatCard label="Linked" value={txns.filter(t => statusOf(t) === 'linked').length} color="green" />
       </div>
       <div className="filter-bar">
         <button className="btn btn-primary" onClick={() => setImportOpen(true)} disabled={!scopedAccts.length}>⬆ Import statement</button>
         <input placeholder="Search name or narration…" value={search} onChange={e => setSearch(e.target.value)} style={{ ...fld, minWidth: 240 }} />
+        <select value={nameFilter} onChange={e => setNameFilter(e.target.value)} style={fld}>
+          <option value="all">All cards</option><option value="unnamed">Unnamed only</option><option value="named">Named groups only</option>
+        </select>
         <label style={{ fontSize: 12.5, display: 'flex', gap: 6, alignItems: 'center' }}>
-          <input type="checkbox" checked={pendingOnly} onChange={e => setPendingOnly(e.target.checked)} /> Only groups with rows still waiting
+          <input type="checkbox" checked={pendingOnly} onChange={e => setPendingOnly(e.target.checked)} /> Only rows still waiting
         </label>
       </div>
-      <p style={{ ...dim, margin: '4px 2px 12px' }}>Link a group to invoices from <strong>Invoices / Purchase Bills → 💰 Record Payment → 🔗 Link bank payment</strong>. Nothing is matched automatically.</p>
+      <p style={{ ...dim, margin: '4px 2px 12px' }}>
+        Type a name on a card and press Enter — cards with the same name merge into one group. Then link a Customer / Vendor group from
+        <strong> Invoices / Purchase Bills → 💰 Record Payment → 🔗 Link bank payment</strong>. Nothing is grouped or matched automatically.
+      </p>
       {!scopedAccts.length && <EmptyState icon="🏦" message="No bank account yet" sub="Add one in the Ledger tab, then import a statement here." />}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         {shown.map(g => {
-          const rt = route[g.key] || 'invoice';
           const isOpen = open.has(g.key);
-          const bizAccts = accounts.filter(a => a.business_id === bizOf(g));
+          const showPost = g.category && !INVOICE_CATS.has(g.category);
+          const bizAccts = showPost ? accounts.filter(a => a.business_id === bizOf(g)) : [];
           const a = accts[g.key] || {};
           return (
-            <div key={g.key} style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 12, padding: '16px 20px' }}>
+            <div key={g.key} style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 12, padding: '16px 20px', contentVisibility: 'auto', containIntrinsicSize: '0 150px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: 20, flexWrap: 'wrap' }}>
                 <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap', minWidth: 0 }}>
                   <div>
-                    <div style={lbl}>{g.matched ? 'Client / vendor' : 'Name this group'}</div>
-                    <input key={g.key + g.name} list="bank-party-names" defaultValue={g.name} style={{ ...fld, width: 230, fontWeight: 600 }}
-                      title="Type a client / vendor name and press Enter to attach this whole group to it"
-                      onKeyDown={e => { if (e.key === 'Enter') saveName(g, e.currentTarget.value); }} />
-                    <div style={{ ...dim, marginTop: 6 }}>{g.matched ? 'Press Enter to rename / move to another party' : 'Press Enter to save name'}</div>
+                    <div style={lbl}>{g.named ? 'Group name' : 'Name this group'}</div>
+                    <input key={g.key + '|' + g.name} list="bank-group-names" defaultValue={g.name} placeholder="Type a name…" style={{ ...fld, width: 230, fontWeight: 600 }}
+                      onKeyDown={e => { if (e.key === 'Enter') { saveName(g, e.currentTarget.value); e.currentTarget.blur(); } }} />
+                    <div style={{ ...dim, marginTop: 6 }}>Press Enter to save name</div>
                   </div>
                   <div>
-                    <div style={lbl}>Route</div>
-                    <select value={rt} onChange={e => setRoute(r => ({ ...r, [g.key]: e.target.value }))} style={{ ...fld, width: 230 }}>
-                      <option value="invoice">Link to invoices / bills</option>
-                      <option value="journal">Post as journal entry…</option>
-                      <option value="ignore">Ignore (no entry)</option>
+                    <div style={lbl}>Type / category routing</div>
+                    <select value={g.category} onChange={e => saveCategory(g, e.target.value)} style={{ ...fld, width: 230 }}>
+                      {CATEGORIES.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
                     </select>
                   </div>
                 </div>
@@ -183,9 +222,11 @@ function GroupedTab({ bankAccounts, bankTransactions = [], businesses, parties =
                   </button>
                 </div>
               </div>
-              {g.variants > 1 && <div style={{ ...dim, marginTop: 4 }}>Merged from {g.variants} narration variations</div>}
+              <div style={{ ...dim, marginTop: 4, fontFamily: 'var(--mono)', overflowWrap: 'anywhere' }}>
+                {g.txns.length === 1 ? g.txns[0].description : g.variants > 1 ? `Merged from ${g.variants} narration variations` : g.txns[0].description}
+              </div>
 
-              {rt === 'journal' && (
+              {showPost && (
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 10 }}>
                   <select value={a.dr || ''} onChange={e => setAccts(x => ({ ...x, [g.key]: { ...a, dr: e.target.value } }))} style={{ ...fld, flex: 1, minWidth: 170 }}>
                     <option value="">Debit account…</option>{bizAccts.map(x => <option key={x.id} value={x.name}>{x.name}</option>)}
@@ -195,11 +236,7 @@ function GroupedTab({ bankAccounts, bankTransactions = [], businesses, parties =
                     <option value="">Credit account…</option>{bizAccts.map(x => <option key={x.id} value={x.name}>{x.name}</option>)}
                   </select>
                   <button className="btn btn-primary btn-sm" disabled={busy === g.key || !g.pending.length} onClick={() => postGroup(g)}>Post {g.pending.length} waiting</button>
-                </div>
-              )}
-              {rt === 'ignore' && (
-                <div style={{ marginTop: 10 }}>
-                  <button className="btn btn-ghost btn-sm" disabled={busy === g.key || !g.pending.length} onClick={() => ignoreGroup(g)}>Ignore {g.pending.length} waiting</button>
+                  <button className="btn btn-ghost btn-sm" disabled={busy === g.key || !g.pending.length} onClick={() => ignoreGroup(g)}>Ignore</button>
                 </div>
               )}
 
@@ -240,9 +277,9 @@ function GroupedTab({ bankAccounts, bankTransactions = [], businesses, parties =
             </div>
           );
         })}
-        {shown.length === 0 && scopedAccts.length > 0 && <EmptyState icon="✅" message={txns.length ? 'Nothing waiting' : 'No bank transactions yet'} sub={txns.length ? 'Untick “Only groups with rows still waiting” to see everything.' : 'Use “Import statement” to bring in a bank statement.'} />}
+        {shown.length === 0 && scopedAccts.length > 0 && <EmptyState icon="✅" message={txns.length ? 'Nothing to show' : 'No bank transactions yet'} sub={txns.length ? 'Untick “Only rows still waiting” or change the filter to see more.' : 'Use “Import statement” to bring in a bank statement.'} />}
       </div>
-      <datalist id="bank-party-names">{parties.map(p => <option key={p.id} value={p.name} />)}</datalist>
+      <datalist id="bank-group-names">{namedNames.map(n => <option key={n} value={n} />)}</datalist>
 
       {importOpen && <ImportModal accts={scopedAccts} existing={bankTransactions} onClose={() => setImportOpen(false)} onDone={async () => { setImportOpen(false); await reload(); }} />}
     </div>

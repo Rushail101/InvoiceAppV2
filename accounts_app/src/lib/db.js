@@ -842,11 +842,15 @@ export async function saveBankTxnsHeldBulk(rows, bankAccountId) {
   return n;
 }
 
-// Tag bank rows with the client / vendor they belong to (drives the grouping in Bank -> Import & Link).
-export async function setBankTxnParty(ids, partyId) {
+// Name / categorise bank rows. Rows given the same name are shown as one group in Bank -> Grouped.
+// patch = { name?, category? }
+export async function setBankTxnGroup(ids, patch) {
   if (!ids.length) return;
-  const { error } = await supabase.from('bank_transactions').update({ party_id: partyId || null }).in('id', ids);
-  if (error) throw error;
+  const upd = {};
+  if ('name' in patch) upd.group_name = (patch.name || '').trim() || null;
+  if ('category' in patch) upd.group_category = patch.category || null;
+  const { error } = await supabase.from('bank_transactions').update(upd).in('id', ids);
+  if (error) throw new Error(`${error.message} — run sql/migrations/004_bank_group_name.sql in Supabase first.`);
 }
 
 // Post a held row to the books against two accounts you pick (rent, salary, loan, charges…).
