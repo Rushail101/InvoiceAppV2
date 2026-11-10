@@ -18,6 +18,7 @@
  *           5=Description, 6=Cr/Dr, 7=Amount, 8=Balance
  */
 
+import { pagesFromPdfjs, parseIciciPages } from '../lib/iciciPdf.js';
 import { useState, useCallback, useRef } from 'react';
 import { fmt, fmtDate, today } from '../lib/constants.js';
 import { saveBankTxnWithJournal, savePayment, updateInvoiceStatus } from '../lib/db.js';
@@ -110,7 +111,8 @@ export async function parseICICIXls(file) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// PDF PARSER (fallback) — extract text via pdfjs, parse with regex
+// PDF PARSER — ICICI "Detailed Statement" and "Transactions List" layouts (see lib/iciciPdf.js).
+// Returns the rows; the array also carries `.meta` (period, totals, running-balance check).
 // ══════════════════════════════════════════════════════════════════════════════
 export async function parseICICIPdf(file) {
   if (!window.pdfjsLib) {
@@ -118,36 +120,15 @@ export async function parseICICIPdf(file) {
       const script = document.createElement('script');
       script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
       script.onload = resolve;
-      script.onerror = reject;
+      script.onerror = () => reject(new Error('Could not load the PDF reader (pdf.js). Check your internet connection.'));
       document.head.appendChild(script);
     });
     window.pdfjsLib.GlobalWorkerOptions.workerSrc =
       'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
   }
-  const arrayBuffer = await file.arrayBuffer();
-  const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-  let fullText = '';
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i);
-    const content = await page.getTextContent();
-    fullText += content.items.map(item => item.str).join(' ') + '\n';
-  }
-
-  // Try to parse ICICI PDF statement rows
-  // Pattern: date description DR/CR amount balance
-  const txns = [];
-  const lines = fullText.split('\n');
-  const txnPattern = /(\d{2}\/\d{2}\/\d{4})\s+(.+?)\s+(CR|DR)\s+([\d,]+\.?\d*)\s+([\d,]+\.?\d*)/;
-  for (const line of lines) {
-    const m = line.match(txnPattern);
-    if (!m) continue;
-    const [, rawDate, desc, crDr, rawAmt] = m;
-    const parts = rawDate.split('/');
-    const dateStr = `${parts[2]}-${parts[1]}-${parts[0]}`;
-    const amount = parseFloat(rawAmt.replace(/,/g, ''));
-    if (isNaN(amount) || amount <= 0) continue;
-    txns.push({ date: dateStr, description: desc.trim(), reference: '', type: crDr === 'CR' ? 'credit' : 'debit', amount, balance: null });
-  }
+  const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
+  const { txns, meta } = parseIciciPages(await pagesFromPdfjs(pdf));
+  txns.meta = meta;
   return txns;
 }
 

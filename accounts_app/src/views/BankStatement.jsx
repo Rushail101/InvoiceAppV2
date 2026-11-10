@@ -292,7 +292,7 @@ const fld = { background: 'var(--bg3)', border: '1px solid var(--border2)', colo
 
 function ImportModal({ accts, existing, onClose, onDone }) {
   const [acct, setAcct] = useState(accts[0]?.id || '');
-  const [res, setRes] = useState(null);     // { fresh, dupes, name }
+  const [res, setRes] = useState(null);     // { fresh, dupes, name, meta }
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const fileRef = useRef();
@@ -304,7 +304,7 @@ function ImportModal({ accts, existing, onClose, onDone }) {
       const rows = /\.pdf$/i.test(f.name) ? await parseICICIPdf(f) : await parseICICIXls(f);
       if (!rows.length) throw new Error('No transactions found in that file.');
       const { fresh, dupes } = filterNewRows(rows, existing.filter(t => t.bank_account_id === acct));
-      setRes({ fresh, dupes, name: f.name });
+      setRes({ fresh, dupes, name: f.name, meta: rows.meta || null });
     } catch (e) { setErr(e.message || String(e)); }
     setBusy(false);
   }
@@ -331,6 +331,15 @@ function ImportModal({ accts, existing, onClose, onDone }) {
       {res && (
         <div style={{ marginTop: 12, fontSize: 13 }}>
           <strong>{res.name}</strong>: {res.fresh.length} new, {res.dupes.length} already in the app (skipped).
+          {res.meta && (
+            <div style={{ marginTop: 8, fontSize: 12, lineHeight: 1.6, background: 'var(--bg3)', borderRadius: 8, padding: '10px 12px' }}>
+              <div>{res.meta.format} · {res.meta.count} rows · {fmtDate(res.meta.from)} → {fmtDate(res.meta.to)}</div>
+              <div style={{ fontFamily: 'var(--mono)' }}>Debits {fmt(res.meta.totalDebit)} · Credits {fmt(res.meta.totalCredit)} <span style={dim}>(compare with the statement)</span></div>
+              {res.meta.balanceMismatches.length === 0 && res.meta.missingSerials.length === 0
+                ? <div style={{ color: 'var(--green)' }}>✓ Every row ties to the running balance and no serial numbers are missing — the whole statement was read.</div>
+                : <div style={{ color: 'var(--amber)' }}>⚠ {res.meta.balanceMismatches.length ? `${res.meta.balanceMismatches.length} row(s) don't tie to the running balance (Sr ${res.meta.balanceMismatches.slice(0, 8).join(', ')}). ` : ''}{res.meta.missingSerials.length ? `Missing Sr no.: ${res.meta.missingSerials.join(', ')}. ` : ''}Check these before importing.</div>}
+            </div>
+          )}
         </div>
       )}
       {err && <p className="err-msg">{err}</p>}

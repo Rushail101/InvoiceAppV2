@@ -89,7 +89,7 @@ Tables over 1,000 rows are paged in parallel (Supabase caps a single request at 
 ## Bank import → linking workflow
 
 1. Run migrations `002_bank_txn_links.sql`, `003_bank_pending_link.sql` and `004_bank_group_name.sql` once in the Supabase SQL editor.
-2. **Bank → Grouped → Import statement** (ICICI XLS / PDF). Rows are saved with no journal entry and duplicates are skipped.
+2. **Bank → Grouped → Import statement** (ICICI XLS, or the PDF: the internet-banking "Detailed Statement" and the "Transactions List" layouts — each row is checked against the running balance and the import screen tells you if anything is missing). Rows are saved with no journal entry and duplicates are skipped.
    Every transaction appears as its own **unnamed, unlabeled card** — nothing is grouped automatically.
 3. Type a name on a card and press Enter, and pick a category. Cards given the same name merge into one group
    (PAID / RECEIVED / TXNS totals, "Show transactions"). Name suggestions come from your existing names and parties.
