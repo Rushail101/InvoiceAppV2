@@ -200,11 +200,14 @@ const INV_COLS = [
   'total','is_interstate','tds_amount','reverse_charge','ship_to_address',
   'itc_eligible','itc_ineligible_reason','purchase_order_ref','grn_ref','journal_posted',
   'party_gstin_snapshot',
+  'ops_order_key','po_number',   // link to a production order (sql/integration/001)
 ];
 
 function pickInvCols(data) {
   return Object.fromEntries(
-    Object.entries(data).filter(([k]) => INV_COLS.includes(k))
+    Object.entries(data).filter(([k, v]) => INV_COLS.includes(k)
+      // integration columns only exist after sql/integration/001 — leave them out when unused
+      && !(['ops_order_key', 'po_number'].includes(k) && (v == null || v === '')))
   );
 }
 
@@ -234,6 +237,7 @@ export async function saveInvoice(inv, items, id) {
       sgst_amount: Number(it.sgst || 0),
       igst_amount: Number(it.igst || 0),
       amount: Number(it.lineTotal || 0),
+      ...(it.ops_product_id ? { ops_product_id: it.ops_product_id } : {}),
     }));
     const { error } = await supabase.from('invoice_items').insert(rows);
     if (error) throw new Error(`Invoice items save failed: ${error.message}`);
@@ -1006,6 +1010,7 @@ export async function saveChallan(challan, items, id) {
     tax_amount: challan.tax_amount,
     total: challan.total,
     is_interstate: challan.is_interstate,
+    ...(challan.ops_order_key ? { ops_order_key: challan.ops_order_key, po_number: challan.po_number || null } : {}),
   };
 
   let cid = id;

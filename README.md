@@ -26,6 +26,14 @@ Notes on behaviour:
 - Balances everywhere are total − payments − TDS deducted − credit notes. Deleting a payment, expense, bank row or invoice also deletes its journal entry.
 - Ctrl/⌘+K jumps to any screen; the current screen is kept in the URL (`#/invoices`).
 
+## Linked with the Needle Point operations app
+
+Production orders, dispatches, brands and staff from the operations app (same Supabase
+project, `public` schema) drive **Sales → Production Orders** (proforma, per-dispatch or
+final invoices, challans, advances, profit per order) and **Purchases → Payroll**. Brands
+and team members are kept in sync as parties. Setup and the day-to-day flow are in
+[MERGE_GUIDE.md](MERGE_GUIDE.md); the SQL is in [`accounts_app/sql/integration/`](accounts_app/sql/integration/).
+
 ## Setup
 
 1. **Database.** In the Supabase SQL editor run [`accounts_app/sql/schema.sql`](accounts_app/sql/schema.sql)

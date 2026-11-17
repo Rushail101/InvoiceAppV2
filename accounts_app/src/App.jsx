@@ -17,6 +17,7 @@ import { GSTR1View } from './views/GSTR1.jsx';
 import { ItemsView } from './views/Items.jsx';
 import { DeliveryChallansView } from './views/DeliveryChallans.jsx';
 import { GSTR3BView, AuditTrailView, KPIDashboard } from './views/EnterpriseViews.jsx';
+import { ProductionOrdersView, PayrollView } from './views/Production.jsx';
 import { Badge, ModalShell, FG, EmptyState, Toaster, toast } from './components/ui.jsx';
 import SCHEMA_SQL from '../sql/schema.sql?raw';
 
@@ -24,6 +25,7 @@ import SCHEMA_SQL from '../sql/schema.sql?raw';
 // sidebar search matches on (Ctrl/⌘+K focuses it).
 const NAV = [
   { id: 'dashboard',   label: 'Dashboard',         icon: '◈',  group: null },
+  { id: 'production',  label: 'Production Orders', icon: '🧵', group: 'Sales', keys: 'po orders dispatch needle point garments ops' },
   { id: 'invoices',    label: 'Invoices',          icon: '📄', group: 'Sales', keys: 'tax invoice bill sale' },
   { id: 'proformas',   label: 'Proforma',          icon: '📋', group: 'Sales', keys: 'pi advance quotation estimate' },
   { id: 'creditnotes', label: 'Credit Notes',      icon: '↩',  group: 'Sales', keys: 'cn return' },
@@ -31,6 +33,7 @@ const NAV = [
   { id: 'challans',    label: 'Delivery Challans', icon: '🚚', group: 'Sales', keys: 'dc dispatch eway' },
   { id: 'purchasebills', label: 'Purchase Bills',  icon: '🧾', group: 'Purchases', keys: 'supplier vendor itc' },
   { id: 'expenses',    label: 'Expenses',          icon: '💸', group: 'Purchases', keys: 'spend rent salary' },
+  { id: 'payroll',     label: 'Payroll',           icon: '👷', group: 'Purchases', keys: 'salary wages staff employees labour' },
   { id: 'bank',        label: 'Bank',              icon: '🏦', group: 'Banking', keys: 'statement import icici' },
   { id: 'payments',    label: 'Payments',          icon: '💳', group: 'Banking', keys: 'receipts collections' },
   { id: 'paylist',     label: 'Payment List',      icon: '💵', group: 'Banking' },
@@ -736,6 +739,11 @@ export default function App() {
   const [heavyReady, setHeavyReady] = useState({});
   const heavyRequested = useRef({});
   const coreLoaded = useRef(false);
+  // Screens must not render before the first load: several fetch on their own
+  // when they mount, and with the screen now restored from the URL (#/audit…)
+  // they could mount before the Supabase client existed.
+  const [coreReady, setCoreReady] = useState(false);
+  const dbConfigured = !!((import.meta.env.VITE_SUPABASE_URL || localStorage.getItem('sb_url')) && (import.meta.env.VITE_SUPABASE_ANON_KEY || localStorage.getItem('sb_key')));
 
   // Auto-connect Supabase from env vars
   useEffect(() => {
@@ -788,7 +796,8 @@ export default function App() {
       ]);
       setData(d => ({ ...d, ...core }));
       coreLoaded.current = true;
-    } catch (e) { console.error('Load error:', e); }
+    } catch (e) { console.error('Load error:', e); toast(`Couldn't load data: ${e.message || e}`, 'error'); }
+    setCoreReady(true);
     if (first) setCoreLoading(false); else setRefreshing(false);
   }, [client, loadGroup]);
 
@@ -812,7 +821,7 @@ export default function App() {
     bankAccounts, bankTransactions, items, challans, invoiceItems, bankLinks, bankLinksReady, bankLinksError } = data;
 
   // true while the first load runs, or while this screen's big tables are still being fetched
-  const loading = coreLoading || !viewNeeds.every(g => heavyReady[g]);
+  const loading = (dbConfigured && !coreReady) || coreLoading || !viewNeeds.every(g => heavyReady[g]);
 
   const cp = { businesses, activeBiz, reload };
 
@@ -922,6 +931,11 @@ export default function App() {
             {!loading && view === 'challans' && (
               <DeliveryChallansView challans={challans} parties={parties} invoices={invoices} {...cp} />
             )}
+            {!loading && view === 'production' && (
+              <ProductionOrdersView businesses={businesses} parties={parties} invoices={invoices} payments={payments} creditNotes={creditNotes}
+                challans={challans} expenses={expenses} catalogItems={items} reload={reload} />
+            )}
+            {!loading && view === 'payroll' && <PayrollView businesses={businesses} parties={parties} expenses={expenses} reload={reload} />}
             {!loading && view === 'parties' && <PartiesView parties={parties} invoices={invoices} payments={payments} creditNotes={creditNotes} {...cp} />}
             {!loading && view === 'items' && <ItemsView items={items} {...cp} />}
             {!loading && view === 'purchasebills' && (

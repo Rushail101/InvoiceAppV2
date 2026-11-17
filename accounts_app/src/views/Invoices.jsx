@@ -34,12 +34,14 @@ function calcItem(it, isIntrastate, priceMode = 'exclusive', invDiscRatio = 0) {
 }
 
 // ─── INVOICE MODAL ─────────────────────────────────────────────────────────────
-export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItems = [], editData, allInvoices, isProforma = false, activeBiz, purchaseMode = false }) {
+// `prefill` (optional) seeds a NEW document — Production Orders uses it to open
+// a proforma / invoice with the order's garments, quantities, rates and GST.
+export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItems = [], editData, allInvoices, isProforma = false, activeBiz, purchaseMode = false, prefill = null, saveLabel }) {
   const isPF = isProforma || (editData?.status === 'proforma');
   // With "All Businesses" selected, start from the business you last saved a
   // document for, rather than whichever sorts first alphabetically.
   const lastBiz = (() => { try { return localStorage.getItem('np_last_doc_biz'); } catch (_) { return null; } })();
-  const initialBizId = editData?.business_id || activeBiz || (businesses.some(b => b.id === lastBiz) ? lastBiz : businesses[0]?.id) || '';
+  const initialBizId = editData?.business_id || prefill?.business_id || activeBiz || (businesses.some(b => b.id === lastBiz) ? lastBiz : businesses[0]?.id) || '';
   const isPurchase = editData ? editData.type === 'purchase' : purchaseMode;
   const initialDate = editData?.issue_date || today();
   // Purchase bills carry the SUPPLIER's bill number, so a new one starts blank
@@ -49,17 +51,19 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
 
   const [f, setF] = useState({
     business_id: initialBizId,
-    party_id: editData?.party_id || '',
+    party_id: editData?.party_id || prefill?.party_id || '',
+    ops_order_key: editData?.ops_order_key || prefill?.ops_order_key || null,
+    po_number: editData?.po_number || prefill?.po_number || null,
     // Sequence must be unique per GSTIN (Rule 46(b)) — scope the scan to this
     // business only, not every business's invoices, or numbers will skip
     // around whenever another business creates a document in between.
     invoice_number: editData?.invoice_number || suggestNumber(initialBizId, initialDate),
     type: editData?.type || (purchaseMode ? 'purchase' : 'sale'),
     issue_date: initialDate,
-    due_date: editData?.due_date || '',
+    due_date: editData?.due_date || prefill?.due_date || '',
     // A supplier bill is a real liability the moment it's recorded (its journal posts on save), so it starts as received.
     status: editData?.status || (isPF ? 'proforma' : isPurchase ? 'sent' : 'draft'),
-    notes: editData?.notes || '',
+    notes: editData?.notes || prefill?.notes || '',
     discount_percent: editData?.discount_percent || 0,
     discount_amount: editData?.discount_amount || 0,
     tds_amount: editData?.tds_amount || 0,
@@ -85,6 +89,7 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
 
   const [items, setItems] = useState(
     editData?.items?.length ? editData.items
+      : prefill?.items?.length ? prefill.items
       : [{ description: '', hsn_code: '', quantity: 1, unit_price: 0, discount_percent: 0, tax_percent: 5 }]
   );
   const [busy, setBusy] = useState(false);
@@ -253,10 +258,11 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
               <button className="btn btn-ghost" onClick={() => save(false)} disabled={busy} title="Keep as draft — drafts are not included in GSTR-1">Save draft</button>
               <button className="btn btn-primary" onClick={() => save(true)} disabled={busy}>{busy ? 'Saving…' : 'Save & issue'}</button>
             </>
-          : <button className="btn btn-primary" onClick={() => save(false)} disabled={busy}>{busy ? 'Saving…' : isPurchase ? 'Save bill' : isPF ? 'Save proforma' : 'Save invoice'}</button>}
+          : <button className="btn btn-primary" onClick={() => save(false)} disabled={busy}>{busy ? 'Saving…' : saveLabel || (isPurchase ? 'Save bill' : isPF ? 'Save proforma' : 'Save invoice')}</button>}
       </>}>
 
       {isPF && <div className="pf-banner">⚡ Proforma Invoice — numbered PI-… Use "→ Invoice" to convert when approved.</div>}
+      {f.ops_order_key && <div className="info-banner">🔗 Production order <b>{f.po_number || 'without PO number'}</b> — lines were filled from the order. Check HSN codes and quantities before saving.</div>}
 
       {/* Top fields */}
       <div className="form-row cols-3">

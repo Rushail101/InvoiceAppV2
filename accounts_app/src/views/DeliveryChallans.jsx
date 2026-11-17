@@ -43,33 +43,38 @@ const PURPOSES = ['Job Work', 'Loan / Exhibition', 'Return of Goods', 'Sale — 
 const TRANSPORT_MODES = ['Road', 'Rail', 'Air', 'Ship / Waterways'];
 
 // ─── CHALLAN MODAL ─────────────────────────────────────────────────────────────
-function ChallanModal({ onClose, onSave, businesses, parties, allChallans, invoices, editData, activeBiz }) {
-  const initialBizId = editData?.business_id || activeBiz || businesses[0]?.id || '';
+// `prefill` (optional) seeds a NEW challan — used by Production Orders to start
+// one from a dispatch. `editData` means editing an existing challan.
+export function ChallanModal({ onClose, onSave, businesses, parties, allChallans, invoices, editData, activeBiz, prefill }) {
+  const seed = editData || prefill || null;
+  const initialBizId = seed?.business_id || activeBiz || businesses[0]?.id || '';
   const [f, setF] = useState({
     business_id: initialBizId,
-    party_id: editData?.party_id || '',
+    party_id: seed?.party_id || '',
+    ops_order_key: seed?.ops_order_key || null,
+    po_number: seed?.po_number || null,
     // Scoped per business — Rule 55 challans are also expected to run a
     // consecutive series, same reasoning as invoices/credit notes.
     challan_number: editData?.challan_number || nextChallanNum(allChallans.filter(c => c.business_id === initialBizId)),
     challan_date: editData?.challan_date || today(),
-    purpose: editData?.purpose || 'Job Work',
+    purpose: seed?.purpose || 'Job Work',
     vehicle_number: editData?.vehicle_number || '',
     transport_mode: editData?.transport_mode || 'Road',
     lr_number: editData?.lr_number || '',
     eway_bill_number: editData?.eway_bill_number || '',
     driver_name: editData?.driver_name || '',
     dispatch_from: editData?.dispatch_from || '',
-    dispatch_to: editData?.dispatch_to || '',
+    dispatch_to: seed?.dispatch_to || '',
     linked_invoice_id: editData?.linked_invoice_id || '',
-    notes: editData?.notes || '',
-    status: editData?.status || 'draft',
+    notes: seed?.notes || '',
+    status: seed?.status || 'draft',
     price_mode: editData?.price_mode || 'exclusive',
     round_off: editData?.round_off ?? false,
   });
 
   const [items, setItems] = useState(
-    editData?.items?.length
-      ? editData.items
+    seed?.items?.length
+      ? seed.items
       : [{ description: '', hsn_code: '', quantity: 1, unit: 'Nos', unit_price: 0, discount_percent: 0, tax_percent: 5 }]
   );
   const [busy, setBusy] = useState(false);

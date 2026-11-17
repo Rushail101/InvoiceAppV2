@@ -48,3 +48,36 @@ It is safe to re-run. It ends with an optional clean-up query for journal entrie
 
 - **Sales revenue includes GST.** A customer payment is posted in full to *Sales Revenue*. GST is never credited to *CGST/SGST/IGST Payable*, so P&L revenue is overstated by the GST and the Balance Sheet shows no GST liability. The fix is to split each receipt in proportion to the invoice's tax. It changes the books from now on, so it should be your call.
 - **Proforma conversion date.** The "→ Invoice" button dates the tax invoice today, while automatic conversion on full payment uses the payment date. These are deliberately different, but worth confirming that this is what your CA wants.
+
+
+---
+
+# Round 2 — link with the Needle Point operations app
+
+Setup: follow [MERGE_GUIDE.md](MERGE_GUIDE.md). Everything below needs both apps in one Supabase project and `sql/integration/001_link_operations.sql` run.
+
+## New screens
+
+- **Sales → Production Orders**
+  - Lists every order from the operations app with pieces ordered, dispatched and invoiced, order value, amount received, balance and billing status.
+  - From an order you can raise:
+    - a **proforma for the advance**
+    - an **invoice for dispatched pieces** (only those not yet invoiced)
+    - a **delivery challan** for in-state dispatches
+    - a **final invoice** for whatever is left. If nothing has been invoiced yet, this converts the proforma so the advance stays attached.
+  - Each document opens with the garments, size breakdown, rate, GST slab and a suggested HSN code already filled in.
+  - The order's advance can be adjusted against per-dispatch invoices. If a payment is bigger than the invoice, it is split, and its journal entry is split with it.
+  - Shows estimated profit per order: revenue, minus purchase bills tagged with the PO number, minus labour costed from the work log.
+- **Purchases → Payroll**
+  - Shows each active team member's monthly salary, the pieces they logged and their cost per piece.
+  - **Post salaries** creates one Wages & Salaries expense per person, with its journal entry. The database blocks posting the same person twice for a month.
+
+## Sync
+
+- Every brand becomes a client party, and every team member an employee party. An existing party with the same name is reused rather than duplicated.
+- GSTIN, state, address, PAN, email and phone sync both ways between brand and party.
+- Invoices, challans and invoice lines record which order and garment they came from. Dispatches record their invoice or challan.
+
+## Fixes
+
+- Opening the app directly on a screen (e.g. `#/audit`, `#/gstr3b`) could crash it. Those screens loaded their own data before the database connection existed, which last round's URL routing made possible. The app now waits for the first data load.

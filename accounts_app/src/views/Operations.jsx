@@ -75,7 +75,7 @@ export function PartiesView({ parties, businesses, activeBiz, reload, invoices =
             {filtered.map(p => (
               <tr key={p.id}>
                 <td style={{ fontWeight: 500 }}>{p.name}</td>
-                <td><Badge status={p.type} /></td>
+                <td><Badge status={p.type} />{(p.brand_id || p.employee_id) && <span className="tag" style={{ marginLeft: 5 }} title={p.brand_id ? 'Synced with a brand in the operations app' : 'Synced with a team member in the operations app'}>🔗 ops</span>}</td>
                 <td className="mono" style={{ fontSize: 11 }}>{p.phone || '—'}</td>
                 <td style={{ fontSize: 11, color: 'var(--text2)' }}>{p.state || '—'}</td>
                 <td className="mono" style={{ fontSize: 10, color: p.gstin && !isGSTINValid(p.gstin) ? 'var(--red)' : 'var(--text3)' }} title={p.gstin && !isGSTINValid(p.gstin) ? 'GSTIN failed the format/checksum test' : undefined}>{p.gstin || '—'}{p.gstin && !isGSTINValid(p.gstin) ? ' ⚠' : ''}</td>
