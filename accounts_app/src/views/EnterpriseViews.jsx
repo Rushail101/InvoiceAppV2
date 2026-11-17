@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '../lib/db.js';
 import { Badge, StatCard, EmptyState } from '../components/ui.jsx';
-import { fmt, fmtDate, getFY } from '../lib/constants.js';
+import { fmt, fmtDate, getFY, thisMonthKey, monthEnd, invoiceDue } from '../lib/constants.js';
 
 const money = n => `₹${Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
 const bizFilter = (q, activeBiz) => activeBiz ? q.eq('business_id', activeBiz) : q;
@@ -49,7 +49,7 @@ function getPeriodOptions() {
 // filing on the actual GST portal (this never files anything itself).
 export function GSTR3BView({ activeBiz, businesses = [], invoices = [], creditNotes = [], reload }) {
   const periods = getPeriodOptions();
-  const currentMonth = new Date().toISOString().slice(0, 7);
+  const currentMonth = thisMonthKey();
   const defaultPeriod = periods.find(p => p.value === currentMonth)?.value || periods[0]?.value;
   const [period, setPeriod] = useState(defaultPeriod);
   const [msg, setMsg] = useState('');
@@ -67,14 +67,18 @@ export function GSTR3BView({ activeBiz, businesses = [], invoices = [], creditNo
   };
   useEffect(() => { loadHistory(); }, [activeBiz]);
 
-  const sales = useMemo(() => invoices.filter(i => (!activeBiz || i.business_id === activeBiz) && i.type !== 'purchase' && i.status !== 'cancelled'), [invoices, activeBiz]);
+  // Same rule as GSTR-1: proformas and un-issued drafts are not supplies yet. They
+  // used to be included here, so GSTR-3B output tax didn't match GSTR-1.
+  const sales = useMemo(() => invoices.filter(i => (!activeBiz || i.business_id === activeBiz) && i.type !== 'purchase' && !['cancelled', 'proforma', 'draft'].includes(i.status)), [invoices, activeBiz]);
   const purchases = useMemo(() => invoices.filter(i => (!activeBiz || i.business_id === activeBiz) && i.type === 'purchase' && i.status !== 'cancelled'), [invoices, activeBiz]);
   const start = period + '-01';
-  const end = new Date(Number(period.slice(0, 4)), Number(period.slice(5, 7)), 0).toISOString().slice(0, 10);
+  // Built from the calendar, not toISOString(), which in IST rolled the month's
+  // last day back by one and dropped invoices dated on it.
+  const end = monthEnd(period);
   const inPeriod = d => d >= start && d <= end;
   const s = sales.filter(x => inPeriod(x.issue_date));
   const p = purchases.filter(x => inPeriod(x.issue_date));
-  const cn = creditNotes.filter(x => (!activeBiz || x.business_id === activeBiz) && x.note_type !== 'commercial' && inPeriod(x.cn_date));
+  const cn = creditNotes.filter(x => (!activeBiz || x.business_id === activeBiz) && x.note_type !== 'commercial' && x.status !== 'cancelled' && inPeriod(x.cn_date));
 
   const output = { taxable: s.reduce((a, x) => a + num(x.subtotal), 0), cgst: s.reduce((a, x) => a + num(x.cgst_amount), 0), sgst: s.reduce((a, x) => a + num(x.sgst_amount), 0), igst: s.reduce((a, x) => a + num(x.igst_amount), 0) };
   const cnOut = { cgst: cn.reduce((a, x) => a + num(x.cgst_amount), 0), sgst: cn.reduce((a, x) => a + num(x.sgst_amount), 0), igst: cn.reduce((a, x) => a + num(x.igst_amount), 0) };
@@ -148,7 +152,7 @@ export function GSTR3BView({ activeBiz, businesses = [], invoices = [], creditNo
       </div>
 
       {(s.length === 0 && p.length === 0) ? (
-        <EmptyState icon="🧮" message={`No sale or purchase invoices for ${periodLabel}`} sub="Ensure invoices are saved with status sent/paid/partially_paid — drafts and proforma are excluded" />
+        <EmptyState icon="🧮" message={`No sale or purchase invoices for ${periodLabel}`} sub="Drafts and proformas are excluded — issue an invoice (Save & issue) for it to count" />
       ) : (
         <div className="grid-2" style={{ marginBottom: 16 }}>
           <div>
@@ -194,7 +198,7 @@ export function GSTR3BView({ activeBiz, businesses = [], invoices = [], creditNo
               <td style={{ padding: 9 }}>{h.period}</td>
               <td style={{ padding: 9 }}>{fmt(h.payload?.payable)}</td>
               <td style={{ padding: 9 }}><Badge status={h.status} /></td>
-              <td style={{ padding: 9 }}>{fmtDate ? fmtDate(h.updated_at) : new Date(h.updated_at).toLocaleDateString('en-IN')}</td>
+              <td style={{ padding: 9 }}>{fmtDate(h.updated_at || h.created_at)}</td>
             </tr>
           ))} />
         </>
@@ -234,24 +238,52 @@ export function AuditTrailView({ activeBiz }) {
 }
 
 // ─── Management Dashboard ───────────────────────────────────────────────────
-export function KPIDashboard({ activeBiz, invoices = [], expenses = [], payments = [], parties = [] }) {
+// Revenue counts issued invoices only (proformas and drafts used to be added in),
+// and receivables/payables allow for TDS and credit notes like every other screen.
+export function KPIDashboard({ activeBiz, invoices = [], expenses = [], payments = [], parties = [], creditNotes = [] }) {
   const inv = invoices.filter(i => !activeBiz || i.business_id === activeBiz);
   const exp = expenses.filter(i => !activeBiz || i.business_id === activeBiz);
   const pay = payments.filter(i => !activeBiz || i.business_id === activeBiz);
-  const sales = inv.filter(i => i.type !== 'purchase' && i.status !== 'cancelled').reduce((a, x) => a + num(x.total), 0);
-  const purchases = inv.filter(i => i.type === 'purchase' && i.status !== 'cancelled').reduce((a, x) => a + num(x.total), 0);
-  const receivable = inv.filter(i => i.type !== 'purchase' && !['cancelled', 'proforma'].includes(i.status)).reduce((a, x) => a + Math.max(0, num(x.total) - pay.filter(p => p.invoice_id === x.id).reduce((s, p) => s + num(p.amount), 0)), 0);
-  const payable = inv.filter(i => i.type === 'purchase' && !['cancelled', 'proforma'].includes(i.status)).reduce((a, x) => a + Math.max(0, num(x.total) - pay.filter(p => p.invoice_id === x.id).reduce((s, p) => s + num(p.amount), 0)), 0);
-  return <Shell title="Management Dashboard" subtitle="Exception-first KPIs across sales, purchases and working capital.">
-    <div className="grid-4">{[['Revenue', sales], ['Purchases', purchases], ['Receivables', receivable], ['Payables', payable]].map(([a, b]) => <div className="metric card" key={a}><span>{a}</span><strong>{money(b)}</strong></div>)}</div>
-    <div className="grid-2" style={{ marginTop: 18 }}>
-      <div className="card"><div className="card-head">Operational Signals</div><div style={{ display: 'grid', gap: 10, fontSize: 13 }}>
-        <div>👥 Active parties <strong>{parties.filter(p => !activeBiz || p.business_id === activeBiz).length}</strong></div>
-        <div>🧾 Open sales invoices <strong>{inv.filter(i => !['paid', 'cancelled', 'proforma'].includes(i.status) && i.type !== 'purchase').length}</strong></div>
-        <div>💸 Expenses <strong>{money(exp.reduce((a, x) => a + num(x.amount), 0))}</strong></div>
-        <div>💳 Payments recorded <strong>{money(pay.reduce((a, x) => a + num(x.amount), 0))}</strong></div>
-      </div></div>
-      <div className="card"><div className="card-head">Automation Philosophy</div><p style={{ color: 'var(--text2)', lineHeight: 1.7, fontSize: 13 }}>Enter once → post once → reconcile automatically → review exceptions. GST calculations, numbering and workflow rules stay deterministic; no paid AI/API is required.</p></div>
+  const paysByInv = {}; pay.forEach(p => { (paysByInv[p.invoice_id] ||= []).push(p); });
+  const cnsByInv = {}; creditNotes.forEach(c => { (cnsByInv[c.invoice_id] ||= []).push(c); });
+  const due = i => Math.max(0, invoiceDue(i, paysByInv[i.id] || [], cnsByInv[i.id] || []));
+  const issuedSales = inv.filter(i => i.type !== 'purchase' && !['cancelled', 'proforma', 'draft'].includes(i.status));
+  const bills = inv.filter(i => i.type === 'purchase' && i.status !== 'cancelled');
+  const sales = issuedSales.reduce((a, x) => a + num(x.total), 0);
+  const purchases = bills.reduce((a, x) => a + num(x.total), 0);
+  const receivable = issuedSales.reduce((a, x) => a + due(x), 0);
+  const payable = bills.reduce((a, x) => a + due(x), 0);
+  const totalExp = exp.reduce((a, x) => a + num(x.amount), 0);
+  const received = pay.filter(p => issuedSales.some(i => i.id === p.invoice_id) || inv.some(i => i.id === p.invoice_id && i.status === 'proforma')).reduce((a, x) => a + num(x.amount), 0);
+  const collectionRate = sales > 0 ? Math.min(100, (1 - receivable / sales) * 100) : 0;
+  // Days sales outstanding: receivable ÷ average daily sales over the last 90 days
+  const d90 = new Date(); d90.setDate(d90.getDate() - 90);
+  const k90 = `${d90.getFullYear()}-${String(d90.getMonth() + 1).padStart(2, '0')}-${String(d90.getDate()).padStart(2, '0')}`;
+  const sales90 = issuedSales.filter(i => (i.issue_date || '') >= k90).reduce((a, x) => a + num(x.total), 0);
+  const dso = sales90 > 0 ? Math.round(receivable / (sales90 / 90)) : null;
+  const workingCap = receivable - payable;
+
+  const Metric = ({ label, value, sub, color }) => (
+    <div className={`stat-card ${color}`}><div className="stat-label">{label}</div><div className={`stat-val ${color}`}>{value}</div>{sub && <div className="stat-sub">{sub}</div>}</div>
+  );
+  return <Shell title="Management KPIs" subtitle="Working-capital view across sales and purchases (all time unless stated).">
+    <div className="grid-4" style={{ marginBottom: 12 }}>
+      <Metric label="Revenue (issued)" value={money(sales)} sub={`${issuedSales.length} invoices`} color="green" />
+      <Metric label="Purchases" value={money(purchases)} sub={`${bills.length} bills`} color="blue" />
+      <Metric label="Receivables" value={money(receivable)} sub={`${collectionRate.toFixed(0)}% of billing collected`} color="amber" />
+      <Metric label="Payables" value={money(payable)} sub="owed to suppliers" color="red" />
     </div>
+    <div className="grid-4">
+      <Metric label="Net working capital" value={money(workingCap)} sub="receivables − payables" color={workingCap >= 0 ? 'green' : 'red'} />
+      <Metric label="Days sales outstanding" value={dso == null ? '—' : `${dso} days`} sub="based on last 90 days' sales" color="purple" />
+      <Metric label="Cash received" value={money(received)} sub="incl. proforma advances" color="blue" />
+      <Metric label="Expenses" value={money(totalExp)} sub={`${exp.length} entries`} color="amber" />
+    </div>
+    <div className="card" style={{ marginTop: 16 }}><div className="card-head">Operational signals</div><div style={{ display: 'grid', gap: 10, fontSize: 13 }}>
+      <div>👥 Active parties <strong>{parties.filter(p => !activeBiz || p.business_id === activeBiz).length}</strong></div>
+      <div>🧾 Open sales invoices <strong>{issuedSales.filter(i => due(i) > 0.01).length}</strong></div>
+      <div>📋 Proformas awaiting payment <strong>{inv.filter(i => i.status === 'proforma').length}</strong></div>
+      <div>📝 Draft invoices not issued <strong>{inv.filter(i => i.type !== 'purchase' && i.status === 'draft').length}</strong></div>
+    </div></div>
   </Shell>;
 }

@@ -442,9 +442,8 @@ export function DeliveryChallansView({ challans, parties, businesses, invoices, 
   async function handleDelete(c) {
     if (!confirm(`Delete challan ${c.challan_number}? This cannot be undone.`)) return;
     setBusy(true);
-    await deleteChallan(c.id);
+    try { await deleteChallan(c.id); } finally { setBusy(false); } // a failed delete used to leave the screen stuck "busy"
     reload();
-    setBusy(false);
   }
 
   async function handlePrint(c) {

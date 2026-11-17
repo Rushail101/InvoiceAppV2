@@ -1,6 +1,6 @@
 // views/GSTR1.jsx — GSTR-1 Summary Report with 5% & 18% Tax Rate Separation
 import { useState, useMemo } from 'react';
-import { fmt, fmtDate, getFY, STATE_CODES, B2CL_THRESHOLD, effectiveGstin } from '../lib/constants.js';
+import { fmt, fmtDate, getFY, STATE_CODES, B2CL_THRESHOLD, effectiveGstin, thisMonthKey } from '../lib/constants.js';
 import { EmptyState, PillTabs } from '../components/ui.jsx';
 import { markGSTFiled } from '../lib/db.js';
 
@@ -596,7 +596,7 @@ function GSTSummaryCards({ invoices }) {
 // ─── MAIN GSTR-1 VIEW ─────────────────────────────────────────────────────────
 export function GSTR1View({ invoices, parties, businesses, activeBiz, invoiceItems, payments = [], creditNotes = [], debitNotes = [], reload }) {
   const periods = getPeriodOptions();
-  const currentMonth = new Date().toISOString().slice(0, 7);
+  const currentMonth = thisMonthKey(); // local month — toISOString() is UTC and was a month behind on the 1st before 5:30 am IST
   const defaultPeriod = periods.find(p => p.value === currentMonth)?.value || periods[0]?.value;
   const [period, setPeriod] = useState(defaultPeriod);
   const [activeTab, setActiveTab] = useState('summary');

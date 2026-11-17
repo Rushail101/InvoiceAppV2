@@ -1,11 +1,11 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
-import { fmt, fmtDate, today, DEFAULT_ACCOUNTS } from '../lib/constants.js';
+import { fmt, fmtDate, today, DEFAULT_ACCOUNTS, getFY, fyRange, recentFYs, invoiceDue } from '../lib/constants.js';
 import { saveAccount, saveJournal, deleteJournal, seedAccounts } from '../lib/db.js';
-import { Badge, ModalShell, FG, EmptyState, StatCard, AccountSelect } from '../components/ui.jsx';
+import { Badge, ModalShell, FG, EmptyState, StatCard, AccountSelect, toast } from '../components/ui.jsx';
 import { findDuplicateJournalEntry, jeAmount } from '../lib/tally.js';
 
 // ─── CHART OF ACCOUNTS ────────────────────────────────────────────────────────
-export function ChartOfAccountsView({ accounts, businesses, activeBiz, reload }) {
+export function ChartOfAccountsView({ accounts, businesses, activeBiz, reload, journalLines = [] }) {
   const [showModal, setShowModal] = useState(false);
   const [editAcc, setEditAcc] = useState(null);
   const [seeding, setSeeding] = useState(false);
@@ -15,17 +15,29 @@ export function ChartOfAccountsView({ accounts, businesses, activeBiz, reload })
 
   async function handleSeed() {
     if (!activeBiz) { alert('Select a business first'); return; }
-    if (!confirm('Seed standard Chart of Accounts? This adds ~32 default ledger accounts.')) return;
+    if (!confirm('Add the standard Chart of Accounts? Accounts this business already has (same name) are skipped.')) return;
     setSeeding(true);
-    try { await seedAccounts(activeBiz, DEFAULT_ACCOUNTS); reload(); }
-    catch (e) { alert(e.message); }
+    try {
+      const n = await seedAccounts(activeBiz, DEFAULT_ACCOUNTS, accounts);
+      toast(n ? `${n} account${n === 1 ? '' : 's'} added` : 'All default accounts already exist', n ? 'success' : 'info');
+      reload();
+    }
+    catch (e) { toast(e.message, 'error'); }
     setSeeding(false);
   }
 
+  // The modal's own Business picker used to be ignored (always saved to the
+  // sidebar's business); it's respected now.
   async function handleSave(data, id) {
-    await saveAccount({ ...data, business_id: activeBiz || businesses[0]?.id }, id);
+    await saveAccount({ ...data, business_id: data.business_id || activeBiz || businesses[0]?.id }, id);
+    toast(`Account ${data.code} ${data.name} saved`, 'success');
     reload();
   }
+  const balance = useMemo(() => {
+    const m = {};
+    journalLines.forEach(l => { m[l.account_id] = (m[l.account_id] || 0) + (l.type === 'debit' ? 1 : -1) * Number(l.amount || 0); });
+    return m;
+  }, [journalLines]);
 
   return (
     <>
@@ -45,7 +57,7 @@ export function ChartOfAccountsView({ accounts, businesses, activeBiz, reload })
             </div>
             <div className="table-wrap">
               <table>
-                <thead><tr><th>Code</th><th>Name</th><th>Sub-Group</th><th>Description</th><th>Actions</th></tr></thead>
+                <thead><tr><th>Code</th><th>Name</th><th>Sub-Group</th><th>Description</th><th className="r">Balance</th><th>Actions</th></tr></thead>
                 <tbody>
                   {grpAccs.map(a => (
                     <tr key={a.id}>
@@ -53,6 +65,11 @@ export function ChartOfAccountsView({ accounts, businesses, activeBiz, reload })
                       <td style={{ fontWeight: 500 }}>{a.name}</td>
                       <td style={{ fontSize: 11, color: 'var(--text2)' }}>{a.sub_group || '—'}</td>
                       <td style={{ fontSize: 11, color: 'var(--text3)' }}>{a.description || '—'}</td>
+                      <td className="r mono" style={{ fontSize: 11.5 }}>{(() => {
+                        const raw = balance[a.id] || 0;
+                        const v = ['asset', 'expense'].includes(a.group) ? raw : -raw; // shown on its normal side
+                        return Math.abs(v) < 0.005 ? <span style={{ color: 'var(--text3)' }}>—</span> : <span style={{ color: v < 0 ? 'var(--red)' : 'var(--text)' }}>{v < 0 ? '−' : ''}{fmt(Math.abs(v))}</span>;
+                      })()}</td>
                       <td><button className="btn btn-ghost btn-sm" onClick={() => { setEditAcc(a); setShowModal(true); }}>Edit</button></td>
                     </tr>
                   ))}
@@ -79,9 +96,10 @@ function AccountModal({ onClose, onSave, editData, businesses, activeBiz }) {
     group: editData?.group || 'asset',
     sub_group: editData?.sub_group || '',
     description: editData?.description || '',
-    business_id: activeBiz || businesses[0]?.id || '',
+    business_id: editData?.business_id || activeBiz || businesses[0]?.id || '',
   });
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
 
   const subGroups = {
     asset: ['Current Assets', 'Fixed Assets', 'Investments'],
@@ -92,10 +110,11 @@ function AccountModal({ onClose, onSave, editData, businesses, activeBiz }) {
   };
 
   async function save() {
-    if (!f.name.trim() || !f.code.trim()) return;
-    setBusy(true);
-    await onSave(f, editData?.id);
-    setBusy(false); onClose();
+    if (!f.name.trim() || !f.code.trim()) { setErr('Code and name are required'); return; }
+    setBusy(true); setErr('');
+    try { await onSave(f, editData?.id); onClose(); }
+    catch (e) { setErr(e.message); }
+    setBusy(false);
   }
 
   return (
@@ -126,6 +145,8 @@ function AccountModal({ onClose, onSave, editData, businesses, activeBiz }) {
         </FG>
       </div>
       <FG label="Description"><textarea value={f.description} onChange={e => setF(x => ({ ...x, description: e.target.value }))} /></FG>
+      {(f.group === 'asset' || f.group === 'liability') && !f.sub_group && <p className="warn-msg">Pick a sub-group so it lands in the right Balance Sheet section (blank counts as Current).</p>}
+      {err && <p className="err-msg">{err}</p>}
     </ModalShell>
   );
 }
@@ -597,12 +618,13 @@ export function TrialBalanceView({ accounts, journalLines, journalEntries, invoi
   const accBalances = {};
   filtered.forEach(a => { accBalances[a.id] = { dr: 0, cr: 0 }; });
 
-  const relevantJournals = activeBiz
+  // A Set: .includes() on an array made this O(lines × entries) and slow on real data.
+  const relevantJournals = new Set(activeBiz
     ? journalEntries.filter(j => j.business_id === activeBiz).map(j => j.id)
-    : journalEntries.map(j => j.id);
+    : journalEntries.map(j => j.id));
 
   (journalLines || []).forEach(l => {
-    if (!relevantJournals.includes(l.journal_id)) return;
+    if (!relevantJournals.has(l.journal_id)) return;
     if (!accBalances[l.account_id]) return;
     if (l.type === 'debit') accBalances[l.account_id].dr += Number(l.amount);
     else accBalances[l.account_id].cr += Number(l.amount);
@@ -637,13 +659,13 @@ export function TrialBalanceView({ accounts, journalLines, journalEntries, invoi
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
         <span style={{ fontSize: 12, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>Cumulative · all dates</span>
         <span style={{ fontSize: 12, fontFamily: 'var(--mono)', color: isBalanced ? 'var(--green)' : 'var(--red)' }}>
-          {isBalanced ? '✓ Balanced' : '⚠ Not balanced'}
+          {isBalanced ? '✓ Balanced' : `⚠ Out by ${fmt(Math.abs(sumDr - sumCr))} — check Journal Health`}
         </span>
       </div>
       <div className="table-wrap">
         <table>
           <thead><tr>
-            <th>Code</th><th>Account</th><th>Group</th>
+            <th>Group</th><th>Code</th><th>Account</th>
             <th className="r">Total Debit</th><th className="r">Total Credit</th>
             <th className="r">Closing Dr</th><th className="r">Closing Cr</th>
           </tr></thead>
@@ -846,20 +868,18 @@ export function GeneralLedgerView({ accounts, journalLines, journalEntries, busi
 // ─── BALANCE SHEET ────────────────────────────────────────────────────────────
 export function BalanceSheetView({ accounts, journalLines, journalEntries, invoices, payments, expenses, businesses, activeBiz }) {
   const bizAccounts = activeBiz ? accounts.filter(a => a.business_id === activeBiz) : accounts;
-  const relevantJournals = activeBiz
-    ? journalEntries.filter(j => j.business_id === activeBiz).map(j => j.id)
-    : journalEntries.map(j => j.id);
-
-  // Compute net balance per account
-  function getBalance(accountId) {
-    let dr = 0, cr = 0;
+  // Net Dr − Cr per account, computed once (was re-scanning every journal line
+  // for every account, with an array .includes() inside — very slow on real data).
+  const balances = useMemo(() => {
+    const relevant = new Set(activeBiz ? journalEntries.filter(j => j.business_id === activeBiz).map(j => j.id) : journalEntries.map(j => j.id));
+    const m = {};
     (journalLines || []).forEach(l => {
-      if (!relevantJournals.includes(l.journal_id) || l.account_id !== accountId) return;
-      if (l.type === 'debit') dr += Number(l.amount);
-      else cr += Number(l.amount);
+      if (!relevant.has(l.journal_id)) return;
+      m[l.account_id] = (m[l.account_id] || 0) + (l.type === 'debit' ? 1 : -1) * Number(l.amount || 0);
     });
-    return dr - cr;
-  }
+    return m;
+  }, [journalLines, journalEntries, activeBiz]);
+  const getBalance = accountId => balances[accountId] || 0;
 
   // An account only ever gets excluded from the Balance Sheet if it's
   // explicitly filed under a DIFFERENT recognized sub-group (e.g. "Fixed
@@ -871,10 +891,15 @@ export function BalanceSheetView({ accounts, journalLines, journalEntries, invoi
   // toward nothing at all, while Trial Balance (which doesn't do this
   // filtering) still included it — hence Trial Balance showing balanced
   // while Balance Sheet didn't.
+  // "Investments" (offered in the Add Account form) is shown with Fixed Assets as
+  // non-current; any sub-group the sheet doesn't know falls into Current rather
+  // than vanishing from the totals.
+  const KNOWN_SUB = ['Current Assets', 'Fixed Assets', 'Investments', 'Current Liabilities', 'Long-term Liabilities'];
   function inSubGroup(a, targetSubGroup) {
     if (a.sub_group === targetSubGroup) return true;
+    if (targetSubGroup === 'Fixed Assets' && a.sub_group === 'Investments') return true;
     const isCurrentBucket = targetSubGroup === 'Current Assets' || targetSubGroup === 'Current Liabilities';
-    return isCurrentBucket && !a.sub_group;
+    return isCurrentBucket && (!a.sub_group || !KNOWN_SUB.includes(a.sub_group));
   }
 
   function groupTotal(grp, subGrp) {
@@ -897,10 +922,10 @@ export function BalanceSheetView({ accounts, journalLines, journalEntries, invoi
   const totalLiab = currentLiab + longTermLiab;
 
   // Equity
-  const equity = groupTotal('equity', 'Equity');
+  const equity = groupTotal('equity'); // every equity account — the section below lists them all, whatever their sub-group
   // Net income: use ALL accounts to avoid missing income/expense due to business_id mismatch
-  const income = accounts.filter(a => a.group === 'income').reduce((s, a) => s - getBalance(a.id), 0);
-  const expAmt = accounts.filter(a => a.group === 'expense').reduce((s, a) => s + getBalance(a.id), 0);
+  const income = bizAccounts.filter(a => a.group === 'income').reduce((s, a) => s - getBalance(a.id), 0);
+  const expAmt = bizAccounts.filter(a => a.group === 'expense').reduce((s, a) => s + getBalance(a.id), 0);
   const netIncome = income - expAmt;
   const totalEquity = equity + netIncome;
   const totalLiabEquity = totalLiab + totalEquity;
@@ -919,7 +944,7 @@ export function BalanceSheetView({ accounts, journalLines, journalEntries, invoi
           return (
             <div key={a.id} className="ledger-row">
               <span style={{ color: 'var(--text2)', fontSize: 12.5 }}>{a.name}</span>
-              <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color }}>{fmt(Math.abs(display))}</span>
+              <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color: display < 0 ? 'var(--amber)' : color }} title={display < 0 ? 'Balance is on the opposite side to normal for this account' : undefined}>{display < 0 ? '−' : ''}{fmt(Math.abs(display))}</span>
             </div>
           );
         })}
@@ -944,13 +969,13 @@ export function BalanceSheetView({ accounts, journalLines, journalEntries, invoi
           <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 10, color: 'var(--blue)' }}>ASSETS</div>
           <div className="card" style={{ marginBottom: 12 }}>
             <div className="card-head">Current Assets</div>
-            <AccSection accs={bizAccounts.filter(a => a.group === 'asset' && a.sub_group === 'Current Assets')} grp="asset" color="var(--blue)" />
+            <AccSection accs={bizAccounts.filter(a => a.group === 'asset' && inSubGroup(a, 'Current Assets'))} grp="asset" color="var(--blue)" />
             <div className="ledger-row total"><span>Total Current Assets</span><span style={{ fontFamily: 'var(--mono)', color: 'var(--blue)' }}>{fmt(currentAssets)}</span></div>
           </div>
           <div className="card" style={{ marginBottom: 12 }}>
-            <div className="card-head">Fixed Assets</div>
-            <AccSection accs={bizAccounts.filter(a => a.group === 'asset' && a.sub_group === 'Fixed Assets')} grp="asset" color="var(--blue)" />
-            <div className="ledger-row total"><span>Total Fixed Assets</span><span style={{ fontFamily: 'var(--mono)', color: 'var(--blue)' }}>{fmt(fixedAssets)}</span></div>
+            <div className="card-head">Fixed Assets & Investments</div>
+            <AccSection accs={bizAccounts.filter(a => a.group === 'asset' && inSubGroup(a, 'Fixed Assets'))} grp="asset" color="var(--blue)" />
+            <div className="ledger-row total"><span>Total Non-current Assets</span><span style={{ fontFamily: 'var(--mono)', color: 'var(--blue)' }}>{fmt(fixedAssets)}</span></div>
           </div>
           <div className="card" style={{ background: 'var(--bg3)', border: '1px solid var(--border2)' }}>
             <div className="ledger-row total" style={{ margin: 0, padding: 0 }}>
@@ -965,8 +990,14 @@ export function BalanceSheetView({ accounts, journalLines, journalEntries, invoi
           <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 10, color: 'var(--red)' }}>LIABILITIES & EQUITY</div>
           <div className="card" style={{ marginBottom: 12 }}>
             <div className="card-head">Current Liabilities</div>
-            <AccSection accs={bizAccounts.filter(a => a.group === 'liability' && a.sub_group === 'Current Liabilities')} grp="liability" color="var(--red)" />
+            <AccSection accs={bizAccounts.filter(a => a.group === 'liability' && inSubGroup(a, 'Current Liabilities'))} grp="liability" color="var(--red)" />
             <div className="ledger-row total"><span>Total Current Liabilities</span><span style={{ fontFamily: 'var(--mono)', color: 'var(--red)' }}>{fmt(currentLiab)}</span></div>
+          </div>
+          {/* Long-term liabilities (loans) were in the totals but had no section, so the lines didn't add up. */}
+          <div className="card" style={{ marginBottom: 12 }}>
+            <div className="card-head">Long-term Liabilities</div>
+            <AccSection accs={bizAccounts.filter(a => a.group === 'liability' && a.sub_group === 'Long-term Liabilities')} grp="liability" color="var(--red)" />
+            <div className="ledger-row total"><span>Total Long-term Liabilities</span><span style={{ fontFamily: 'var(--mono)', color: 'var(--red)' }}>{fmt(longTermLiab)}</span></div>
           </div>
           <div className="card" style={{ marginBottom: 12 }}>
             <div className="card-head">Equity</div>
@@ -990,23 +1021,26 @@ export function BalanceSheetView({ accounts, journalLines, journalEntries, invoi
 }
 
 // ─── P&L REPORT ───────────────────────────────────────────────────────────────
-export function PLView({ accounts = [], journalLines = [], journalEntries = [], invoices = [], expenses = [], payments = [], businesses = [], activeBiz }) {
-  const [period, setPeriod] = useState('fy'); // 'fy' | 'month' | 'quarter'
-  const now = new Date();
-  const fyStart = now.getMonth() >= 3
-    ? new Date(now.getFullYear(), 3, 1)
-    : new Date(now.getFullYear() - 1, 3, 1);
-
+export function PLView({ accounts = [], journalLines = [], journalEntries = [], invoices = [], expenses = [], payments = [], creditNotes = [], businesses = [], activeBiz }) {
+  // Periods are compared as YYYY-MM-DD strings (no time-zone drift). Earlier
+  // FYs and a custom range are available too — previously only the current
+  // FY/quarter/month could be seen.
+  const [period, setPeriod] = useState(`fy:${getFY()}`);
+  const [custom, setCustom] = useState({ from: '', to: '' });
+  const t = today();
+  const range = (() => {
+    if (period.startsWith('fy:')) return fyRange(period.slice(3));
+    if (period === 'month') return { start: t.slice(0, 8) + '01', end: t };
+    if (period === 'quarter') {
+      const m = Number(t.slice(5, 7)); const qm = Math.floor((m - 1) / 3) * 3 + 1;
+      return { start: `${t.slice(0, 4)}-${String(qm).padStart(2, '0')}-01`, end: t };
+    }
+    return { start: custom.from || '0000-01-01', end: custom.to || '9999-12-31' };
+  })();
   function inPeriod(dateStr) {
     if (!dateStr) return false;
-    const d = new Date(dateStr);
-    if (period === 'fy') return d >= fyStart;
-    if (period === 'month') return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth();
-    if (period === 'quarter') {
-      const qStart = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1);
-      return d >= qStart;
-    }
-    return true;
+    const d = String(dateStr).slice(0, 10);
+    return d >= range.start && d <= range.end;
   }
 
   const bizList = activeBiz ? businesses.filter(b => b.id === activeBiz) : businesses;
@@ -1016,11 +1050,19 @@ export function PLView({ accounts = [], journalLines = [], journalEntries = [], 
 
   return (
     <div>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 20, alignItems: 'center' }}>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 20, alignItems: 'center', flexWrap: 'wrap' }}>
         <span style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>Period:</span>
-        {[['fy', 'This FY'], ['quarter', 'This Quarter'], ['month', 'This Month']].map(([v, l]) => (
-          <button key={v} className={`btn btn-sm ${period === v ? 'btn-primary' : 'btn-ghost'}`} onClick={() => setPeriod(v)}>{l}</button>
-        ))}
+        <div className="chip-row">
+          {[['month', 'This month'], ['quarter', 'This quarter'], ...recentFYs(3).map(fy => [`fy:${fy}`, `FY ${fy}`]), ['custom', 'Custom']].map(([v, l]) => (
+            <button key={v} className={`chip${period === v ? ' active' : ''}`} onClick={() => setPeriod(v)}>{l}</button>
+          ))}
+        </div>
+        {period === 'custom' && <>
+          <input type="date" value={custom.from} onChange={e => setCustom(c => ({ ...c, from: e.target.value }))} style={{ padding: '5px 8px', borderRadius: 6, background: 'var(--bg2)', border: '1px solid var(--border2)', color: 'var(--text)', fontSize: 12 }} />
+          <span className="hint">to</span>
+          <input type="date" value={custom.to} onChange={e => setCustom(c => ({ ...c, to: e.target.value }))} style={{ padding: '5px 8px', borderRadius: 6, background: 'var(--bg2)', border: '1px solid var(--border2)', color: 'var(--text)', fontSize: 12 }} />
+        </>}
+        <span className="hint" style={{ marginLeft: 'auto' }}>{fmtDate(range.start === '0000-01-01' ? null : range.start)} – {fmtDate(range.end === '9999-12-31' ? null : range.end)}</span>
       </div>
 
       {bizList.map(biz => {
@@ -1055,11 +1097,18 @@ export function PLView({ accounts = [], journalLines = [], journalEntries = [], 
         // account is either a direct expense or a bank-import mapping, so
         // splitting on that one account name recreates the old
         // Purchases-vs-Opex split, on the same cash basis as Revenue above.
-        const cogsAcct = bizAccounts.find(a => a.name === 'Cost of Goods Sold');
-        const purchases = cogsAcct ? acctTotal(cogsAcct.id, 'debit') - acctTotal(cogsAcct.id, 'credit') : 0;
+        // Cost of goods = every "Direct Expenses" account (COGS, Raw Materials, Job
+        // Work, Wages…). Purchase bills post to Raw Materials, so keying on the
+        // single "Cost of Goods Sold" account showed ₹0 purchases and pushed all
+        // material cost into operating expenses, overstating gross profit.
+        const isDirect = a => a.sub_group === 'Direct Expenses' || a.name === 'Cost of Goods Sold';
+        const directAccts = bizAccounts.filter(a => a.group === 'expense' && isDirect(a));
+        const directByAcct = {};
+        directAccts.forEach(a => { const amt = acctTotal(a.id, 'debit') - acctTotal(a.id, 'credit'); if (Math.abs(amt) > 0.005) directByAcct[a.name] = amt; });
+        const purchases = Object.values(directByAcct).reduce((s, v) => s + v, 0);
         const grossProfit = revenue - purchases;
 
-        const opexAccounts = bizAccounts.filter(a => a.group === 'expense' && a.id !== cogsAcct?.id);
+        const opexAccounts = bizAccounts.filter(a => a.group === 'expense' && !isDirect(a));
         const expByCategory = {};
         opexAccounts.forEach(a => {
           const amt = acctTotal(a.id, 'debit') - acctTotal(a.id, 'credit');
@@ -1074,10 +1123,10 @@ export function PLView({ accounts = [], journalLines = [], journalEntries = [], 
 
         // Collections (cash-basis) — include payments against proformas too
         const collected = allSaleInv.reduce((s, i) => s + (paysByInv[i.id] || []).reduce((ps, p) => ps + Number(p.amount), 0), 0);
-        const outstanding = allSaleInv.reduce((s, i) => {
-          const paid = (paysByInv[i.id] || []).reduce((ps, p) => ps + Number(p.amount), 0);
-          return s + Math.max(0, Number(i.total) - paid);
-        }, 0);
+        const outstanding = allSaleInv.filter(i => i.status !== 'proforma').reduce((s, i) =>
+          s + Math.max(0, invoiceDue(i, paysByInv[i.id] || [], creditNotes.filter(c => c.invoice_id === i.id))), 0);
+        // With "All businesses" selected, skip businesses with nothing in the period.
+        if (!activeBiz && relevantJEIds.size === 0 && allSaleInv.length === 0) return null;
 
         return (
           <div key={biz.id} style={{ marginBottom: 32 }}>
@@ -1086,9 +1135,9 @@ export function PLView({ accounts = [], journalLines = [], journalEntries = [], 
             </h3>
 
             <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(5,1fr)', marginBottom: 20 }}>
-              <div className="stat-card green"><div className="stat-label">Revenue</div><div className="stat-val green">{fmt(revenue)}</div><div className="stat-sub">collected (excl. GST)</div></div>
+              <div className="stat-card green"><div className="stat-label">Revenue</div><div className="stat-val green">{fmt(revenue)}</div><div className="stat-sub">booked on collection — includes GST</div></div>
               <div className="stat-card blue"><div className="stat-label">Collected</div><div className="stat-val blue">{fmt(collected)}</div><div className="stat-sub">cash received</div></div>
-              <div className="stat-card amber"><div className="stat-label">Outstanding</div><div className="stat-val amber">{fmt(outstanding)}</div><div className="stat-sub">unpaid</div></div>
+              <div className="stat-card amber"><div className="stat-label">Outstanding</div><div className="stat-val amber">{fmt(outstanding)}</div><div className="stat-sub">unpaid, after TDS & CNs</div></div>
               <div className="stat-card red"><div className="stat-label">Total Expenses</div><div className="stat-val red">{fmt(totalExp + purchases)}</div><div className="stat-sub">purchases + opex</div></div>
               <div className={`stat-card ${netProfit >= 0 ? 'green' : 'red'}`}>
                 <div className="stat-label">Net Profit</div>
@@ -1106,8 +1155,8 @@ export function PLView({ accounts = [], journalLines = [], journalEntries = [], 
                     <span>Sales Revenue</span>
                     <span style={{ fontFamily: 'var(--mono)', color: 'var(--green)' }}>{fmt(revenue)}</span>
                   </div>
-                  <div className="ledger-row">
-                    <span style={{ fontSize: 11, color: 'var(--text3)' }}>GST Collected</span>
+                  <div className="ledger-row" title="From invoices issued in the period. Payments are booked to Sales Revenue in full, so this GST is still inside the revenue figure above.">
+                    <span style={{ fontSize: 11, color: 'var(--text3)' }}>GST on invoices (included above)</span>
                     <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text3)' }}>{fmt(taxCollected)}</span>
                   </div>
                   <div className="ledger-row total">
@@ -1117,11 +1166,14 @@ export function PLView({ accounts = [], journalLines = [], journalEntries = [], 
                 </div>
 
                 <div className="card">
-                  <div className="card-head" style={{ color: 'var(--red)' }}>Cost of Goods</div>
-                  <div className="ledger-row">
-                    <span>Purchases / Raw Material</span>
-                    <span style={{ fontFamily: 'var(--mono)', color: 'var(--red)' }}>{fmt(purchases)}</span>
-                  </div>
+                  <div className="card-head" style={{ color: 'var(--red)' }}>Cost of Goods (direct expenses)</div>
+                  {Object.entries(directByAcct).sort((a, b) => b[1] - a[1]).map(([name, amt]) => (
+                    <div key={name} className="ledger-row">
+                      <span>{name}</span>
+                      <span style={{ fontFamily: 'var(--mono)', color: 'var(--red)' }}>{fmt(amt)}</span>
+                    </div>
+                  ))}
+                  {!Object.keys(directByAcct).length && <div className="ledger-row" style={{ color: 'var(--text3)' }}>No direct costs this period</div>}
                   <div className="ledger-row total">
                     <span style={{ fontWeight: 700 }}>Gross Profit</span>
                     <span style={{ fontFamily: 'var(--mono)', fontWeight: 700, color: grossProfit >= 0 ? 'var(--green)' : 'var(--red)' }}>

@@ -6,7 +6,9 @@ export const CSS = `
 :root{
   --bg:#0d0d0d;--bg2:#161616;--bg3:#1e1e1e;--bg4:#252525;
   --border:#2a2a2a;--border2:#333;--border3:#3d3d3d;
-  --text:#e8e6df;--text2:#999;--text3:#555;--text4:#333;
+  --text:#e8e6df;--text2:#a3a3a3;--text3:#808080;--text4:#5c5c5c;
+  /* aliases used by a few screens that were never defined */
+  --text1:var(--text);--border1:var(--border);--bg1:var(--bg);
   --accent:#c8f064;--accent2:#a8d844;--accent3:#e8ff8a;
   --red:#ff5c5c;--red2:#cc3333;
   --amber:#f5a623;--amber2:#cc8800;
@@ -31,7 +33,18 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:14
 .sidebar-biz label{font-size:10px;color:var(--text3);letter-spacing:.06em;text-transform:uppercase;font-family:var(--mono);display:block;margin-bottom:5px}
 .biz-select{width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:var(--r);padding:6px 8px;font-family:var(--font);font-size:12px;cursor:pointer;outline:none}
 .nav{flex:1;padding:6px;overflow-y:auto}
-.nav-label{font-size:9px;color:var(--text4);letter-spacing:.1em;text-transform:uppercase;font-family:var(--mono);padding:10px 10px 4px;margin-top:4px}
+.nav-label{font-size:9.5px;color:var(--text3);letter-spacing:.1em;text-transform:uppercase;font-family:var(--mono);padding:10px 10px 4px;margin-top:4px;display:flex;align-items:center;justify-content:space-between;width:100%;background:none;border:none;cursor:pointer;text-align:left}
+.nav-label:hover{color:var(--text2)}
+.nav-label .chev{font-size:9px;transition:transform .15s}
+.nav-label.collapsed .chev{transform:rotate(-90deg)}
+.nav-search{margin:4px 6px 2px;position:relative}
+.nav-search input{width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:var(--r);padding:6px 8px 6px 26px;font-family:var(--font);font-size:12px;outline:none}
+.nav-search input:focus{border-color:var(--accent)}
+.nav-search .ico{position:absolute;left:9px;top:50%;transform:translateY(-50%);font-size:11px;color:var(--text3);pointer-events:none}
+.nav-search kbd{position:absolute;right:7px;top:50%;transform:translateY(-50%)}
+kbd{font-family:var(--mono);font-size:9.5px;color:var(--text3);border:1px solid var(--border2);border-radius:4px;padding:0 4px;background:var(--bg2)}
+.nav-count{margin-left:auto;font-family:var(--mono);font-size:10px;padding:0 6px;border-radius:10px;background:#3a1a1a;color:var(--red)}
+.nav-item.active .nav-count{background:#0d0d0d;color:var(--accent)}
 .nav-item{display:flex;align-items:center;gap:9px;padding:7px 10px;border-radius:var(--r);cursor:pointer;color:var(--text2);font-size:12.5px;font-weight:500;transition:all .12s;border:none;background:none;width:100%;text-align:left}
 .nav-item:hover{background:var(--bg3);color:var(--text)}
 .nav-item.active{background:var(--accent);color:#0d0d0d;font-weight:600}
@@ -74,10 +87,10 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:14
 .table-toolbar{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--border)}
 .table-toolbar h3{font-size:13px;font-weight:600}
 table{width:100%;border-collapse:collapse}
-th{text-align:left;padding:9px 16px;font-size:10px;color:var(--text3);letter-spacing:.08em;text-transform:uppercase;font-family:var(--mono);border-bottom:1px solid var(--border);font-weight:500;white-space:nowrap}
+th{text-align:left;padding:9px 12px;font-size:10px;color:var(--text3);letter-spacing:.08em;text-transform:uppercase;font-family:var(--mono);border-bottom:1px solid var(--border);font-weight:500;white-space:nowrap}
 th.r,td.r{text-align:right}
 th.c,td.c{text-align:center}
-td{padding:10px 16px;font-size:12.5px;border-bottom:1px solid var(--border);vertical-align:middle}
+td{padding:9px 12px;font-size:12.5px;border-bottom:1px solid var(--border);vertical-align:middle}
 tr:last-child td{border-bottom:none}
 tr:hover td{background:rgba(255,255,255,.02)}
 .mono{font-family:var(--mono);font-size:11.5px}
@@ -198,6 +211,34 @@ tr:hover td{background:rgba(255,255,255,.02)}
 .aging-bar{height:6px;border-radius:3px;background:var(--bg3);overflow:hidden;margin-top:3px}
 .aging-fill{height:100%;border-radius:3px;transition:width .3s}
 
+/* ── Focus + layout utilities ── */
+.btn:focus-visible,.nav-item:focus-visible,.pill-tab:focus-visible,.nav-label:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.page-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
+.page-head h3{font-size:15px;font-weight:700}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.grid-4{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.metric{display:flex;flex-direction:column;gap:6px}
+.metric span{font-size:10px;color:var(--text3);letter-spacing:.07em;text-transform:uppercase;font-family:var(--mono)}
+.metric strong{font-size:22px;font-weight:700;letter-spacing:-.4px}
+.stat-card.clickable{cursor:pointer;transition:border-color .12s,transform .12s}
+.stat-card.clickable:hover{border-color:var(--border3);transform:translateY(-1px)}
+tr.clickable{cursor:pointer}
+.chip-row{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.chip{padding:4px 10px;border-radius:20px;border:1px solid var(--border2);background:var(--bg2);color:var(--text2);font-size:11.5px;cursor:pointer;font-family:var(--font)}
+.chip:hover{color:var(--text);border-color:var(--border3)}
+.chip.active{background:var(--accent);border-color:var(--accent);color:#0d0d0d;font-weight:600}
+.sum-strip{display:flex;gap:18px;flex-wrap:wrap;font-size:12px;color:var(--text3);font-family:var(--mono);margin:-4px 0 12px}
+.sum-strip b{color:var(--text);font-weight:600}
+.hint{font-size:11px;color:var(--text3)}
+.row-actions{display:flex;gap:3px;flex-wrap:wrap}
+
+/* ── Toasts ── */
+.toast-stack{position:fixed;right:18px;bottom:18px;z-index:400;display:flex;flex-direction:column;gap:8px;max-width:min(420px,calc(100vw - 36px))}
+.toast{background:var(--bg3);border:1px solid var(--border3);border-left:3px solid var(--blue);color:var(--text);border-radius:var(--r);padding:10px 12px;font-size:12.5px;box-shadow:var(--shadow2);display:flex;gap:10px;align-items:flex-start;animation:toast-in .18s ease-out;white-space:pre-line}
+.toast.success{border-left-color:var(--green)}.toast.error{border-left-color:var(--red)}.toast.warn{border-left-color:var(--amber)}
+.toast button{margin-left:auto;background:none;border:none;color:var(--text3);cursor:pointer;font-size:13px}
+@keyframes toast-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
 /* ── Mobile nav (hidden on desktop) ── */
 .hamburger-btn{display:none;background:none;border:1px solid var(--border2);color:var(--text);border-radius:var(--r);width:32px;height:32px;font-size:16px;cursor:pointer;flex-shrink:0;align-items:center;justify-content:center}
 .nav-overlay{display:none}
@@ -214,7 +255,8 @@ tr:hover td{background:rgba(255,255,255,.02)}
   .topbar h2{font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .content{padding:14px}
   .stats-grid{grid-template-columns:repeat(2,1fr) !important;gap:8px}
-  .two-col,.three-col{grid-template-columns:1fr !important;gap:12px}
+  .two-col,.three-col,.grid-2{grid-template-columns:1fr !important;gap:12px}
+  .grid-4{grid-template-columns:repeat(2,1fr) !important}
   .form-row.cols-2,.form-row.cols-3,.form-row.cols-4{grid-template-columns:1fr !important}
   .table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
   table{min-width:640px}
@@ -231,8 +273,11 @@ tr:hover td{background:rgba(255,255,255,.02)}
   .config-screen{padding:24px 18px}
 }
 @media (max-width:480px){
-  .stats-grid{grid-template-columns:1fr !important}
-  .stat-val{font-size:19px}
+  .stats-grid{grid-template-columns:repeat(2,1fr) !important}
+  .stat-card{padding:10px 12px}
+  .stat-val{font-size:16px}
+  .stat-sub{font-size:9.5px}
+  .toast-stack{left:12px;right:12px;bottom:12px;max-width:none}
   .topbar-right .btn span{display:none}
 }
 `;
@@ -240,26 +285,62 @@ tr:hover td{background:rgba(255,255,255,.02)}
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 export const fmt = n => `₹${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 export const fmtDate = d => d ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—';
-export const today = () => new Date().toISOString().split('T')[0];
-export const getFY = () => {
-  const now = new Date(); const y = now.getFullYear(); const m = now.getMonth();
-  const sy = m >= 3 ? y : y - 1;
-  return `${String(sy).slice(-2)}-${String(sy + 1).slice(-2)}`;
+// Dates are handled as local calendar dates (YYYY-MM-DD). toISOString() would
+// convert to UTC first, which in India (UTC+5:30) gives YESTERDAY's date for
+// anything done between midnight and 5:30 am, and shifts month-end dates back
+// a day. Always go through these helpers instead.
+const pad2 = n => String(n).padStart(2, '0');
+export const localISO = (d = new Date()) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+export const today = () => localISO(new Date());
+export const thisMonthKey = () => today().slice(0, 7);
+// Last calendar day of a "YYYY-MM" period, as "YYYY-MM-DD".
+export const monthEnd = (period) => {
+  const [y, m] = period.split('-').map(Number);
+  return `${period}-${pad2(new Date(y, m, 0).getDate())}`;
 };
-// Same as getFY() but for an arbitrary date instead of "now" — Indian FY
-// runs April→March.
+const fyFromYM = (y, m) => { const sy = m >= 4 ? y : y - 1; return `${String(sy).slice(-2)}-${String(sy + 1).slice(-2)}`; };
+export const getFY = () => { const d = new Date(); return fyFromYM(d.getFullYear(), d.getMonth() + 1); };
+// Same as getFY() but for a "YYYY-MM-DD" date — Indian FY runs April→March.
+// Parsed from the string itself so the time zone can never move it across a month.
 export const getFYForDate = (dateStr) => {
-  const d = new Date(dateStr); const y = d.getFullYear(); const m = d.getMonth();
-  const sy = m >= 3 ? y : y - 1;
-  return `${String(sy).slice(-2)}-${String(sy + 1).slice(-2)}`;
+  const m = /^(\d{4})-(\d{2})/.exec(String(dateStr || ''));
+  if (!m) return getFY();
+  return fyFromYM(Number(m[1]), Number(m[2]));
+};
+// FY string ("26-27") -> { start: '2026-04-01', end: '2027-03-31' }
+export const fyRange = (fy) => {
+  const sy = 2000 + parseInt(fy.split('-')[0], 10);
+  return { start: `${sy}-04-01`, end: `${sy + 1}-03-31` };
+};
+// Recent FYs, newest first, for dropdowns.
+export const recentFYs = (count = 4) => {
+  const sy = 2000 + parseInt(getFY().split('-')[0], 10);
+  return Array.from({ length: count }, (_, i) => `${String(sy - i).slice(-2)}-${String(sy - i + 1).slice(-2)}`);
 };
 
-export function nextInvNum(invoices, isProforma) {
-  const fy = getFY();
+// What is still owed on an invoice: total − payments − TDS the customer
+// deducted − credit notes issued against it (cancelled notes ignored).
+export function invoiceDue(inv, payments = [], creditNotes = []) {
+  if (!inv) return 0;
+  const paid = payments.reduce((s, p) => s + Number(p.amount || 0), 0);
+  const cn = creditNotes.filter(c => c.status !== 'cancelled').reduce((s, c) => s + Number(c.total || 0), 0);
+  return Number(inv.total || 0) - paid - Number(inv.tds_amount || 0) - cn;
+}
+export function isOverdue(inv, due) {
+  return !!inv?.due_date && inv.due_date < today() && due > 0.01
+    && !['paid', 'cancelled', 'proforma', 'draft'].includes(inv.status);
+}
+
+// Next number in a business's sales series for the FY of `dateStr` (default today).
+// Only SALE documents count — purchase bills carry the supplier's own numbers and
+// must never push the sales sequence forward or collide with it.
+export function nextInvNum(invoices, isProforma, dateStr) {
+  const fy = dateStr ? getFYForDate(dateStr) : getFY();
+  const sales = invoices.filter(i => i.type !== 'purchase');
   if (isProforma) {
     const pat = new RegExp(`^PI-${fy}/(\\d+)$`);
     let max = 0;
-    invoices.forEach(i => {
+    sales.forEach(i => {
       // Check active proforma numbers
       const m1 = (i.invoice_number || '').match(pat);
       if (m1) max = Math.max(max, parseInt(m1[1], 10));
@@ -270,7 +351,7 @@ export function nextInvNum(invoices, isProforma) {
     return `PI-${fy}/${String(max + 1).padStart(3, '0')}`;
   }
   const pat = new RegExp(`^${fy}/(\\d+)$`);
-  let max = 1000; invoices.forEach(i => { const m = (i.invoice_number || '').match(pat); if (m) max = Math.max(max, parseInt(m[1], 10)); });
+  let max = 1000; sales.forEach(i => { const m = (i.invoice_number || '').match(pat); if (m) max = Math.max(max, parseInt(m[1], 10)); });
   return `${fy}/${max + 1}`;
 }
 

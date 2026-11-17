@@ -420,7 +420,11 @@ ALTER TABLE credit_note_items ADD COLUMN IF NOT EXISTS sgst_amount numeric(12,2)
 ALTER TABLE credit_note_items ADD COLUMN IF NOT EXISTS igst_amount numeric(12,2) DEFAULT 0;
 ALTER TABLE delivery_challans ADD COLUMN IF NOT EXISTS eway_bill_number text;
 
-CREATE UNIQUE INDEX IF NOT EXISTS uidx_invoices_number ON invoices(business_id, invoice_number);
+-- Sales numbers unique per business; purchase bills unique per supplier
+-- (two suppliers may both send bill "001"). See migrations/005.
+DROP INDEX IF EXISTS uidx_invoices_number;
+CREATE UNIQUE INDEX IF NOT EXISTS uidx_invoices_number_sale ON invoices(business_id, invoice_number) WHERE type <> 'purchase';
+CREATE UNIQUE INDEX IF NOT EXISTS uidx_invoices_number_purchase ON invoices(business_id, party_id, invoice_number) WHERE type = 'purchase';
 CREATE UNIQUE INDEX IF NOT EXISTS uidx_credit_notes_number ON credit_notes(business_id, cn_number);
 
 -- Debit Notes
@@ -480,3 +484,40 @@ ALTER TABLE bank_transactions ADD COLUMN IF NOT EXISTS pending_link boolean DEFA
 -- Names / categories you give bank rows (see migrations/004_bank_group_name.sql)
 ALTER TABLE bank_transactions ADD COLUMN IF NOT EXISTS group_name text;
 ALTER TABLE bank_transactions ADD COLUMN IF NOT EXISTS group_category text;
+
+-- ── App wiring fixes (also in migrations/005_app_wiring_fixes.sql) ──
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS proforma_number text;
+
+-- B2B/B2C lock per invoice (was only in sql/party_gstin_snapshot.sql, which the
+-- README's setup steps never mention).
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS party_gstin_snapshot text;
+
+-- Settings -> Audit Trail and GST -> GSTR-3B "Save Review Snapshot" read these.
+-- They existed only in databases built before the scope-reduction cleanup, so a
+-- fresh install showed "relation does not exist" on both screens.
+CREATE TABLE IF NOT EXISTS audit_log (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id uuid REFERENCES businesses(id) ON DELETE CASCADE,
+  user_email  text,
+  action      text,
+  table_name  text,
+  record_id   uuid,
+  summary     text,
+  created_at  timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_audit_log_biz_time ON audit_log(business_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS gst_return_snapshots (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id uuid REFERENCES businesses(id) ON DELETE CASCADE,
+  return_type text NOT NULL,
+  period      text NOT NULL,
+  status      text DEFAULT 'reviewed',
+  payload     jsonb,
+  created_at  timestamptz DEFAULT now(),
+  updated_at  timestamptz DEFAULT now()
+);
+ALTER TABLE gst_return_snapshots ADD COLUMN IF NOT EXISTS updated_at timestamptz DEFAULT now();
+CREATE UNIQUE INDEX IF NOT EXISTS uidx_gst_return_snapshots
+  ON gst_return_snapshots (business_id, return_type, period);
+

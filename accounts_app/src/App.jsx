@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
-import { FONTS, CSS } from './lib/constants.js';
+import { FONTS, CSS, today, getFY, fyRange, invoiceDue, isOverdue } from './lib/constants.js';
 import { initSupabase, loadCore, loadHeavy, saveBusiness, deleteBusiness } from './lib/db.js';
 import { InvoicesView } from './views/Invoices.jsx';
 import { PartiesView, ExpensesView, PaymentsView, ARLedgerView, APLedgerView } from './views/Operations.jsx';
@@ -17,49 +17,51 @@ import { GSTR1View } from './views/GSTR1.jsx';
 import { ItemsView } from './views/Items.jsx';
 import { DeliveryChallansView } from './views/DeliveryChallans.jsx';
 import { GSTR3BView, AuditTrailView, KPIDashboard } from './views/EnterpriseViews.jsx';
-import { Badge, ModalShell, FG, EmptyState } from './components/ui.jsx';
+import { Badge, ModalShell, FG, EmptyState, Toaster, toast } from './components/ui.jsx';
 import SCHEMA_SQL from '../sql/schema.sql?raw';
 
-// Optional/advanced screens remain hidden from nav; core sales documents
-// (Invoices, Credit Notes, Debit Notes and Delivery Challans) are visible.
+// Grouped by what you're doing rather than by table. `keys` are extra words the
+// sidebar search matches on (Ctrl/⌘+K focuses it).
 const NAV = [
-  { id: 'dashboard',   label: 'Dashboard',        icon: '◈',  group: null },
-  { id: 'invoices',    label: 'Invoices',          icon: '📄',  group: 'Sales' },
-  { id: 'creditnotes', label: 'Credit Notes',      icon: '↩',   group: 'Sales' },
-  { id: 'debitnotes',  label: 'Debit Notes',       icon: '↗',   group: 'Sales' },
-  { id: 'proformas',   label: 'Proforma',          icon: '📋',  group: 'Sales' },
-  { id: 'challans',    label: 'Delivery Challans', icon: '🚚',  group: 'Sales' },
-  { id: 'parties',     label: 'Parties',           icon: '👥',  group: 'Sales' },
-  { id: 'items',       label: 'Item Master',       icon: '📦',  group: 'Sales' },
-  { id: 'purchasebills', label: 'Purchase Bills',   icon: '🧾',  group: 'Purchases' },
-  { id: 'expenses',    label: 'Expenses',          icon: '💸',  group: 'Purchases' },
-  { id: 'payments',    label: 'Payments',          icon: '💳',  group: 'Purchases' },
-  { id: 'bank',        label: 'Bank',              icon: '🏦',  group: 'Purchases' },
-  { id: 'ar',          label: 'AR Ledger',         icon: '🟢',  group: 'Ledgers' },
-  { id: 'ap',          label: 'AP Ledger',         icon: '🔴',  group: 'Ledgers' },
-  { id: 'statement',   label: 'Party Statement',   icon: '📋',  group: 'Ledgers' },
-  { id: 'paylist',     label: 'Payment List',      icon: '💵',  group: 'Ledgers' },
-  { id: 'tds',         label: 'TDS',               icon: '📑',  group: 'Ledgers' },
-  { id: 'accounts',    label: 'Chart of Accounts', icon: '📒',  group: 'Accounting' },
-  { id: 'journal',     label: 'Journal Vouchers',  icon: '📝',  group: 'Accounting' },
-  { id: 'ledger',      label: 'General Ledger',    icon: '📖',  group: 'Accounting' },
-  { id: 'trial',       label: 'Trial Balance',     icon: '⚖',   group: 'Accounting' },
-  { id: 'balance',     label: 'Balance Sheet',     icon: '📊',  group: 'Accounting' },
-  { id: 'analysis',    label: 'Analysis',          icon: '🔎',  group: 'Accounting' },
-  { id: 'pl',          label: 'P&L Report',        icon: '📈',  group: 'Accounting' },
-  { id: 'cashflow',    label: 'Cash Flow',         icon: '💰',  group: 'Accounting' },
-  { id: 'reconcile',  label: 'Reconciliation',    icon: '⚖️',  group: 'Accounting' },
-  { id: 'jhealth',    label: 'Journal Health',    icon: '🩺',  group: 'Accounting' },
-  { id: 'gstr1',       label: 'GSTR-1',            icon: '🧾',  group: 'GST' },
-  { id: 'gstr3b',      label: 'GSTR-3B',           icon: '🧮',  group: 'GST' },
-  { id: 'audit',       label: 'Audit Trail',        icon: '🛡',  group: 'Settings' },
-  { id: 'kpis',        label: 'Management KPIs',    icon: '📊',  group: 'Analysis' },
-  { id: 'businesses',  label: 'Businesses',        icon: '🏢',  group: 'Settings' },
-  { id: 'export',      label: 'Export Data',       icon: '↓',   group: 'Settings' },
-  { id: 'sqlsetup',    label: 'SQL Setup',         icon: '⚙',   group: 'Settings' },
+  { id: 'dashboard',   label: 'Dashboard',         icon: '◈',  group: null },
+  { id: 'invoices',    label: 'Invoices',          icon: '📄', group: 'Sales', keys: 'tax invoice bill sale' },
+  { id: 'proformas',   label: 'Proforma',          icon: '📋', group: 'Sales', keys: 'pi advance quotation estimate' },
+  { id: 'creditnotes', label: 'Credit Notes',      icon: '↩',  group: 'Sales', keys: 'cn return' },
+  { id: 'debitnotes',  label: 'Debit Notes',       icon: '↗',  group: 'Sales', keys: 'dn' },
+  { id: 'challans',    label: 'Delivery Challans', icon: '🚚', group: 'Sales', keys: 'dc dispatch eway' },
+  { id: 'purchasebills', label: 'Purchase Bills',  icon: '🧾', group: 'Purchases', keys: 'supplier vendor itc' },
+  { id: 'expenses',    label: 'Expenses',          icon: '💸', group: 'Purchases', keys: 'spend rent salary' },
+  { id: 'bank',        label: 'Bank',              icon: '🏦', group: 'Banking', keys: 'statement import icici' },
+  { id: 'payments',    label: 'Payments',          icon: '💳', group: 'Banking', keys: 'receipts collections' },
+  { id: 'paylist',     label: 'Payment List',      icon: '💵', group: 'Banking' },
+  { id: 'reconcile',   label: 'Reconciliation',    icon: '⚖️', group: 'Banking', keys: 'brs match' },
+  { id: 'ar',          label: 'AR Ledger',         icon: '🟢', group: 'Ledgers', keys: 'receivable debtors aging' },
+  { id: 'ap',          label: 'AP Ledger',         icon: '🔴', group: 'Ledgers', keys: 'payable creditors' },
+  { id: 'statement',   label: 'Party Statement',   icon: '📃', group: 'Ledgers', keys: 'account statement' },
+  { id: 'tds',         label: 'TDS',               icon: '📑', group: 'Ledgers' },
+  { id: 'accounts',    label: 'Chart of Accounts', icon: '📒', group: 'Accounting', keys: 'coa ledger accounts' },
+  { id: 'journal',     label: 'Journal Vouchers',  icon: '📝', group: 'Accounting', keys: 'jv entries' },
+  { id: 'ledger',      label: 'General Ledger',    icon: '📖', group: 'Accounting', keys: 'gl' },
+  { id: 'trial',       label: 'Trial Balance',     icon: '⚖',  group: 'Accounting', keys: 'tb' },
+  { id: 'jhealth',     label: 'Journal Health',    icon: '🩺', group: 'Accounting', keys: 'missing repost' },
+  { id: 'pl',          label: 'P&L Report',        icon: '📈', group: 'Reports', keys: 'profit loss income statement' },
+  { id: 'balance',     label: 'Balance Sheet',     icon: '📊', group: 'Reports', keys: 'bs' },
+  { id: 'cashflow',    label: 'Cash Flow',         icon: '💰', group: 'Reports' },
+  { id: 'analysis',    label: 'Analysis',          icon: '🔎', group: 'Reports', keys: 'growth trend' },
+  { id: 'kpis',        label: 'Management KPIs',   icon: '🎯', group: 'Reports', keys: 'dashboard metrics' },
+  { id: 'gstr1',       label: 'GSTR-1',            icon: '🧾', group: 'GST', keys: 'gst return outward hsn' },
+  { id: 'gstr3b',      label: 'GSTR-3B',           icon: '🧮', group: 'GST', keys: 'gst return itc' },
+  { id: 'parties',     label: 'Parties',           icon: '👥', group: 'Masters', keys: 'clients customers vendors suppliers' },
+  { id: 'items',       label: 'Item Master',       icon: '📦', group: 'Masters', keys: 'products catalog hsn' },
+  { id: 'businesses',  label: 'Businesses',        icon: '🏢', group: 'Settings', keys: 'company gstin' },
+  { id: 'audit',       label: 'Audit Trail',       icon: '🛡', group: 'Settings', keys: 'log history' },
+  { id: 'export',      label: 'Export Data',       icon: '↓',  group: 'Settings', keys: 'csv excel download' },
+  { id: 'sqlsetup',    label: 'SQL Setup',         icon: '⚙',  group: 'Settings', keys: 'schema migration database' },
 ];
 const TITLES = Object.fromEntries(NAV.map(n => [n.id, n.label]));
 const GROUPS = [...new Set(NAV.filter(n => n.group).map(n => n.group))];
+const VIEW_IDS = new Set(NAV.map(n => n.id));
+const viewFromHash = () => { const v = (window.location.hash || '').replace(/^#\/?/, ''); return VIEW_IDS.has(v) ? v : 'dashboard'; };
 
 const STATES = [
   'Andaman and Nicobar Islands','Andhra Pradesh','Arunachal Pradesh','Assam','Bihar',
@@ -71,7 +73,7 @@ const STATES = [
 ];
 
 // ─── LOGIN SCREEN ─────────────────────────────────────────────────────────────
-function LoginScreen({ onLogin }) {
+function LoginScreen({ onLogin, client }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [err, setErr] = useState('');
@@ -89,7 +91,9 @@ function LoginScreen({ onLogin }) {
       // Prefer real Supabase Auth when an email is supplied. The legacy env
       // credential remains as a local-development fallback only.
       if (url && key && username.trim().includes('@')) {
-        const authClient = createClient(url, key, { db: { schema: 'accounts_erp' } });
+        // Sign in on the SAME client the app queries with, so its requests carry the session
+        // (a second client instance also triggers Supabase's "multiple GoTrueClient" warning).
+        const authClient = client || createClient(url, key, { db: { schema: 'accounts_erp' } });
         const { error } = await authClient.auth.signInWithPassword({ email: username.trim(), password });
         if (error) throw error;
         localStorage.setItem('np_auth', 'true');
@@ -117,9 +121,10 @@ function LoginScreen({ onLogin }) {
         <p style={{ marginBottom: 24, color: 'var(--text3)', fontSize: 13 }}>Sign in to continue</p>
         <div className="config-form">
           <div className="form-group" style={{ marginBottom: 10 }}>
-            <label>Username</label>
+            <label>Email or username</label>
             <input
-              placeholder="Username"
+              autoFocus
+              placeholder="you@example.com"
               value={username}
               autoComplete="username"
               onChange={e => setUsername(e.target.value)}
@@ -138,6 +143,9 @@ function LoginScreen({ onLogin }) {
             />
           </div>
           {err && <p className="err-msg" style={{ marginBottom: 10 }}>{err}</p>}
+          <p style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 10, lineHeight: 1.5 }}>
+            Sign in with your Supabase email for a real database session. The username login is a local fallback only.
+          </p>
           {(!correctUser || !correctPass) && (
             <p style={{ fontSize: 11, color: 'var(--amber,#f59e0b)', marginBottom: 10 }}>
               ⚠ VITE_APP_USERNAME / VITE_APP_PASSWORD not set in environment variables.
@@ -272,7 +280,7 @@ function SqlSetupView({ invoices = [], payments = [] }) {
       <div className="card" style={{ marginBottom: 18 }}>
         <div className="card-head">First-time Setup</div>
         <ol style={{ color: 'var(--text2)', fontSize: 13, lineHeight: 2.2, paddingLeft: 20 }}>
-          <li>Go to <strong style={{ color: 'var(--text)' }}>Supabase → SQL Editor</strong> → paste the SQL below → Run</li>
+          <li>Go to <strong style={{ color: 'var(--text)' }}>Supabase → SQL Editor</strong> → paste the SQL below → Run (it already includes migrations 001–005; on an older database run the files in <code>sql/migrations/</code> instead)</li>
           <li>Go to <strong style={{ color: 'var(--text)' }}>Settings → Businesses</strong> → add your business, set the <span style={{ color: 'var(--accent)' }}>Home State</span></li>
           <li>Go to <strong style={{ color: 'var(--text)' }}>Accounting → Chart of Accounts</strong> → click <strong style={{ color: 'var(--text)' }}>Seed Default Accounts</strong></li>
           <li>Add parties (clients/vendors) — set their <strong style={{ color: 'var(--text)' }}>State</strong> for correct GST</li>
@@ -409,7 +417,7 @@ function MiniBarChart({ data, color = 'var(--accent)', label }) {
           <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3 }}>
             <div title={`${d.label}: ₹${Number(d.value).toLocaleString('en-IN')}`}
               style={{ width: '100%', background: color, borderRadius: '3px 3px 0 0', height: `${Math.max(3, (d.value / max) * 52)}px`, transition: 'height .3s', cursor: 'default', opacity: i === data.length - 1 ? 1 : 0.55 }} />
-            <div style={{ fontSize: 8, color: 'var(--text4)', fontFamily: 'var(--mono)', whiteSpace: 'nowrap' }}>{d.label}</div>
+            <div style={{ fontSize: 9.5, color: 'var(--text3)', fontFamily: 'var(--mono)', whiteSpace: 'nowrap' }}>{d.label}</div>
           </div>
         ))}
       </div>
@@ -418,124 +426,158 @@ function MiniBarChart({ data, color = 'var(--accent)', label }) {
 }
 
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
-function Dashboard({ invoices, expenses, payments, businesses, parties, activeBiz, setView }) {
+// Sales figures only (purchase bills used to leak into "Recent Invoices" and the
+// overdue list), for the current financial year, with an "overdue" figure that is
+// worked out from due dates — nothing ever sets status 'overdue', so the old card
+// always read ₹0 while its subtitle counted overdue invoices.
+function Dashboard({ invoices, expenses, payments, businesses, parties, creditNotes = [], activeBiz, setView, startAction }) {
+  const fy = getFY();
+  const { start: fyStart, end: fyEnd } = fyRange(fy);
+  const inFY = d => !!d && d >= fyStart && d <= fyEnd;
   const bi = activeBiz ? invoices.filter(i => i.business_id === activeBiz) : invoices;
   const be = activeBiz ? expenses.filter(e => e.business_id === activeBiz) : expenses;
 
-  const fmtN = n => `₹${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 0 })}`;
+  const fmtN = n => `₹${Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
   const fmtD = d => d ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—';
-  const fmtM = n => `₹${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`;
+  const fmtM = n => `₹${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const partyName = id => parties.find(p => p.id === id)?.name || '—';
 
   const paysByInv = {};
-  payments.forEach(p => { if (!paysByInv[p.invoice_id]) paysByInv[p.invoice_id] = []; paysByInv[p.invoice_id].push(p); });
+  payments.forEach(p => { (paysByInv[p.invoice_id] ||= []).push(p); });
+  const cnsByInv = {};
+  creditNotes.forEach(c => { (cnsByInv[c.invoice_id] ||= []).push(c); });
+  const dueOf = i => invoiceDue(i, paysByInv[i.id] || [], cnsByInv[i.id] || []);
 
-  // Invoiced revenue (accrual) — excludes proforma/draft/cancelled
-  const saleInvs = bi.filter(i => i.type === 'sale' && !['cancelled','proforma','draft'].includes(i.status));
-  // All active sale invoices including proforma — for cash tracking
-  const allSaleInvs = bi.filter(i => i.type === 'sale' && !['cancelled','draft'].includes(i.status));
+  const sales = bi.filter(i => i.type === 'sale');
+  const issued = sales.filter(i => !['cancelled', 'proforma', 'draft'].includes(i.status));
+  const openSales = sales.filter(i => !['cancelled', 'draft'].includes(i.status)); // incl. proformas (advances)
+  const bills = bi.filter(i => i.type === 'purchase' && i.status !== 'cancelled');
 
-  const revenue = saleInvs.reduce((s, i) => s + Number(i.subtotal || 0), 0);
-  // Collected = all cash received including advances against proformas
-  const collected = allSaleInvs.reduce((s, i) => s + (paysByInv[i.id]||[]).reduce((ps,p)=>ps+Number(p.amount),0), 0);
-  const pending = allSaleInvs.filter(i => ['sent','partially_paid','proforma'].includes(i.status)).reduce((s,i)=>{
-    const paid = (paysByInv[i.id]||[]).reduce((ps,p)=>ps+Number(p.amount),0);
-    return s + Math.max(0, Number(i.total) - paid);
-  }, 0);
-  const overdue = saleInvs.filter(i => i.status === 'overdue').reduce((s,i)=>s+Number(i.total),0);
-  const totalExp = be.reduce((s, e) => s + Number(e.amount), 0);
-  const overdueInvs = bi.filter(i => i.due_date && new Date(i.due_date) < new Date() && !['paid','cancelled','proforma'].includes(i.status));
+  const revenue = issued.filter(i => inFY(i.issue_date)).reduce((s, i) => s + Number(i.subtotal || 0), 0);
+  const saleIds = new Set(openSales.map(i => i.id));
+  const collected = payments.filter(p => saleIds.has(p.invoice_id) && inFY(p.payment_date)).reduce((s, p) => s + Number(p.amount || 0), 0);
+  const receivable = issued.reduce((s, i) => s + Math.max(0, dueOf(i)), 0);
+  const overdueInvs = issued.filter(i => isOverdue(i, dueOf(i))).sort((a, b) => a.due_date.localeCompare(b.due_date));
+  const overdueAmt = overdueInvs.reduce((s, i) => s + Math.max(0, dueOf(i)), 0);
+  const payable = bills.reduce((s, i) => s + Math.max(0, dueOf(i)), 0);
+  const fyExp = be.filter(e => inFY(e.expense_date)).reduce((s, e) => s + Number(e.amount || 0), 0);
 
-  // Monthly revenue — last 6 months (cash basis — what was actually received)
+  const drafts = sales.filter(i => i.status === 'draft');
+  const paidProformas = sales.filter(i => i.status === 'proforma' && dueOf(i) <= 0.01);
+  const billsDue = bills.filter(i => i.due_date && i.due_date <= today() && dueOf(i) > 0.01);
+
+  // Money received per month, last 6 months (cash basis)
   const monthlyData = (() => {
     const months = [];
     for (let m = 5; m >= 0; m--) {
-      const d = new Date(); d.setMonth(d.getMonth() - m);
-      const yr = d.getFullYear(); const mo = d.getMonth();
+      const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - m);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
       const label = d.toLocaleDateString('en-IN', { month: 'short' });
-      // Use payments received in that month rather than invoice date
-      const value = payments
-        .filter(p => {
-          const pd = new Date(p.payment_date);
-          return pd.getFullYear()===yr && pd.getMonth()===mo
-            && allSaleInvs.some(i => i.id === p.invoice_id);
-        })
-        .reduce((s,p) => s + Number(p.amount||0), 0);
+      const value = payments.filter(p => saleIds.has(p.invoice_id) && (p.payment_date || '').startsWith(key)).reduce((s, p) => s + Number(p.amount || 0), 0);
       months.push({ label, value });
     }
     return months;
   })();
 
-  // Top 5 clients by revenue (include proforma payments)
+  // Top clients by money received this FY
   const clientRevenue = {};
-  allSaleInvs.forEach(i => {
-    const p = parties.find(pt => pt.id === i.party_id);
-    const paid = (paysByInv[i.id]||[]).reduce((ps,p)=>ps+Number(p.amount),0);
-    if (p && paid > 0) clientRevenue[p.name] = (clientRevenue[p.name] || 0) + paid;
-    else if (p && i.status !== 'proforma') clientRevenue[p.name] = (clientRevenue[p.name] || 0) + Number(i.subtotal || 0);
+  payments.forEach(p => {
+    if (!saleIds.has(p.invoice_id) || !inFY(p.payment_date)) return;
+    const inv = openSales.find(i => i.id === p.invoice_id);
+    const name = partyName(inv?.party_id);
+    clientRevenue[name] = (clientRevenue[name] || 0) + Number(p.amount || 0);
   });
-  const top5 = Object.entries(clientRevenue).sort((a,b)=>b[1]-a[1]).slice(0,5);
+  const top5 = Object.entries(clientRevenue).sort((a, b) => b[1] - a[1]).slice(0, 5);
   const maxClient = top5[0]?.[1] || 1;
 
-  const missingState = businesses.some(b => !b.state);
+  const missingState = (activeBiz ? businesses.filter(b => b.id === activeBiz) : businesses).filter(b => !b.state);
+  const attention = [
+    missingState.length && { tone: 'amber', text: `${missingState.map(b => b.name).join(', ')} ${missingState.length === 1 ? 'has' : 'have'} no Home State — CGST/SGST can't be split`, cta: 'Fix', go: () => setView('businesses') },
+    overdueInvs.length && { tone: 'red', text: `${overdueInvs.length} invoice${overdueInvs.length === 1 ? '' : 's'} overdue — ${fmtN(overdueAmt)} to chase`, cta: 'View', go: () => startAction('invoices', { filter: 'overdue' }) },
+    drafts.length && { tone: 'purple', text: `${drafts.length} draft invoice${drafts.length === 1 ? '' : 's'} not issued — drafts are left out of GSTR-1`, cta: 'Review', go: () => startAction('invoices', { filter: 'draft' }) },
+    paidProformas.length && { tone: 'blue', text: `${paidProformas.length} proforma${paidProformas.length === 1 ? ' is' : 's are'} fully paid but not converted to a tax invoice`, cta: 'Convert', go: () => setView('proformas') },
+    billsDue.length && { tone: 'amber', text: `${billsDue.length} supplier bill${billsDue.length === 1 ? '' : 's'} due or past due — ${fmtN(billsDue.reduce((s, i) => s + dueOf(i), 0))}`, cta: 'Pay', go: () => startAction('purchasebills', { filter: 'unpaid' }) },
+  ].filter(Boolean);
+
+  const Stat = ({ tone, label, value, sub, onClick }) => (
+    <div className={`stat-card ${tone}${onClick ? ' clickable' : ''}`} onClick={onClick} role={onClick ? 'button' : undefined} tabIndex={onClick ? 0 : undefined}
+      onKeyDown={e => { if (onClick && e.key === 'Enter') onClick(); }}>
+      <div className="stat-label">{label}</div><div className={`stat-val ${tone}`}>{value}</div><div className="stat-sub">{sub}</div>
+    </div>
+  );
 
   return (
     <>
-      {missingState && (
-        <div style={{ background: '#1a1000', border: '1px solid #3a2800', borderRadius: 'var(--r)', padding: '10px 14px', marginBottom: 16, fontSize: 12, color: 'var(--amber)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span>⚠ Some businesses are missing <strong>Home State</strong> — CGST/SGST auto-split is disabled for those businesses.</span>
-          <button className="btn btn-warning btn-sm" style={{ marginLeft: 12, flexShrink: 0 }} onClick={() => setView('businesses')}>Fix Now →</button>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16, alignItems: 'center' }}>
+        <button className="btn btn-primary" onClick={() => startAction('invoices', { create: true })}>+ New Invoice</button>
+        <button className="btn btn-ghost" onClick={() => startAction('proformas', { create: true })}>+ Proforma</button>
+        <button className="btn btn-ghost" onClick={() => startAction('purchasebills', { create: true })}>+ Purchase Bill</button>
+        <button className="btn btn-ghost" onClick={() => setView('expenses')}>+ Expense</button>
+        <span className="hint" style={{ marginLeft: 'auto' }}>FY {fy} · {activeBiz ? businesses.find(b => b.id === activeBiz)?.name : 'all businesses'}</span>
+      </div>
+
+      <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(5,1fr)' }}>
+        <Stat tone="green" label="Revenue (taxable)" value={fmtN(revenue)} sub={`${issued.filter(i => inFY(i.issue_date)).length} invoices this FY`} onClick={() => setView('invoices')} />
+        <Stat tone="blue" label="Collected" value={fmtN(collected)} sub="received this FY" onClick={() => setView('payments')} />
+        <Stat tone="amber" label="Receivable" value={fmtN(receivable)} sub="after TDS & credit notes" onClick={() => setView('ar')} />
+        <Stat tone="red" label="Overdue" value={fmtN(overdueAmt)} sub={`${overdueInvs.length} invoice(s) past due`} onClick={() => startAction('invoices', { filter: 'overdue' })} />
+        <Stat tone="purple" label="Payable" value={fmtN(payable)} sub={`expenses this FY ${fmtN(fyExp)}`} onClick={() => setView('ap')} />
+      </div>
+
+      {attention.length > 0 && (
+        <div className="card" style={{ marginBottom: 16 }}>
+          <div className="card-head">Needs attention</div>
+          {attention.map((a, i) => (
+            <div key={i} className="ledger-row">
+              <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ width: 7, height: 7, borderRadius: 4, background: `var(--${a.tone})`, flexShrink: 0 }} />
+                <span style={{ color: 'var(--text2)' }}>{a.text}</span>
+              </span>
+              <button className="btn btn-ghost btn-sm" onClick={a.go}>{a.cta} →</button>
+            </div>
+          ))}
         </div>
       )}
 
-      <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(5,1fr)' }}>
-        <div className="stat-card green"><div className="stat-label">Revenue (Taxable)</div><div className="stat-val green">{fmtN(revenue)}</div><div className="stat-sub">{saleInvs.length} invoices</div></div>
-        <div className="stat-card blue"><div className="stat-label">Collected</div><div className="stat-val blue">{fmtN(collected)}</div><div className="stat-sub">cash received</div></div>
-        <div className="stat-card amber"><div className="stat-label">Outstanding</div><div className="stat-val amber">{fmtN(pending)}</div><div className="stat-sub">pending payment</div></div>
-        <div className="stat-card red"><div className="stat-label">Overdue</div><div className="stat-val red">{fmtN(overdue)}</div><div className="stat-sub">{overdueInvs.length} invoice(s)</div></div>
-        <div className="stat-card purple"><div className="stat-label">Expenses</div><div className="stat-val purple">{fmtN(totalExp)}</div><div className="stat-sub">all categories</div></div>
-      </div>
-
-      {/* Charts row */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 20 }}>
+      <div className="grid-2" style={{ gap: 12, marginBottom: 20 }}>
         <div className="card">
-          <div className="card-head">Monthly Revenue (last 6 months)</div>
-          <MiniBarChart data={monthlyData} color="var(--accent)" label="₹ taxable value" />
+          <div className="card-head">Money received — last 6 months</div>
+          <MiniBarChart data={monthlyData} color="var(--accent)" label="₹ collected (incl. GST)" />
         </div>
         <div className="card">
-          <div className="card-head">Top Clients by Revenue</div>
+          <div className="card-head">Top clients — received this FY</div>
           {top5.length > 0 ? (
             <div>
               {top5.map(([name, val]) => (
                 <div key={name} style={{ marginBottom: 8 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 3 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11.5, marginBottom: 3 }}>
                     <span style={{ color: 'var(--text2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '60%' }}>{name}</span>
                     <span style={{ fontFamily: 'var(--mono)', color: 'var(--text)', fontSize: 11 }}>{fmtN(val)}</span>
                   </div>
                   <div style={{ background: 'var(--bg3)', borderRadius: 3, height: 5 }}>
-                    <div style={{ background: 'var(--accent)', borderRadius: 3, height: 5, width: `${(val/maxClient)*100}%`, transition: 'width .3s' }} />
+                    <div style={{ background: 'var(--accent)', borderRadius: 3, height: 5, width: `${(val / maxClient) * 100}%`, transition: 'width .3s' }} />
                   </div>
                 </div>
               ))}
             </div>
-          ) : <div style={{ color: 'var(--text3)', fontSize: 12, padding: '8px 0' }}>No data yet</div>}
+          ) : <div style={{ color: 'var(--text3)', fontSize: 12, padding: '8px 0' }}>No payments received this FY yet</div>}
         </div>
       </div>
 
       {overdueInvs.length > 0 && (
         <div style={{ marginBottom: 16 }}>
-          <div style={{ fontSize: 10, color: 'var(--red)', fontFamily: 'var(--mono)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 7 }}>
-            Overdue ({overdueInvs.length})
-          </div>
+          <div className="section-title" style={{ color: 'var(--red)', marginTop: 0 }}>Overdue ({overdueInvs.length})</div>
           <div className="table-wrap">
             <table>
-              <thead><tr><th>Invoice #</th><th>Party</th><th>Due Date</th><th className="r">Amount</th></tr></thead>
+              <thead><tr><th>Invoice #</th><th>Party</th><th>Due Date</th><th className="r">Days late</th><th className="r">Balance</th></tr></thead>
               <tbody>
                 {overdueInvs.slice(0, 5).map(inv => (
                   <tr key={inv.id}>
                     <td className="mono" style={{ color: 'var(--accent)' }}>{inv.invoice_number}</td>
-                    <td style={{ fontWeight: 500 }}>{parties.find(p => p.id === inv.party_id)?.name || '—'}</td>
+                    <td style={{ fontWeight: 500 }}>{partyName(inv.party_id)}</td>
                     <td className="mono" style={{ color: 'var(--red)', fontSize: 11 }}>{fmtD(inv.due_date)}</td>
-                    <td className="r mono" style={{ color: 'var(--red)' }}>{fmtM(inv.total)}</td>
+                    <td className="r mono" style={{ color: 'var(--red)', fontSize: 11 }}>{Math.floor((new Date(today()) - new Date(inv.due_date)) / 86400000)}</td>
+                    <td className="r mono" style={{ color: 'var(--red)' }}>{fmtM(dueOf(inv))}</td>
                   </tr>
                 ))}
               </tbody>
@@ -545,24 +587,26 @@ function Dashboard({ invoices, expenses, payments, businesses, parties, activeBi
       )}
 
       <div className="table-wrap">
-        <div className="table-toolbar"><h3>Recent Invoices</h3></div>
+        <div className="table-toolbar"><h3>Recent sales documents</h3><button className="btn btn-ghost btn-sm" onClick={() => setView('invoices')}>All invoices →</button></div>
         <table>
-          <thead><tr><th>Invoice #</th><th>Party</th><th>Date</th><th className="r">Total</th><th>GST</th><th>Status</th></tr></thead>
+          <thead><tr><th>Number</th><th>Party</th><th>Date</th><th className="r">Total</th><th className="r">Balance</th><th>GST</th><th>Status</th></tr></thead>
           <tbody>
-            {bi.slice(0, 10).map(inv => {
+            {[...sales].sort((a, b) => (b.issue_date || '').localeCompare(a.issue_date || '')).slice(0, 8).map(inv => {
               const gstMode = inv.is_interstate === false ? 'intra' : 'inter';
+              const due = dueOf(inv);
               return (
                 <tr key={inv.id}>
                   <td className="mono" style={{ color: 'var(--accent)' }}>{inv.invoice_number}</td>
-                  <td style={{ fontWeight: 500 }}>{parties.find(p => p.id === inv.party_id)?.name || '—'}</td>
+                  <td style={{ fontWeight: 500 }}>{partyName(inv.party_id)}</td>
                   <td className="mono" style={{ fontSize: 11 }}>{fmtD(inv.issue_date)}</td>
                   <td className="r mono">{fmtM(inv.total)}</td>
+                  <td className="r mono" style={{ fontSize: 11, color: due > 0.01 && inv.status !== 'cancelled' ? 'var(--amber)' : 'var(--text3)' }}>{inv.status === 'cancelled' ? '—' : due > 0.01 ? fmtM(due) : '✓'}</td>
                   <td><span className={`gst-chip ${gstMode === 'intra' ? 'cgst' : 'igst'}`} style={{ fontSize: 9 }}>{gstMode === 'intra' ? 'C+S GST' : 'IGST'}</span></td>
-                  <td><Badge status={inv.status} /></td>
+                  <td><Badge status={isOverdue(inv, due) ? 'overdue' : inv.status} /></td>
                 </tr>
               );
             })}
-            {bi.length === 0 && <tr><td colSpan={6}><EmptyState icon="📄" message="No invoices yet" sub='Go to Sales → Invoices to create your first invoice' /></td></tr>}
+            {sales.length === 0 && <tr><td colSpan={7}><EmptyState icon="📄" message="No invoices yet" sub='Use "+ New Invoice" above to raise your first one' /></td></tr>}
           </tbody>
         </table>
       </div>
@@ -579,7 +623,7 @@ function Dashboard({ invoices, expenses, payments, businesses, parties, activeBi
 const VIEW_NEEDS = {
   expenses: ['journal'], payments: ['journal'],
   bank: ['bankTxns', 'bankLinks', 'journal'],
-  journal: ['journal'], analysis: ['journal'], ledger: ['journal'], trial: ['journal'],
+  journal: ['journal'], analysis: ['journal'], ledger: ['journal'], trial: ['journal'], accounts: ['journal'],
   balance: ['journal'], pl: ['journal'],
   cashflow: ['journal', 'bankTxns'], reconcile: ['journal', 'bankTxns'],
   jhealth: ['journal', 'bankTxns', 'bankLinks'],
@@ -623,9 +667,49 @@ const SIDEBAR_CSS = `
 export default function App() {
   const [authed, setAuthed] = useState(() => localStorage.getItem('np_auth') === 'true');
   const [client, setClient] = useState(null);
-  const [view, setView] = useState('dashboard');
-  const [activeBiz, setActiveBiz] = useState('');
+  // The current screen lives in the URL hash (#/invoices), so refreshing the
+  // page or using Back/Forward keeps you where you were, and links can be shared.
+  const [view, setViewState] = useState(viewFromHash);
+  const setView = useCallback((v) => {
+    setViewState(v);
+    if (window.location.hash !== `#/${v}`) window.history.pushState(null, '', `#/${v}`);
+  }, []);
+  useEffect(() => {
+    const onPop = () => setViewState(viewFromHash());
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
+  // One-shot instruction for the next screen (e.g. dashboard "+ New Invoice" or "View overdue").
+  const [pendingAction, setPendingAction] = useState(null);
+  const startAction = useCallback((v, action) => { setPendingAction({ view: v, ...action, at: Date.now() }); setView(v); }, [setView]);
+  const [activeBiz, setActiveBizState] = useState(() => { try { return localStorage.getItem('np_active_biz') || ''; } catch (_) { return ''; } });
+  const setActiveBiz = v => { setActiveBizState(v); try { localStorage.setItem('np_active_biz', v); } catch (_) {} };
+  const [navQuery, setNavQuery] = useState('');
+  const navSearchRef = useRef(null);
+  const [collapsedGroups, setCollapsedGroups] = useState(() => { try { return JSON.parse(localStorage.getItem('np_nav_collapsed') || '{}'); } catch (_) { return {}; } });
+  const toggleGroup = g => setCollapsedGroups(c => { const n = { ...c, [g]: !c[g] }; try { localStorage.setItem('np_nav_collapsed', JSON.stringify(n)); } catch (_) {} return n; });
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+
+  // Anything that fails without its own error handling still gets reported,
+  // instead of the button silently doing nothing.
+  useEffect(() => {
+    const onRej = e => { const m = e?.reason?.message || String(e?.reason || 'Something went wrong'); toast(m, 'error'); };
+    window.addEventListener('unhandledrejection', onRej);
+    return () => window.removeEventListener('unhandledrejection', onRej);
+  }, []);
+  // Ctrl/⌘+K jumps to the sidebar search.
+  useEffect(() => {
+    const onKey = e => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        if (window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT}px)`).matches) setMobileNavOpen(true);
+        else if (sidebarHidden) setSidebarHidden(false);
+        setTimeout(() => navSearchRef.current?.focus(), 30);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
   const [sidebarHidden, setSidebarHidden] = useState(() => {
     try { return localStorage.getItem('np_sidebar_hidden') === 'true'; } catch (_) { return false; }
   });
@@ -721,7 +805,7 @@ export default function App() {
     setAuthed(false);
   }
 
-  if (!authed) return <><style>{FONTS}{CSS}</style><LoginScreen onLogin={handleLogin} /></>;
+  if (!authed) return <><style>{FONTS}{CSS}</style><LoginScreen onLogin={handleLogin} client={client} /></>;
 
   const { businesses, invoices, parties, expenses, payments,
     accounts, journalEntries, journalLines, creditNotes, debitNotes,
@@ -731,6 +815,26 @@ export default function App() {
   const loading = coreLoading || !viewNeeds.every(g => heavyReady[g]);
 
   const cp = { businesses, activeBiz, reload };
+
+  // Sidebar: search filters across every group; a red count marks overdue invoices.
+  const q = navQuery.trim().toLowerCase();
+  const navMatch = n => !q || n.label.toLowerCase().includes(q) || (n.group || '').toLowerCase().includes(q) || (n.keys || '').includes(q);
+  const overdueCount = (() => {
+    const pays = {}, cns = {};
+    payments.forEach(p => { (pays[p.invoice_id] ||= []).push(p); });
+    creditNotes.forEach(c => { (cns[c.invoice_id] ||= []).push(c); });
+    return invoices.filter(i => i.type === 'sale' && (!activeBiz || i.business_id === activeBiz)
+      && isOverdue(i, invoiceDue(i, pays[i.id] || [], cns[i.id] || []))).length;
+  })();
+  const navBtn = n => (
+    <button key={n.id} className={`nav-item${view === n.id ? ' active' : ''}`} aria-current={view === n.id ? 'page' : undefined}
+      onClick={() => { setView(n.id); setMobileNavOpen(false); setNavQuery(''); }}>
+      <span className="icon">{n.icon}</span>{n.label}
+      {n.id === 'invoices' && overdueCount > 0 && <span className="nav-count" title={`${overdueCount} overdue`}>{overdueCount}</span>}
+    </button>
+  );
+  const actionFor = v => (pendingAction?.view === v ? pendingAction : null);
+  const clearAction = () => setPendingAction(null);
 
   return (
     <>
@@ -749,22 +853,33 @@ export default function App() {
               {businesses.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
             </select>
           </div>
+          <div className="nav-search">
+            <span className="ico">⌕</span>
+            <input ref={navSearchRef} value={navQuery} placeholder="Jump to…" aria-label="Search screens"
+              onChange={e => setNavQuery(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && q) { const first = NAV.find(navMatch); if (first) { setView(first.id); setNavQuery(''); setMobileNavOpen(false); e.target.blur(); } }
+                if (e.key === 'Escape') { setNavQuery(''); e.target.blur(); }
+              }} />
+            {!navQuery && <kbd>⌘K</kbd>}
+          </div>
           <nav className="nav">
-            {NAV.filter(n => !n.group).map(n => (
-              <button key={n.id} className={`nav-item${view === n.id ? ' active' : ''}`} onClick={() => { setView(n.id); setMobileNavOpen(false); }}>
-                <span className="icon">{n.icon}</span>{n.label}
-              </button>
-            ))}
-            {GROUPS.map(grp => (
-              <div key={grp}>
-                <div className="nav-label">{grp}</div>
-                {NAV.filter(n => n.group === grp).map(n => (
-                  <button key={n.id} className={`nav-item${view === n.id ? ' active' : ''}`} onClick={() => { setView(n.id); setMobileNavOpen(false); }}>
-                    <span className="icon">{n.icon}</span>{n.label}
+            {NAV.filter(n => !n.group && navMatch(n)).map(navBtn)}
+            {GROUPS.map(grp => {
+              const items = NAV.filter(n => n.group === grp && navMatch(n));
+              if (!items.length) return null;
+              // A collapsed group stays open while it holds the current screen or a search is running.
+              const collapsed = !q && collapsedGroups[grp] && !items.some(n => n.id === view);
+              return (
+                <div key={grp}>
+                  <button className={`nav-label${collapsed ? ' collapsed' : ''}`} onClick={() => toggleGroup(grp)} aria-expanded={!collapsed}>
+                    {grp}<span className="chev">▾</span>
                   </button>
-                ))}
-              </div>
-            ))}
+                  {!collapsed && items.map(navBtn)}
+                </div>
+              );
+            })}
+            {q && !NAV.some(navMatch) && <div className="hint" style={{ padding: '8px 10px' }}>No screen matches “{navQuery}”</div>}
           </nav>
           <div className="sidebar-foot">
             <button className="btn btn-ghost btn-sm" style={{ width: '100%', fontSize: 11, color: 'var(--text4)' }}
@@ -781,8 +896,8 @@ export default function App() {
               <h2>{TITLES[view] || view}</h2>
             </div>
             <div className="topbar-right">
-              <button className="btn btn-ghost btn-sm" onClick={reload} disabled={loading || refreshing}>
-                {loading || refreshing ? 'Loading…' : '↻ Refresh'}
+              <button className="btn btn-ghost btn-sm" onClick={reload} disabled={loading || refreshing} title="Reload data from the database">
+                {loading || refreshing ? 'Loading…' : <>↻ <span>Refresh</span></>}
               </button>
             </div>
           </div>
@@ -790,12 +905,13 @@ export default function App() {
             {loading && <div className="loading">Loading data…</div>}
 
             {!loading && view === 'dashboard' && (
-              <Dashboard invoices={invoices} expenses={expenses} payments={payments}
-                businesses={businesses} parties={parties} activeBiz={activeBiz} setView={setView} />
+              <Dashboard invoices={invoices} expenses={expenses} payments={payments} creditNotes={creditNotes}
+                businesses={businesses} parties={parties} activeBiz={activeBiz} setView={setView} startAction={startAction} />
             )}
             {!loading && (view === 'invoices' || view === 'proformas') && (
-              <InvoicesView invoices={invoices} parties={parties} creditNotes={creditNotes}
-                payments={payments} isProforma={view === 'proformas'} catalogItems={items} {...cp} />
+              <InvoicesView key={view} invoices={invoices} parties={parties} creditNotes={creditNotes}
+                payments={payments} isProforma={view === 'proformas'} catalogItems={items}
+                action={actionFor(view)} onActionDone={clearAction} {...cp} />
             )}
             {!loading && view === 'creditnotes' && (
               <CreditNotesView creditNotes={creditNotes} invoices={invoices} parties={parties} {...cp} />
@@ -806,11 +922,12 @@ export default function App() {
             {!loading && view === 'challans' && (
               <DeliveryChallansView challans={challans} parties={parties} invoices={invoices} {...cp} />
             )}
-            {!loading && view === 'parties' && <PartiesView parties={parties} {...cp} />}
+            {!loading && view === 'parties' && <PartiesView parties={parties} invoices={invoices} payments={payments} creditNotes={creditNotes} {...cp} />}
             {!loading && view === 'items' && <ItemsView items={items} {...cp} />}
             {!loading && view === 'purchasebills' && (
-              <InvoicesView invoices={invoices} parties={parties} creditNotes={creditNotes}
-                payments={payments} purchaseMode={true} catalogItems={items} {...cp} />
+              <InvoicesView key={view} invoices={invoices} parties={parties} creditNotes={creditNotes}
+                payments={payments} purchaseMode={true} catalogItems={items}
+                action={actionFor(view)} onActionDone={clearAction} {...cp} />
             )}
             {!loading && view === 'expenses' && <ExpensesView expenses={expenses} parties={parties} accounts={accounts} journalEntries={journalEntries} journalLines={journalLines} invoices={invoices} {...cp} />}
             {!loading && view === 'payments' && (
@@ -832,7 +949,7 @@ export default function App() {
             {!loading && view === 'export' && (
               <ExportView invoices={invoices} expenses={expenses} payments={payments} parties={parties} businesses={businesses} activeBiz={activeBiz} />
             )}
-            {!loading && view === 'accounts' && <ChartOfAccountsView accounts={accounts} {...cp} />}
+            {!loading && view === 'accounts' && <ChartOfAccountsView accounts={accounts} journalLines={journalLines} {...cp} />}
             {!loading && view === 'journal' && (
               <JournalView journalEntries={journalEntries} journalLines={journalLines} accounts={accounts}
                 expenses={expenses} payments={payments} {...cp} />
@@ -857,16 +974,16 @@ export default function App() {
                 activeBiz={activeBiz} invoiceItems={invoiceItems} payments={payments} creditNotes={creditNotes} debitNotes={debitNotes} />
             )}
             {!loading && view === 'ar' && (
-              <ARLedgerView invoices={invoices} payments={payments} creditNotes={creditNotes} debitNotes={debitNotes}
+              <ARLedgerView invoices={invoices} payments={payments} creditNotes={creditNotes} debitNotes={debitNotes} setView={setView}
                 parties={parties} businesses={businesses} activeBiz={activeBiz} />
             )}
             {!loading && view === 'ap' && (
               <APLedgerView invoices={invoices} expenses={expenses} payments={payments}
-                parties={parties} businesses={businesses} activeBiz={activeBiz} />
+                parties={parties} businesses={businesses} activeBiz={activeBiz} debitNotes={debitNotes} />
             )}
             {!loading && view === 'pl' && (
               <PLView accounts={accounts} journalLines={journalLines} journalEntries={journalEntries}
-                invoices={invoices} expenses={expenses} payments={payments}
+                invoices={invoices} expenses={expenses} payments={payments} creditNotes={creditNotes}
                 businesses={businesses} activeBiz={activeBiz} />
             )}
             {!loading && view === 'cashflow' && (
@@ -888,12 +1005,13 @@ export default function App() {
             )}
             {!loading && view === 'gstr3b' && <GSTR3BView activeBiz={activeBiz} businesses={businesses} invoices={invoices} creditNotes={creditNotes} reload={reload} />}
             {!loading && view === 'audit' && <AuditTrailView activeBiz={activeBiz} />}
-            {!loading && view === 'kpis' && <KPIDashboard activeBiz={activeBiz} invoices={invoices} expenses={expenses} payments={payments} parties={parties} />}
+            {!loading && view === 'kpis' && <KPIDashboard activeBiz={activeBiz} invoices={invoices} expenses={expenses} payments={payments} parties={parties} creditNotes={creditNotes} />}
             {!loading && view === 'businesses' && <BusinessesView businesses={businesses} reload={reload} />}
             {!loading && view === 'sqlsetup' && <SqlSetupView invoices={invoices} payments={payments} />}
           </div>
         </div>
       </div>
+      <Toaster />
     </>
   );
 }

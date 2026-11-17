@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
-import { fmt, fmtDate, today, GST_RATES, PAY_MODES, INDIAN_STATES, gstType, calcLineTax, nextInvNum, getFY, garmentGSTRate, isGSTINValid, guessHSN, isHSNValid, MIN_HSN_DIGITS, needsEwayBill, ewayBillThreshold } from '../lib/constants.js';
-import { saveInvoice, getInvoiceItems, updateInvoiceStatus, deleteInvoice, cancelInvoice, savePaymentWithJournal } from '../lib/db.js';
+import { fmt, fmtDate, today, GST_RATES, PAY_MODES, INDIAN_STATES, gstType, calcLineTax, nextInvNum, getFY, getFYForDate, garmentGSTRate, isGSTINValid, guessHSN, isHSNValid, MIN_HSN_DIGITS, needsEwayBill, ewayBillThreshold, invoiceDue, isOverdue } from '../lib/constants.js';
+import { saveInvoice, getInvoiceItems, updateInvoiceStatus, updateInvoice, deleteInvoice, cancelInvoice, savePaymentWithJournal, saveCreditNote } from '../lib/db.js';
 import { printInvoice } from '../lib/pdf.js';
-import { Badge, ModalShell, FG, PayHistory, EmptyState } from '../components/ui.jsx';
+import { Badge, ModalShell, FG, PayHistory, EmptyState, toast } from '../components/ui.jsx';
 import { LinkBankPaymentModal } from '../components/LinkBankPayment.jsx';
+import { CreditNoteModal } from './CreditNotes.jsx';
 
 // ─── LINE ITEM CALCULATION ─────────────────────────────────────────────────────
 // priceMode: 'exclusive' (default) — unit_price is the pre-tax rate, GST is
@@ -35,7 +36,16 @@ function calcItem(it, isIntrastate, priceMode = 'exclusive', invDiscRatio = 0) {
 // ─── INVOICE MODAL ─────────────────────────────────────────────────────────────
 export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItems = [], editData, allInvoices, isProforma = false, activeBiz, purchaseMode = false }) {
   const isPF = isProforma || (editData?.status === 'proforma');
-  const initialBizId = editData?.business_id || activeBiz || businesses[0]?.id || '';
+  // With "All Businesses" selected, start from the business you last saved a
+  // document for, rather than whichever sorts first alphabetically.
+  const lastBiz = (() => { try { return localStorage.getItem('np_last_doc_biz'); } catch (_) { return null; } })();
+  const initialBizId = editData?.business_id || activeBiz || (businesses.some(b => b.id === lastBiz) ? lastBiz : businesses[0]?.id) || '';
+  const isPurchase = editData ? editData.type === 'purchase' : purchaseMode;
+  const initialDate = editData?.issue_date || today();
+  // Purchase bills carry the SUPPLIER's bill number, so a new one starts blank
+  // instead of borrowing the next number from your own sales series.
+  const suggestNumber = (bizId, date) => isPurchase ? '' :
+    nextInvNum(allInvoices.filter(i => i.business_id === bizId), isPF, date);
 
   const [f, setF] = useState({
     business_id: initialBizId,
@@ -43,11 +53,12 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
     // Sequence must be unique per GSTIN (Rule 46(b)) — scope the scan to this
     // business only, not every business's invoices, or numbers will skip
     // around whenever another business creates a document in between.
-    invoice_number: editData?.invoice_number || nextInvNum(allInvoices.filter(i => i.business_id === initialBizId), isPF),
+    invoice_number: editData?.invoice_number || suggestNumber(initialBizId, initialDate),
     type: editData?.type || (purchaseMode ? 'purchase' : 'sale'),
-    issue_date: editData?.issue_date || today(),
+    issue_date: initialDate,
     due_date: editData?.due_date || '',
-    status: editData?.status || (isPF ? 'proforma' : 'draft'),
+    // A supplier bill is a real liability the moment it's recorded (its journal posts on save), so it starts as received.
+    status: editData?.status || (isPF ? 'proforma' : isPurchase ? 'sent' : 'draft'),
     notes: editData?.notes || '',
     discount_percent: editData?.discount_percent || 0,
     discount_amount: editData?.discount_amount || 0,
@@ -83,13 +94,17 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
   // business's own sequence — otherwise it'd keep whatever number the
   // previously-selected business generated. Skip this while editing an
   // existing invoice (its number is already fixed).
-  const prevBizRef = useRef(initialBizId);
+  // Same when the issue date moves into a different financial year (e.g. a
+  // March invoice entered in April) — the series restarts per FY.
+  const prevKeyRef = useRef(`${initialBizId}|${getFYForDate(initialDate)}`);
+  const numberTouched = useRef(false);
   useEffect(() => {
-    if (editData) return;
-    if (f.business_id === prevBizRef.current) return;
-    prevBizRef.current = f.business_id;
-    setF(x => ({ ...x, invoice_number: nextInvNum(allInvoices.filter(i => i.business_id === f.business_id), isPF) }));
-  }, [f.business_id]);
+    if (editData || isPurchase) return;
+    const key = `${f.business_id}|${getFYForDate(f.issue_date)}`;
+    if (key === prevKeyRef.current) return;
+    prevKeyRef.current = key;
+    if (!numberTouched.current) setF(x => ({ ...x, invoice_number: suggestNumber(f.business_id, f.issue_date) }));
+  }, [f.business_id, f.issue_date]);
 
   const bizObj = businesses.find(b => b.id === f.business_id) || {};
   const partyObj = parties.find(p => p.id === f.party_id) || {};
@@ -169,8 +184,15 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
     setItems(prev => prev.map((it, i) => i !== idx ? it : { ...it, hsn_code: val, hsn_auto: false, hsn_guess_label: null }));
   }
 
-  async function save() {
-    if (!f.party_id) { setErr('Select a party'); return; }
+  async function save(issue = false) {
+    if (!f.party_id) { setErr(isPurchase ? 'Select a supplier' : 'Select a party'); return; }
+    const num = (f.invoice_number || '').trim();
+    if (!num) { setErr(isPurchase ? "Enter the supplier's bill number" : 'Enter an invoice number'); return; }
+    // The database has a unique index on (business, number); catch the clash here with a clear message.
+    const clash = allInvoices.find(i => i.id !== editData?.id && i.business_id === f.business_id
+      && (i.invoice_number || '').trim().toLowerCase() === num.toLowerCase()
+      && (!isPurchase || i.party_id === f.party_id));
+    if (clash) { setErr(`Number ${num} is already used by another ${clash.type === 'purchase' ? 'purchase bill' : 'document'} in this business.`); return; }
     const validItems = calc.filter(i => i.description?.trim());
     if (!validItems.length) { setErr('Add at least one line item'); return; }
     // Rule 46(f) — HSN is mandatory on every line, minimum 4 digits below
@@ -191,6 +213,10 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
       if (!editData && !isPF && gstinSnapshot === null) gstinSnapshot = partyObj.gstin || '';
       const invData = {
         ...f,
+        invoice_number: num,
+        // "Save & issue" marks a draft as sent. Drafts are left out of GSTR-1,
+        // so an invoice that silently stays a draft never gets reported.
+        status: issue && f.status === 'draft' ? 'sent' : f.status,
         subtotal,
         cgst_amount: totalCGST,
         sgst_amount: totalSGST,
@@ -203,18 +229,32 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
         party_gstin_snapshot: gstinSnapshot,
       };
       await onSave(invData, validItems, editData?.id);
+      try { localStorage.setItem('np_last_doc_biz', f.business_id); } catch (_) {}
       onClose();
     } catch (e) { setErr(e.message); }
     setBusy(false);
   }
+
+  const baseStatuses = isPF ? ['proforma', 'cancelled'] : ['draft', 'sent', 'partially_paid', 'paid', 'cancelled'];
+  const statusOptions = baseStatuses.includes(f.status) ? baseStatuses : [...baseStatuses, f.status];
 
   const gstLabel = isIntrastate
     ? <span>GST split: <span className="gst-chip cgst">CGST</span> <span className="gst-chip sgst">SGST</span></span>
     : <span>GST type: <span className="gst-chip igst">IGST</span> (inter-state)</span>;
 
   return (
-    <ModalShell title={editData ? (f.type === 'purchase' ? 'Edit Purchase Bill' : 'Edit Invoice') : (isPF ? 'New Proforma Invoice' : (purchaseMode ? 'New Purchase Bill' : 'New Tax Invoice'))} onClose={onClose} size="modal-xl"
-      foot={<><button className="btn btn-ghost" onClick={onClose}>Cancel</button><button className="btn btn-primary" onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save Invoice'}</button></>}>
+    <ModalShell title={editData ? (isPurchase ? 'Edit Purchase Bill' : isPF ? 'Edit Proforma' : 'Edit Invoice') : (isPF ? 'New Proforma Invoice' : (isPurchase ? 'New Purchase Bill' : 'New Tax Invoice'))} onClose={onClose} size="modal-xl"
+      confirmClose="Close without saving? Anything you've entered will be lost."
+      foot={<>
+        <span className="hint" style={{ marginRight: 'auto', alignSelf: 'center' }}>Total <b style={{ color: 'var(--text)', fontFamily: 'var(--mono)' }}>{fmt(payableTotal)}</b></span>
+        <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
+        {!isPF && !isPurchase && f.status === 'draft'
+          ? <>
+              <button className="btn btn-ghost" onClick={() => save(false)} disabled={busy} title="Keep as draft — drafts are not included in GSTR-1">Save draft</button>
+              <button className="btn btn-primary" onClick={() => save(true)} disabled={busy}>{busy ? 'Saving…' : 'Save & issue'}</button>
+            </>
+          : <button className="btn btn-primary" onClick={() => save(false)} disabled={busy}>{busy ? 'Saving…' : isPurchase ? 'Save bill' : isPF ? 'Save proforma' : 'Save invoice'}</button>}
+      </>}>
 
       {isPF && <div className="pf-banner">⚡ Proforma Invoice — numbered PI-… Use "→ Invoice" to convert when approved.</div>}
 
@@ -225,36 +265,33 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
             {businesses.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
           </select>
         </FG>
-        <FG label={purchaseMode ? 'Document Type' : 'Invoice Type'}>
-          <select value={f.type} onChange={e => setF(x => ({ ...x, type: e.target.value }))}>
-            {!purchaseMode && <option value="sale">Sale (Invoice)</option>}
-            <option value="purchase">Purchase (Bill)</option>
-          </select>
-        </FG>
-        <FG label="Invoice #">
-          <input value={f.invoice_number} disabled={!!editData?.gst_filed}
-            onChange={e => setF(x => ({ ...x, invoice_number: e.target.value }))} />
+        <FG label={isPurchase ? 'Supplier Bill # *' : isPF ? 'Proforma #' : 'Invoice #'} note={isPurchase ? "As printed on the supplier's bill" : undefined}>
+          <input value={f.invoice_number} disabled={!!editData?.gst_filed} placeholder={isPurchase ? "Supplier's bill number" : ''}
+            onChange={e => { numberTouched.current = true; setF(x => ({ ...x, invoice_number: e.target.value })); }} />
           {editData?.gst_filed && <div style={{ fontSize: 10, color: 'var(--text3)', marginTop: 3 }}>Locked — already marked GST-filed. Cancel and reissue instead of renumbering.</div>}
+        </FG>
+        <FG label="Status">
+          <select value={f.status} onChange={e => setF(x => ({ ...x, status: e.target.value }))}>
+            {statusOptions.map(s => <option key={s} value={s}>{s === 'sent' && isPurchase ? 'Received' : s.replace('_', ' ').replace(/^./, c => c.toUpperCase())}</option>)}
+          </select>
         </FG>
       </div>
 
       <div className="form-row cols-3">
-        <FG label="Party *">
+        <FG label={isPurchase ? 'Supplier *' : 'Party *'}>
           <select value={f.party_id} onChange={e => setF(x => ({ ...x, party_id: e.target.value }))}>
-            <option value="">Select party…</option>
-            {filteredParties.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+            <option value="">{isPurchase ? 'Select supplier…' : 'Select party…'}</option>
+            {/* Suppliers first on a bill, clients first on an invoice */}
+            {[...filteredParties].sort((a, b) => ((a.type === (isPurchase ? 'vendor' : 'client')) ? 0 : 1) - ((b.type === (isPurchase ? 'vendor' : 'client')) ? 0 : 1) || a.name.localeCompare(b.name))
+              .map(p => <option key={p.id} value={p.id}>{p.name}{p.type !== (isPurchase ? 'vendor' : 'client') ? ` (${p.type})` : ''}</option>)}
           </select>
+          {filteredParties.length === 0 && <div className="form-note" style={{ color: 'var(--amber)' }}>No parties for this business yet — add one under Sales → Parties.</div>}
         </FG>
         <FG label="Issue Date"><input type="date" value={f.issue_date} onChange={e => setF(x => ({ ...x, issue_date: e.target.value }))} /></FG>
         <FG label="Due Date"><input type="date" value={f.due_date} onChange={e => setF(x => ({ ...x, due_date: e.target.value }))} /></FG>
       </div>
 
       <div className="form-row cols-3">
-        <FG label="Status">
-          <select value={f.status} onChange={e => setF(x => ({ ...x, status: e.target.value }))}>
-            {['proforma', 'draft', 'sent', 'paid', 'overdue', 'cancelled'].map(s => <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>)}
-          </select>
-        </FG>
         <FG label="Discount">
           <div style={{display:'flex',gap:6,alignItems:'center'}}>
             <div style={{position:'relative',flex:1}}>
@@ -290,8 +327,7 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
       </div>
       {f.type === 'purchase' && (
         <>
-          <div className="form-row cols-3">
-            <FG label="Supplier Invoice # *"><input value={f.invoice_number} onChange={e => setF(x => ({ ...x, invoice_number: e.target.value }))} placeholder="Supplier's bill number" /></FG>
+          <div className="form-row cols-2">
             <FG label="PO Reference"><input value={f.purchase_order_ref} onChange={e => setF(x => ({ ...x, purchase_order_ref: e.target.value }))} placeholder="Optional PO #" /></FG>
             <FG label="GRN / Receipt Ref"><input value={f.grn_ref} onChange={e => setF(x => ({ ...x, grn_ref: e.target.value }))} placeholder="Optional GRN #" /></FG>
           </div>
@@ -473,10 +509,13 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
 }
 
 // ─── PAYMENT MODAL ─────────────────────────────────────────────────────────────
-export function PaymentModal({ onClose, onSave, invoice, existingPayments, parties = [], allPayments = [], onLinked }) {
+export function PaymentModal({ onClose, onSave, invoice, existingPayments, parties = [], allPayments = [], creditNotes = [], onLinked }) {
   const [linkOpen, setLinkOpen] = useState(false);
   const totalPaid = existingPayments.reduce((s, p) => s + Number(p.amount), 0);
-  const balance = Number(invoice.total) - totalPaid;
+  // TDS the customer withheld and credit notes against this invoice also reduce what's left to collect.
+  const balance = invoiceDue(invoice, existingPayments, creditNotes);
+  const tds = Number(invoice.tds_amount || 0);
+  const cnTotal = creditNotes.filter(c => c.status !== 'cancelled').reduce((s, c) => s + Number(c.total || 0), 0);
   const [f, setF] = useState({ amount: balance.toFixed(2), payment_date: today(), method: 'UPI', reference: '', notes: '' });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
@@ -524,7 +563,12 @@ export function PaymentModal({ onClose, onSave, invoice, existingPayments, parti
           </div>
         );
       })()}
-      <PayHistory payments={existingPayments} invoiceTotal={Number(invoice.total)} />
+      <PayHistory payments={existingPayments} invoiceTotal={Number(invoice.total) - tds - cnTotal} />
+      {(tds > 0 || cnTotal > 0) && (
+        <div className="hint" style={{ marginTop: 6 }}>
+          Balance already allows for {tds > 0 ? `TDS of ${fmt(tds)}` : ''}{tds > 0 && cnTotal > 0 ? ' and ' : ''}{cnTotal > 0 ? `credit notes of ${fmt(cnTotal)}` : ''}.
+        </div>
+      )}
       <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <button type="button" className="btn btn-primary btn-sm" onClick={() => setLinkOpen(true)}>🔗 Link bank payment</button>
         <span style={{ fontSize: 11.5, color: 'var(--text3)' }}>Pick the imported bank transaction(s) that paid this, instead of typing the payment in.</span>
@@ -560,16 +604,24 @@ function fmtMonthKey(key) {
 }
 
 // ─── INVOICES VIEW ─────────────────────────────────────────────────────────────
-export function InvoicesView({ invoices, businesses, parties, activeBiz, reload, payments, creditNotes, catalogItems = [], purchaseMode = false }) {
+export function InvoicesView({ invoices, businesses, parties, activeBiz, reload, payments, creditNotes, catalogItems = [], purchaseMode = false, isProforma = false, action = null, onActionDone }) {
   const [search, setSearch] = useState('');
   const [groupByMonth, setGroupByMonth] = useState(true);
+  const [cnFor, setCnFor] = useState(null); // invoice a credit note is being raised against
   const [activeMonth, setActiveMonth] = useState(null); // null = show all months expanded
   const [sf, setSf] = useState('');
   const [showInv, setShowInv] = useState(false);
   const [showPF, setShowPF] = useState(false);
   const [editData, setEditData] = useState(null);
   const [payInv, setPayInv] = useState(null);
-  const [collapsedMonths, setCollapsedMonths] = useState({});
+
+  // Instructions handed over from the dashboard ("+ New Invoice", "View overdue"…), applied once.
+  useEffect(() => {
+    if (!action) return;
+    if (action.create) { setEditData(null); if (isProforma) setShowPF(true); else setShowInv(true); }
+    if (action.filter) setSf(action.filter);
+    onActionDone?.();
+  }, [action?.at]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const paysByInv = {};
   payments.forEach(p => { if (!paysByInv[p.invoice_id]) paysByInv[p.invoice_id] = []; paysByInv[p.invoice_id].push(p); });
@@ -577,13 +629,35 @@ export function InvoicesView({ invoices, businesses, parties, activeBiz, reload,
   const cnsByInv = {};
   creditNotes.forEach(cn => { if (!cnsByInv[cn.invoice_id]) cnsByInv[cn.invoice_id] = []; cnsByInv[cn.invoice_id].push(cn); });
 
-  const filtered = invoices.filter(i => {
-    const biz = activeBiz ? i.business_id === activeBiz : true;
-    const stMatch = sf ? i.status === sf : true;
-    const s = search.toLowerCase();
-    const nameMatch = !s || i.invoice_number.toLowerCase().includes(s) || (parties.find(p => p.id === i.party_id)?.name || '').toLowerCase().includes(s);
-    return biz && stMatch && nameMatch && (purchaseMode ? i.type === 'purchase' : i.type !== 'purchase');
-  }).sort((a, b) => new Date(b.issue_date) - new Date(a.issue_date));
+  const dueOf = inv => invoiceDue(inv, paysByInv[inv.id] || [], cnsByInv[inv.id] || []);
+  const partyName = id => parties.find(p => p.id === id)?.name || '';
+
+  // Three screens share this view: Invoices (tax invoices), Proforma (proformas
+  // only) and Purchase Bills. Before, the Proforma page showed every invoice.
+  const inScope = i => (activeBiz ? i.business_id === activeBiz : true)
+    && (purchaseMode ? i.type === 'purchase'
+      : i.type !== 'purchase' && (isProforma ? i.status === 'proforma' : i.status !== 'proforma'));
+  const scoped = invoices.filter(inScope);
+  const filtered = scoped.filter(i => {
+    const stMatch = !sf ? true : sf === 'overdue' ? lateOf(i) : sf === 'unpaid' ? dueOf(i) > 0.01 && isLive(i) : i.status === sf;
+    const s = search.trim().toLowerCase();
+    const nameMatch = !s || (i.invoice_number || '').toLowerCase().includes(s) || partyName(i.party_id).toLowerCase().includes(s)
+      || (i.proforma_number || '').toLowerCase().includes(s);
+    return stMatch && nameMatch;
+  }).sort((a, b) => (b.issue_date || '').localeCompare(a.issue_date || '') || (b.invoice_number || '').localeCompare(a.invoice_number || '', undefined, { numeric: true }));
+
+  // Headline numbers for whatever is in scope (ignores the search box on purpose).
+  // Purchase bills are booked when recorded, so a 'draft' bill still counts; sales drafts don't.
+  const isLive = i => i.status !== 'cancelled' && (purchaseMode || i.status !== 'draft');
+  const lateOf = i => isOverdue(purchaseMode && i.status === 'draft' ? { ...i, status: 'sent' } : i, dueOf(i));
+  const live = scoped.filter(isLive);
+  const summary = {
+    count: live.length,
+    total: live.reduce((s, i) => s + Number(i.total || 0), 0),
+    outstanding: live.reduce((s, i) => s + Math.max(0, dueOf(i)), 0),
+    overdue: live.filter(lateOf),
+    drafts: scoped.filter(i => i.status === 'draft').length,
+  };
 
   // Group by month (YYYY-MM key, sorted newest first)
   const monthGroups = filtered.reduce((acc, inv) => {
@@ -603,23 +677,16 @@ export function InvoicesView({ invoices, businesses, parties, activeBiz, reload,
     }
   }
 
-  // When tabs mode: show only active month; when accordion: show all, toggle collapse
-  const displayMonths = groupByMonth && activeMonth !== null
-    ? sortedMonthKeys // tabs mode shows tabs, content filtered below
-    : sortedMonthKeys;
-
-  function toggleCollapse(key) {
-    setCollapsedMonths(prev => ({ ...prev, [key]: !prev[key] }));
-  }
-
-  // Ensure active month defaults to first month on first render with groupByMonth=true
-  if (groupByMonth && activeMonth === null && sortedMonthKeys.length > 0) {
-    // Use setTimeout to avoid setState-in-render
-    setTimeout(() => setActiveMonth(sortedMonthKeys[0]), 0);
-  }
+  // Fall back to the newest month whenever the selected one has nothing in it
+  // (first load, or after a filter change empties it) — previously the screen
+  // just showed the month tabs with no table underneath.
+  const shownMonth = activeMonth && monthGroups[activeMonth] ? activeMonth : sortedMonthKeys[0] || null;
+  // Searching or filtering looks across every month, so show one flat list.
+  const flatList = !groupByMonth || !!search.trim() || !!sf;
 
   async function handleSave(invData, items, id) {
     await saveInvoice(invData, items, id);
+    toast(`${invData.type === 'purchase' ? 'Purchase bill' : invData.status === 'proforma' ? 'Proforma' : 'Invoice'} ${invData.invoice_number} saved`, 'success');
     reload();
   }
 
@@ -627,26 +694,27 @@ export function InvoicesView({ invoices, businesses, parties, activeBiz, reload,
   // fully paid, otherwise keep the invoice's paid / partially-paid status in step.
   async function afterPayment(invoiceId, amt, paymentDate, { skipStatus = false } = {}) {
     const inv = invoices.find(i => i.id === invoiceId);
-    const prev = (paysByInv[invoiceId] || []).reduce((s, p) => s + Number(p.amount), 0);
-    const isFullyPaid = prev + amt >= Number(inv?.total) - 0.01;
-    if (inv?.status === 'proforma') {
-      if (isFullyPaid) {
-        // Auto-convert: assign next invoice number, mark paid, use date of final payment as invoice date
-        const newNum = nextInvNum(invoices.filter(i => i.business_id === inv.business_id), false);
-        const invoiceDate = paymentDate || today();
-        const { supabase } = await import('../lib/db.js');
-        await supabase.from('invoices')
-          .update({ status: 'paid', invoice_number: newNum, proforma_number: inv.invoice_number, issue_date: invoiceDate })
-          .eq('id', invoiceId);
-        alert(`✅ Full payment received!\nTax Invoice ${newNum} raised on ${invoiceDate}.\nThis invoice will now appear in GSTR-1 for the current month.`);
+    const isFullyPaid = dueOf(inv) - amt <= 0.01;
+    try {
+      if (inv?.status === 'proforma') {
+        if (isFullyPaid) {
+          // Auto-convert: assign next invoice number, mark paid, use date of final payment as invoice date
+          const invoiceDate = paymentDate || today();
+          const newNum = nextInvNum(invoices.filter(i => i.business_id === inv.business_id), false, invoiceDate);
+          const party = parties.find(p => p.id === inv.party_id);
+          await updateInvoice(invoiceId, { status: 'paid', invoice_number: newNum, proforma_number: inv.invoice_number, issue_date: invoiceDate, party_gstin_snapshot: party?.gstin || '' });
+          toast(`Full payment received — Tax Invoice ${newNum} raised on ${fmtDate(invoiceDate)}. It now shows in GSTR-1 for that month.`, 'success', 7000);
+        } else toast('Advance recorded', 'success');
+      } else {
+        if (!skipStatus) await updateInvoiceStatus(invoiceId, isFullyPaid ? 'paid' : 'partially_paid');
+        toast(isFullyPaid ? `${inv?.invoice_number} is now fully paid` : 'Payment recorded', 'success');
       }
-    } else if (!skipStatus) {
-      await updateInvoiceStatus(invoiceId, isFullyPaid ? 'paid' : 'partially_paid');
-    }
+    } catch (e) { toast(e.message, 'error'); }
     reload();
   }
   async function handlePayment(data) {
-    await savePaymentWithJournal(data);
+    const res = await savePaymentWithJournal(data);
+    if (res?.skipped) toast(`Payment saved, but no journal entry was posted (${res.skipReason === 'account_not_found' ? 'a needed account is missing from the Chart of Accounts' : res.skipReason}). Re-post it later from Journal Health.`, 'warn', 9000);
     await afterPayment(data.invoice_id, Number(data.amount), data.payment_date);
   }
 
@@ -665,10 +733,13 @@ export function InvoicesView({ invoices, businesses, parties, activeBiz, reload,
     // reclassifying this invoice.
     const party = parties.find(p => p.id === inv.party_id);
     const gstinSnapshot = party?.gstin || '';
-    if (!confirm(`Convert ${inv.invoice_number} to Tax Invoice?\n\nPayment received: ₹${totalPaid.toLocaleString('en-IN')} of ₹${Number(inv.total).toLocaleString('en-IN')} (${pct}%)\n\nIssue date will be set to today (${conversionDate}) — the date of conversion/delivery, not the payment date. Continue?`)) return;
-    const newNum = nextInvNum(invoices.filter(i => i.business_id === inv.business_id), false);
-    const { supabase } = await import('../lib/db.js');
-    await supabase.from('invoices').update({ status: totalPaid >= Number(inv.total) - 0.01 ? 'paid' : 'sent', invoice_number: newNum, proforma_number: inv.invoice_number, issue_date: conversionDate, party_gstin_snapshot: gstinSnapshot }).eq('id', inv.id);
+    const newNum = nextInvNum(invoices.filter(i => i.business_id === inv.business_id), false, conversionDate);
+    if (!confirm(`Convert ${inv.invoice_number} to Tax Invoice ${newNum}?\n\nPayment received: ₹${totalPaid.toLocaleString('en-IN')} of ₹${Number(inv.total).toLocaleString('en-IN')} (${pct}%)\n\nIssue date will be set to today (${fmtDate(conversionDate)}) — the date of conversion/delivery, not the payment date. Continue?`)) return;
+    const status = totalPaid >= Number(inv.total) - 0.01 ? 'paid' : totalPaid > 0 ? 'partially_paid' : 'sent';
+    try {
+      await updateInvoice(inv.id, { status, invoice_number: newNum, proforma_number: inv.invoice_number, issue_date: conversionDate, party_gstin_snapshot: gstinSnapshot });
+      toast(`${inv.invoice_number} converted to Tax Invoice ${newNum}`, 'success');
+    } catch (e) { toast(e.message, 'error'); }
     reload();
   }
 
@@ -679,13 +750,18 @@ export function InvoicesView({ invoices, businesses, parties, activeBiz, reload,
     // Cancel it instead (keeps the row + number, just voids it) rather
     // than erasing the audit trail. Only a never-sent draft/proforma can
     // be hard-deleted.
-    if (inv?.gst_filed || ['sent', 'paid'].includes(inv?.status)) {
-      if (!confirm(`${inv.invoice_number} has already been issued${inv.gst_filed ? ' and marked GST-filed' : ''} — it can't be deleted.\n\nCancel it instead? (keeps the record and number, marks it void; raise a credit note if goods/money need to be reversed)`)) return;
-      await cancelInvoice(id);
-    } else {
-      if (!confirm('Delete this invoice? This cannot be undone.')) return;
-      await deleteInvoice(id);
-    }
+    const hasPayments = (paysByInv[id] || []).length > 0;
+    try {
+      if (inv?.gst_filed || ['sent', 'paid', 'partially_paid'].includes(inv?.status)) {
+        if (!confirm(`${inv.invoice_number} has already been issued${inv.gst_filed ? ' and marked GST-filed' : ''} — it can't be deleted.\n\nCancel it instead? (keeps the record and number, marks it void; raise a credit note if goods/money need to be reversed)`)) return;
+        await cancelInvoice(id);
+        toast(`${inv.invoice_number} cancelled`, 'success');
+      } else {
+        if (!confirm(`Delete ${inv?.invoice_number || 'this document'}?${hasPayments ? '\n\nIts recorded payments and their journal entries will be deleted too.' : ''} This cannot be undone.`)) return;
+        await deleteInvoice(id);
+        toast(`${inv?.invoice_number || 'Document'} deleted`, 'success');
+      }
+    } catch (e) { toast(e.message, 'error'); }
     reload();
   }
 
@@ -715,19 +791,13 @@ export function InvoicesView({ invoices, businesses, parties, activeBiz, reload,
     // number on their copy and/or it's already on the GST portal —
     // rewriting it at that point creates a mismatch between your books,
     // their copy, and what's filed. Only 'draft' invoices are fair game.
+    // Sale drafts only — this used to test i.type !== 'proforma' (type is never
+    // 'proforma'), so draft PURCHASE bills got their supplier numbers overwritten.
     const toNumber = invoices
-      .filter(i => i.type !== 'proforma' && i.status === 'draft' && !i.gst_filed)
+      .filter(i => i.type === 'sale' && i.status === 'draft' && !i.gst_filed)
       .filter(i => activeBiz ? i.business_id === activeBiz : true);
 
     if (!toNumber.length) { alert('No draft invoices found to number. Sent, paid, or GST-filed invoices are left alone — cancel and reissue those instead of renumbering.'); return; }
-
-    // Indian FY: April (month 3) starts new year
-    function getFYForDate(dateStr) {
-      const d = new Date(dateStr);
-      const y = d.getFullYear(), m = d.getMonth();
-      const sy = m >= 3 ? y : y - 1;
-      return `${String(sy).slice(-2)}-${String(sy + 1).slice(-2)}`;
-    }
 
     // Sort by date ascending, existing number as tiebreaker
     const sorted = [...toNumber].sort((a, b) => {
@@ -739,11 +809,25 @@ export function InvoicesView({ invoices, businesses, parties, activeBiz, reload,
     // Assign numbers per FY, per business (Rule 46(b) — sequence must be
     // consecutive within one GSTIN; keying only by FY would interleave two
     // businesses' drafts into one shared sequence if activeBiz isn't set).
+    // Each series continues AFTER the highest number already issued (sent/paid
+    // invoices keep their numbers). Starting every series at 1001 used to hand
+    // drafts numbers that issued invoices already had.
+    const draftIds = new Set(toNumber.map(i => i.id));
     const fyCounters = {};
+    const startFor = (bizId, fy) => {
+      const pat = new RegExp(`^${fy}/(\\d+)$`);
+      let max = 1000;
+      invoices.forEach(i => {
+        if (i.business_id !== bizId || i.type !== 'sale' || draftIds.has(i.id)) return;
+        const m = (i.invoice_number || '').match(pat);
+        if (m) max = Math.max(max, parseInt(m[1], 10));
+      });
+      return max + 1;
+    };
     const updates = sorted.map(inv => {
       const fy = getFYForDate(inv.issue_date);
       const key = `${inv.business_id}|${fy}`;
-      if (!fyCounters[key]) fyCounters[key] = 1001;
+      if (!fyCounters[key]) fyCounters[key] = startFor(inv.business_id, fy);
       const num = fyCounters[key]++;
       return { id: inv.id, old: inv.invoice_number, newNum: `${fy}/${num}` };
     });
@@ -754,56 +838,93 @@ export function InvoicesView({ invoices, businesses, parties, activeBiz, reload,
     const ok = confirm(`Auto-Number Invoices\n\nThis will renumber ${updates.length} invoice(s) by date:\n\n${preview}${more}\n\nThis overwrites existing numbers. Continue?`);
     if (!ok) return;
 
-    const { supabase } = await import('../lib/db.js');
-    for (const u of updates) {
-      await supabase.from('invoices').update({ invoice_number: u.newNum }).eq('id', u.id);
-    }
-    alert(`✅ Done! ${updates.length} invoices renumbered.`);
+    // Two passes: park every draft on a temporary number first, so swapping
+    // numbers between drafts can't trip the unique (business, number) index.
+    try {
+      for (const u of updates) await updateInvoice(u.id, { invoice_number: `TMP-${u.id.slice(0, 8)}` });
+      for (const u of updates) await updateInvoice(u.id, { invoice_number: u.newNum });
+      toast(`${updates.length} draft invoice${updates.length === 1 ? '' : 's'} renumbered`, 'success');
+    } catch (e) { toast(e.message, 'error'); }
     reload();
   }
 
+  async function openCreditNote(inv) {
+    // Pre-fill the credit note with the invoice's own lines; the user trims
+    // quantities down to what is actually being returned / corrected.
+    try {
+      const items = await getInvoiceItems(inv.id);
+      setCnFor({ inv, items });
+    } catch (e) { toast(e.message, 'error'); }
+  }
+  async function saveCN(cnData, items) {
+    await saveCreditNote(cnData, items);
+    toast(`Credit note ${cnData.cn_number} issued`, 'success');
+    reload();
+  }
+
+  const docWord = purchaseMode ? 'purchase bills' : isProforma ? 'proformas' : 'invoices';
+
   // Render a table of invoices for a given list
-  function InvoiceTable({ list }) {
-    if (!list.length) return <EmptyState icon="📄" message="No invoices this month" />;
+  function renderTable(list) {
+    if (!list.length) return <EmptyState icon="📄" message={`No ${docWord} match`} sub={search || sf ? 'Try clearing the search or status filter' : undefined} />;
+    const listTotal = list.reduce((s, i) => s + Number(i.total || 0), 0);
+    const listDue = list.filter(isLive).reduce((s, i) => s + Math.max(0, dueOf(i)), 0);
     return (
       <div className="table-wrap">
         <table>
           <thead><tr>
-            <th>{purchaseMode ? 'Supplier Bill #' : 'Invoice #'}</th><th>{purchaseMode ? 'Supplier' : 'Party'}</th><th>Date</th><th>Due</th>
-            <th className="r">Total</th><th className="r">Paid</th><th className="r">Balance</th>
+            <th>{purchaseMode ? 'Supplier Bill #' : isProforma ? 'Proforma #' : 'Invoice #'}</th><th>{purchaseMode ? 'Supplier' : 'Party'}</th><th>Date</th><th>Due</th>
+            <th className="r">Total</th><th className="r">{isProforma ? 'Advance' : 'Paid'}</th><th className="r">Balance</th>
             <th>GST</th>{purchaseMode && <th>ITC</th>}<th>Status</th><th>Actions</th>
           </tr></thead>
           <tbody>
             {list.map(inv => {
               const ip = paysByInv[inv.id] || [];
               const paid = ip.reduce((s, p) => s + Number(p.amount), 0);
-              const bal = Number(inv.total) - paid;
+              const bal = dueOf(inv);
+              const late = lateOf(inv);
               const gstMode = inv.is_interstate === false ? 'intra' : 'inter';
+              const cancelled = inv.status === 'cancelled';
               return (
-                <tr key={inv.id}>
-                  <td className="mono">{inv.invoice_number}</td>
-                  <td style={{ fontWeight: 500 }}>{parties.find(p => p.id === inv.party_id)?.name || '—'}</td>
+                <tr key={inv.id} style={cancelled ? { opacity: 0.55 } : undefined}>
+                  <td className="mono">
+                    {inv.invoice_number}
+                    {inv.proforma_number && <div style={{ fontSize: 9.5, color: 'var(--text3)' }}>from {inv.proforma_number}</div>}
+                  </td>
+                  <td style={{ fontWeight: 500 }}>{partyName(inv.party_id) || '—'}</td>
                   <td className="mono" style={{ fontSize: 11 }}>{fmtDate(inv.issue_date)}</td>
-                  <td className="mono" style={{ fontSize: 11, color: inv.due_date && new Date(inv.due_date) < new Date() && inv.status !== 'paid' ? 'var(--red)' : 'var(--text3)' }}>{fmtDate(inv.due_date)}</td>
+                  <td className="mono" style={{ fontSize: 11, color: late ? 'var(--red)' : 'var(--text3)' }} title={late ? 'Overdue' : undefined}>
+                    {fmtDate(inv.due_date)}{late && <div style={{ fontSize: 9.5 }}>{Math.floor((new Date(today()) - new Date(inv.due_date)) / 86400000)}d late</div>}
+                  </td>
                   <td className="r mono">{fmt(inv.total)}</td>
                   <td className="r mono" style={{ color: 'var(--green)', fontSize: 11 }}>{paid > 0 ? fmt(paid) : '—'}</td>
-                  <td className="r mono" style={{ color: bal > 0.01 ? 'var(--amber)' : 'var(--text3)', fontSize: 11 }}>{bal > 0.01 ? fmt(bal) : '✓'}</td>
+                  <td className="r mono" style={{ color: cancelled ? 'var(--text3)' : bal > 0.01 ? (late ? 'var(--red)' : 'var(--amber)') : 'var(--text3)', fontSize: 11 }}>{cancelled ? '—' : bal > 0.01 ? fmt(bal) : '✓'}</td>
                   <td><span className={`gst-chip ${gstMode === 'intra' ? 'cgst' : 'igst'}`} style={{ fontSize: 9 }}>{gstMode === 'intra' ? 'C+S' : 'IGST'}</span></td>
                   {purchaseMode && <td><span className={`gst-chip ${inv.itc_eligible === false ? 'igst' : 'cgst'}`} style={{ fontSize: 9 }}>{inv.itc_eligible === false ? 'Blocked' : 'Eligible'}</span></td>}
-                  <td><Badge status={inv.status} /></td>
+                  <td><Badge status={late ? 'overdue' : inv.status} /></td>
                   <td>
-                    <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+                    <div className="row-actions">
                       {inv.status === 'proforma' && <button className="btn btn-warning btn-sm" title="Manually assign invoice number now" onClick={() => convertProforma(inv)}>→ Invoice</button>}
-                      {!['paid', 'cancelled'].includes(inv.status) && <button className="btn btn-ghost btn-sm" onClick={() => setPayInv(inv)}>💰</button>}
-                      <button className="btn btn-ghost btn-sm" onClick={() => dlPDF(inv)}>⬇ PDF</button>
-                      <button className="btn btn-ghost btn-sm" onClick={() => openEdit(inv)}>Edit</button>
-                      <button className="btn btn-danger btn-sm" onClick={() => del(inv.id)}>Del</button>
+                      {!['paid', 'cancelled'].includes(inv.status) && bal > 0.01 && <button className="btn btn-ghost btn-sm" title={purchaseMode ? 'Record a payment to the supplier' : 'Record a payment received'} onClick={() => setPayInv(inv)}>💰 {isProforma ? 'Advance' : 'Pay'}</button>}
+                      <button className="btn btn-ghost btn-sm" onClick={() => dlPDF(inv)} title="Download / print PDF">PDF</button>
+                      {!cancelled && <button className="btn btn-ghost btn-sm" onClick={() => openEdit(inv)}>Edit</button>}
+                      {!purchaseMode && !isProforma && ['sent', 'paid', 'partially_paid'].includes(inv.status) && <button className="btn btn-ghost btn-sm" title="Raise a credit note against this invoice (return / price correction)" onClick={() => openCreditNote(inv)}>↩ CN</button>}
+                      {!cancelled && <button className="btn btn-danger btn-sm" onClick={() => del(inv.id)} title={['sent', 'paid', 'partially_paid'].includes(inv.status) || inv.gst_filed ? 'Issued documents are cancelled, not deleted' : 'Delete'}>{['sent', 'paid', 'partially_paid'].includes(inv.status) || inv.gst_filed ? 'Cancel' : 'Del'}</button>}
                     </div>
                   </td>
                 </tr>
               );
             })}
           </tbody>
+          <tfoot>
+            <tr style={{ background: 'var(--bg3)' }}>
+              <td colSpan={4} style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>{list.length} {list.length === 1 ? 'document' : 'documents'}</td>
+              <td className="r mono" style={{ fontWeight: 600 }}>{fmt(listTotal)}</td>
+              <td></td>
+              <td className="r mono" style={{ fontWeight: 600, color: listDue > 0.01 ? 'var(--amber)' : 'var(--text3)' }}>{listDue > 0.01 ? fmt(listDue) : '—'}</td>
+              <td colSpan={purchaseMode ? 4 : 3}></td>
+            </tr>
+          </tfoot>
         </table>
       </div>
     );
@@ -812,106 +933,94 @@ export function InvoicesView({ invoices, businesses, parties, activeBiz, reload,
   // Month summary pill
   function MonthSummary({ list }) {
     const total = list.reduce((s, i) => s + Number(i.total), 0);
-    const paid = list.reduce((s, i) => {
-      const p = (paysByInv[i.id] || []).reduce((a, x) => a + Number(x.amount), 0);
-      return s + p;
-    }, 0);
-    const outstanding = total - paid;
+    const outstanding = list.filter(isLive).reduce((s, i) => s + Math.max(0, dueOf(i)), 0);
     const proformaCount = list.filter(i => i.status === 'proforma').length;
     return (
       <span style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
         <span style={{ color: 'var(--text2)' }}>{list.length} doc{list.length !== 1 ? 's' : ''}</span>
         <span>·</span>
-        <span style={{ color: 'var(--text1)' }}>{fmt(total)}</span>
+        <span style={{ color: 'var(--text)' }}>{fmt(total)}</span>
         {outstanding > 0.01 && <><span>·</span><span style={{ color: 'var(--amber)' }}>{fmt(outstanding)} due</span></>}
         {proformaCount > 0 && <><span>·</span><span style={{ color: 'var(--purple)' }}>{proformaCount} PF</span></>}
       </span>
     );
   }
 
+  const statusChips = [
+    ['', 'All'],
+    ...(isProforma ? [] : [['unpaid', purchaseMode ? 'Unpaid' : 'Outstanding'], ['overdue', 'Overdue'], ['draft', 'Drafts'], ['partially_paid', 'Part paid'], ['paid', 'Paid']]),
+    ['cancelled', 'Cancelled'],
+  ];
+
   return (
     <>
+      {/* ── Headline numbers ── */}
+      <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(4,1fr)' }}>
+        <div className="stat-card blue clickable" onClick={() => setSf('')}><div className="stat-label">{isProforma ? 'Open proformas' : purchaseMode ? 'Bills' : 'Invoices issued'}</div><div className="stat-val blue">{summary.count}</div><div className="stat-sub">{fmt(summary.total)}</div></div>
+        <div className="stat-card amber clickable" onClick={() => setSf(isProforma ? '' : 'unpaid')}><div className="stat-label">{purchaseMode ? 'To pay' : isProforma ? 'Still to collect' : 'Outstanding'}</div><div className="stat-val amber">{fmt(summary.outstanding)}</div><div className="stat-sub">{purchaseMode ? 'owed to suppliers' : 'after payments, TDS & credit notes'}</div></div>
+        <div className="stat-card red clickable" onClick={() => !isProforma && setSf('overdue')}><div className="stat-label">Overdue</div><div className="stat-val red">{fmt(summary.overdue.reduce((s, i) => s + Math.max(0, dueOf(i)), 0))}</div><div className="stat-sub">{summary.overdue.length} past due date</div></div>
+        <div className="stat-card purple clickable" onClick={() => !isProforma && setSf('draft')}><div className="stat-label">Drafts</div><div className="stat-val purple">{summary.drafts}</div><div className="stat-sub">{purchaseMode ? 'still booked as payable' : 'not in GSTR-1 until issued'}</div></div>
+      </div>
+
       {/* ── Filter bar ── */}
       <div className="filter-bar">
-        <input placeholder="Search invoice #, party name…" value={search} onChange={e => setSearch(e.target.value)} />
-        <select value={sf} onChange={e => setSf(e.target.value)}>
-          <option value="">All Status</option>
-          {['proforma', 'draft', 'sent', 'partially_paid', 'paid', 'overdue', 'cancelled'].map(s => <option key={s} value={s}>{s.replace('_', ' ')}</option>)}
-        </select>
-        {/* Group toggle */}
+        <input placeholder={purchaseMode ? 'Search bill #, supplier…' : 'Search number, party…'} value={search} onChange={e => setSearch(e.target.value)} />
         <button
           className={`btn btn-sm ${groupByMonth ? 'btn-primary' : 'btn-ghost'}`}
-          title={groupByMonth ? 'Switch to flat list' : 'Group by month'}
+          title={groupByMonth ? 'Switch to one flat list' : 'Group by month'}
           onClick={handleGroupToggle}
           style={{ fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: '.03em' }}
         >
-          {groupByMonth ? '📅 Monthly' : '≡ All'}
+          {groupByMonth ? '📅 By month' : '≡ All'}
         </button>
-        {!purchaseMode && <button className="btn btn-ghost btn-sm" onClick={() => { setEditData(null); setShowPF(true); }}>+ Proforma</button>}
-        <button className="btn btn-ghost btn-sm" onClick={autoNumber} title="Sort documents by date and assign sequential numbers per FY">⟳ Auto-Number</button>
-        <button className="btn btn-primary" onClick={() => { setEditData(null); setShowInv(true); }}>{purchaseMode ? '+ Purchase Bill' : '+ Invoice'}</button>
+        {!purchaseMode && !isProforma && <button className="btn btn-ghost btn-sm" onClick={autoNumber} title="Sort draft invoices by date and give them the next numbers in each FY series">⟳ Auto-number drafts</button>}
+        {!purchaseMode && <button className={`btn ${isProforma ? 'btn-primary' : 'btn-ghost btn-sm'}`} onClick={() => { setEditData(null); setShowPF(true); }}>+ Proforma</button>}
+        {!isProforma && <button className="btn btn-primary" onClick={() => { setEditData(null); setShowInv(true); }}>{purchaseMode ? '+ Purchase Bill' : '+ Invoice'}</button>}
+      </div>
+      <div className="chip-row" style={{ marginBottom: 14 }}>
+        {statusChips.map(([v, l]) => <button key={v || 'all'} className={`chip${sf === v ? ' active' : ''}`} onClick={() => setSf(v)}>{l}</button>)}
       </div>
 
-      {/* ── Monthly tabs view ── */}
-      {groupByMonth && sortedMonthKeys.length > 0 && (
+      {scoped.length === 0 ? (
+        <EmptyState icon={purchaseMode ? '🧾' : isProforma ? '📋' : '📄'} message={`No ${docWord} yet`}
+          sub={purchaseMode ? 'Record a supplier bill to track what you owe and your input GST credit.' : isProforma ? 'Raise a proforma to collect an advance before supplying; it becomes a tax invoice once paid.' : 'Click "+ Invoice" to raise your first tax invoice.'} />
+      ) : flatList ? renderTable(filtered) : (
         <>
-          {/* Month tab strip */}
-          <div style={{
-            display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 14, paddingBottom: 10,
-            borderBottom: '1px solid var(--border1)',
-          }}>
+          {/* ── Month tab strip ── */}
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 14, paddingBottom: 10, borderBottom: '1px solid var(--border)' }}>
             {sortedMonthKeys.map(key => {
-              const isActive = activeMonth === key;
+              const isActive = shownMonth === key;
               const list = monthGroups[key];
               const total = list.reduce((s, i) => s + Number(i.total), 0);
               return (
-                <button
-                  key={key}
-                  onClick={() => setActiveMonth(key)}
-                  style={{
-                    padding: '5px 12px', borderRadius: 'var(--r)', border: '1px solid',
-                    borderColor: isActive ? 'var(--accent)' : 'var(--border2)',
-                    background: isActive ? 'var(--accent)' : 'var(--bg2)',
-                    color: isActive ? '#fff' : 'var(--text2)',
-                    cursor: 'pointer', fontSize: 12, fontFamily: 'var(--mono)',
-                    display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2,
-                    minWidth: 70, transition: 'all 0.15s',
-                  }}
-                >
+                <button key={key} onClick={() => setActiveMonth(key)} className="chip"
+                  style={{ borderRadius: 'var(--r)', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, minWidth: 74, fontFamily: 'var(--mono)', ...(isActive ? { background: 'var(--accent)', borderColor: 'var(--accent)', color: '#0d0d0d' } : {}) }}>
                   <span style={{ fontWeight: 600 }}>{fmtMonthKey(key)}</span>
-                  <span style={{ fontSize: 10, opacity: 0.75 }}>{list.length} · {fmt(total)}</span>
+                  <span style={{ fontSize: 10, opacity: 0.8 }}>{list.length} · {fmt(total)}</span>
                 </button>
               );
             })}
           </div>
-
-          {/* Active month content */}
-          {activeMonth && monthGroups[activeMonth] && (
+          {shownMonth && (
             <div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
-                <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text1)' }}>{fmtMonthKey(activeMonth)}</span>
-                <MonthSummary list={monthGroups[activeMonth]} />
+                <span style={{ fontSize: 14, fontWeight: 600 }}>{fmtMonthKey(shownMonth)}</span>
+                <MonthSummary list={monthGroups[shownMonth]} />
               </div>
-              <InvoiceTable list={monthGroups[activeMonth]} />
+              {renderTable(monthGroups[shownMonth])}
             </div>
           )}
-
-          {sortedMonthKeys.length === 0 && <EmptyState icon="📄" message="No invoices found" />}
         </>
-      )}
-
-      {/* ── Flat / search results view ── */}
-      {!groupByMonth && (
-        filtered.length === 0
-          ? <EmptyState icon="📄" message="No invoices found" />
-          : <InvoiceTable list={filtered} />
       )}
 
       {/* ── Modals ── */}
       {showInv && <InvoiceModal onClose={() => setShowInv(false)} onSave={handleSave} businesses={businesses} parties={parties} editData={editData} allInvoices={invoices} catalogItems={catalogItems} activeBiz={activeBiz} purchaseMode={purchaseMode} />}
       {showPF && <InvoiceModal onClose={() => setShowPF(false)} onSave={handleSave} businesses={businesses} parties={parties} editData={null} allInvoices={invoices} isProforma={true} catalogItems={catalogItems} activeBiz={activeBiz} />}
       {payInv && <PaymentModal onClose={() => setPayInv(null)} onSave={handlePayment} invoice={payInv} existingPayments={paysByInv[payInv.id] || []}
+        creditNotes={cnsByInv[payInv.id] || []}
         parties={parties} allPayments={payments} onLinked={(amt, date) => afterPayment(payInv.id, amt, date, { skipStatus: true })} />}
+      {cnFor && <CreditNoteModal onClose={() => setCnFor(null)} onSave={saveCN} businesses={businesses} parties={parties} invoices={invoices}
+        creditNotes={creditNotes} preInvoice={cnFor.inv} initialItems={cnFor.items} activeBiz={activeBiz} />}
     </>
   );
 }

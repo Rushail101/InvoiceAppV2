@@ -23,11 +23,14 @@ Notes on behaviour:
 - Invoice PDFs / downloads are named `<doc number>_<client>` (e.g. `PI_26_27_1012_Cayani`).
 - The UPI QR on an invoice is generated in the browser. The UPI ID and amount are not sent to any outside service.
 - Aging, Bulk Payment and Recurring invoices were removed from the app.
+- Balances everywhere are total − payments − TDS deducted − credit notes. Deleting a payment, expense, bank row or invoice also deletes its journal entry.
+- Ctrl/⌘+K jumps to any screen; the current screen is kept in the URL (`#/invoices`).
 
 ## Setup
 
 1. **Database.** In the Supabase SQL editor run [`accounts_app/sql/schema.sql`](accounts_app/sql/schema.sql)
-   (safe to re-run), then every file in [`accounts_app/sql/migrations/`](accounts_app/sql/migrations/) in order.
+   (safe to re-run), then every file in [`accounts_app/sql/migrations/`](accounts_app/sql/migrations/) in order
+   (001 → 005). Upgrading an existing database? Just run `005_app_wiring_fixes.sql` — see [CHANGES.md](CHANGES.md).
    The same schema is also viewable under *Settings → SQL Setup* in the app.
 2. **Environment variables** (Render dashboard, or `accounts_app/.env` locally — never commit it):
 

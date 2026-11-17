@@ -5,6 +5,25 @@ export let supabase = null;
 
 export function initSupabase(client) { supabase = client; }
 
+// Throw on a Supabase error instead of silently carrying on. Several writes
+// below used to ignore { error }, so a failed delete/update looked like it
+// worked until the next refresh.
+function must(res, what) {
+  if (res?.error) throw new Error(`${what} failed: ${res.error.message}`);
+  return res?.data;
+}
+
+// journal_entries.source_id has no foreign key, so deleting the record a
+// journal came from (payment, expense, bank row, purchase bill) left the
+// journal behind and P&L / Trial Balance kept counting money that no longer
+// existed. Every delete below now removes its journals too. journal_lines
+// cascade from journal_entries.
+async function deleteJournalsFor(source, ids) {
+  const list = (Array.isArray(ids) ? ids : [ids]).filter(Boolean);
+  if (!list.length) return;
+  must(await supabase.from('journal_entries').delete().eq('source', source).in('source_id', list), 'Removing linked journal entries');
+}
+
 // ── Generic ────────────────────────────────────────────────────────────────────
 async function q(table, method, ...args) {
   const { data, error } = await supabase.from(table)[method](...args);
@@ -160,12 +179,16 @@ export async function deleteParty(id) {
 
 // ── Accounts (Chart of Accounts) ───────────────────────────────────────────────
 export async function saveAccount(data, id) {
-  if (id) { await supabase.from('accounts').update(data).eq('id', id); }
-  else { await supabase.from('accounts').insert({ ...data, business_id: data.business_id }); }
+  if (id) must(await supabase.from('accounts').update(data).eq('id', id), 'Account save');
+  else must(await supabase.from('accounts').insert({ ...data, business_id: data.business_id }), 'Account save');
 }
-export async function seedAccounts(bizId, defaults) {
-  const rows = defaults.map(a => ({ ...a, business_id: bizId }));
-  await supabase.from('accounts').insert(rows);
+// Adds only the default accounts this business doesn't have yet (matched by
+// name), so pressing "Seed" twice no longer creates duplicate ledgers.
+export async function seedAccounts(bizId, defaults, existing = []) {
+  const have = new Set(existing.filter(a => a.business_id === bizId).map(a => a.name.trim().toLowerCase()));
+  const rows = defaults.filter(a => !have.has(a.name.trim().toLowerCase())).map(a => ({ ...a, business_id: bizId }));
+  if (rows.length) must(await supabase.from('accounts').insert(rows), 'Seeding accounts');
+  return rows.length;
 }
 
 // ── Invoices ───────────────────────────────────────────────────────────────────// Safe column list — only fields that exist in the DB schema
@@ -191,7 +214,7 @@ export async function saveInvoice(inv, items, id) {
   if (id) {
     const { error } = await supabase.from('invoices').update(invData).eq('id', id);
     if (error) throw new Error(`Invoice save failed: ${error.message}. Run the migration SQL from Settings → SQL Setup.`);
-    await supabase.from('invoice_items').delete().eq('invoice_id', id);
+    must(await supabase.from('invoice_items').delete().eq('invoice_id', id), 'Replacing invoice lines');
   } else {
     const { data, error } = await supabase.from('invoices').insert(invData).select().single();
     if (error) throw new Error(`Invoice save failed: ${error.message}. Run the migration SQL from Settings → SQL Setup.`);
@@ -221,7 +244,9 @@ export async function saveInvoice(inv, items, id) {
   // Sales accounting is intentionally left unchanged here until the separate
   // sales accrual migration is enabled, so this phase does not double-count
   // existing sales revenue.
-  if (inv.type === 'purchase') {
+  if (inv.type === 'purchase' && inv.status === 'cancelled') {
+    await deleteJournalsFor('purchase_bill', rid);
+  } else if (inv.type === 'purchase') {
     await postPurchaseBillJournal({ ...inv, id: rid, subtotal: inv.subtotal, cgst_amount: inv.cgst_amount, sgst_amount: inv.sgst_amount, igst_amount: inv.igst_amount, total: inv.total, itc_eligible: inv.itc_eligible !== false });
   }
   return rid;
@@ -327,7 +352,13 @@ export async function getInvoiceItems(invoiceId) {
 }
 
 export async function updateInvoiceStatus(id, status) {
-  await supabase.from('invoices').update({ status }).eq('id', id);
+  must(await supabase.from('invoices').update({ status }).eq('id', id), 'Invoice status update');
+}
+
+// Generic header update (proforma conversion, renumbering). Throws on error so
+// e.g. a duplicate invoice number is reported instead of silently ignored.
+export async function updateInvoice(id, patch) {
+  must(await supabase.from('invoices').update(patch).eq('id', id), 'Invoice update');
 }
 
 // Mark one or more invoices as GST-filed (or un-mark them). `period` is the
@@ -348,12 +379,18 @@ export async function markGSTFiled(ids, filed = true, period = null) {
 // Act / Rule 56) — use cancelInvoice() instead, which keeps the row and
 // its number but marks it void.
 export async function deleteInvoice(id) {
-  await supabase.from('invoices').delete().eq('id', id);
+  // Payments cascade with the invoice, so collect them first to clear their journals.
+  const pays = must(await supabase.from('payments').select('id').eq('invoice_id', id), 'Loading invoice payments') || [];
+  await deleteJournalsFor('payment', pays.map(p => p.id));
+  await deleteJournalsFor('purchase_bill', id);
+  must(await supabase.from('invoices').delete().eq('id', id), 'Invoice delete');
 }
 
 export async function cancelInvoice(id) {
   const { error } = await supabase.from('invoices').update({ status: 'cancelled' }).eq('id', id);
   if (error) throw new Error(`Cancel failed: ${error.message}`);
+  // A cancelled purchase bill no longer owes the supplier anything.
+  await deleteJournalsFor('purchase_bill', id);
 }
 
 // ── Payments ───────────────────────────────────────────────────────────────────
@@ -361,7 +398,10 @@ export async function savePayment(data) {
   const { error } = await supabase.from('payments').insert(data);
   if (error) throw error;
 }
-export async function deletePayment(id) { await supabase.from('payments').delete().eq('id', id); }
+export async function deletePayment(id) {
+  await deleteJournalsFor('payment', id);
+  must(await supabase.from('payments').delete().eq('id', id), 'Payment delete');
+}
 
 // Auto-post a payment → journal entry. Revenue/cost is recognized here, at
 // COLLECTION time — not when the invoice is raised — since a payment can
@@ -521,8 +561,8 @@ export async function saveJournal(entry, lines, id) {
   return jid;
 }
 export async function deleteJournal(id) {
-  await supabase.from('journal_lines').delete().eq('journal_id', id);
-  await supabase.from('journal_entries').delete().eq('id', id);
+  must(await supabase.from('journal_lines').delete().eq('journal_id', id), 'Journal lines delete');
+  must(await supabase.from('journal_entries').delete().eq('id', id), 'Journal delete');
 }
 
 // ── Credit Notes ───────────────────────────────────────────────────────────────
@@ -603,9 +643,10 @@ export async function saveExpense(data) {
   const { error } = await supabase.from('expenses').insert({ ...data, vendor_id: data.vendor_id || null });
   if (error) throw error;
 }
-export async function deleteExpense(id) {
-  const { error } = await supabase.from('expenses').delete().eq('id', id);
-  if (error) throw error;
+export async function deleteExpense(id, attachmentPath) {
+  await deleteJournalsFor('expense', id);
+  must(await supabase.from('expenses').delete().eq('id', id), 'Expense delete');
+  if (attachmentPath) { try { await deleteExpenseAttachment(attachmentPath); } catch (_) { /* file cleanup is best-effort */ } }
 }
 
 // Upload a bill/receipt file for an expense. Path is namespaced by business
@@ -651,6 +692,7 @@ async function settlementAccount(bizId, method) {
 
 export const CATEGORY_ACCOUNT_MAP = {
   'Raw Materials': 'Raw Materials',
+  'Job work': 'Job Work',
   'Wages & Salaries': 'Wages',
   'Rent': 'Rent',
   'Utilities': 'Utilities',
@@ -935,8 +977,8 @@ export async function saveBankTxn(data) {
   if (error) throw error;
 }
 export async function deleteBankTxn(id) {
-  const { error } = await supabase.from('bank_transactions').delete().eq('id', id);
-  if (error) throw error;
+  await deleteJournalsFor('bank_import', id);
+  must(await supabase.from('bank_transactions').delete().eq('id', id), 'Bank transaction delete');
 }
 
 // ── Delivery Challans ──────────────────────────────────────────────────────────
@@ -970,7 +1012,7 @@ export async function saveChallan(challan, items, id) {
   if (id) {
     const { error } = await supabase.from('delivery_challans').update(challanData).eq('id', id);
     if (error) throw new Error(`Challan save failed: ${error.message}`);
-    await supabase.from('delivery_challan_items').delete().eq('challan_id', id);
+    must(await supabase.from('delivery_challan_items').delete().eq('challan_id', id), 'Replacing challan lines');
   } else {
     const { data, error } = await supabase.from('delivery_challans').insert(challanData).select().single();
     if (error) throw new Error(`Challan save failed: ${error.message}`);
@@ -1005,6 +1047,6 @@ export async function getChallanItems(challanId) {
 }
 
 export async function deleteChallan(id) {
-  await supabase.from('delivery_challan_items').delete().eq('challan_id', id);
-  await supabase.from('delivery_challans').delete().eq('id', id);
+  must(await supabase.from('delivery_challan_items').delete().eq('challan_id', id), 'Challan lines delete');
+  must(await supabase.from('delivery_challans').delete().eq('id', id), 'Challan delete');
 }

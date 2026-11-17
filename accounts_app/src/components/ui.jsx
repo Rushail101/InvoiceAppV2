@@ -5,17 +5,68 @@ export function Badge({ status }) {
   return <span className={`badge badge-${status}`}>{status?.replace(/_/g, ' ')}</span>;
 }
 
-export function ModalShell({ title, onClose, children, foot, size = '' }) {
+// Escape closes the modal. Clicking the dark backdrop closes it only when the
+// press also STARTED on the backdrop — otherwise selecting text in a field and
+// releasing the mouse outside the dialog would throw away the whole form.
+// Pass `confirmClose` (a message) for big forms so an accidental close asks first.
+const modalStack = [];
+export function ModalShell({ title, onClose, children, foot, size = '', confirmClose }) {
+  const downOnBackdrop = useRef(false);
+  const me = useRef({});
+  const requestClose = () => { if (!confirmClose || confirm(confirmClose)) onClose(); };
+  useEffect(() => {
+    modalStack.push(me.current);
+    return () => { const i = modalStack.indexOf(me.current); if (i >= 0) modalStack.splice(i, 1); };
+  }, []);
+  useEffect(() => {
+    // Only the top-most dialog reacts, so Escape in a nested popup doesn't close its parent too.
+    const onKey = e => { if (e.key === 'Escape' && modalStack[modalStack.length - 1] === me.current) requestClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
   return (
-    <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
-      <div className={`modal ${size}`}>
+    <div className="modal-overlay"
+      onMouseDown={e => { downOnBackdrop.current = e.target === e.currentTarget; }}
+      onClick={e => { if (e.target === e.currentTarget && downOnBackdrop.current) requestClose(); }}>
+      <div className={`modal ${size}`} role="dialog" aria-modal="true" aria-label={typeof title === 'string' ? title : undefined}>
         <div className="modal-head">
           <h3>{title}</h3>
-          <button className="btn btn-ghost btn-sm" onClick={onClose}>✕</button>
+          <button className="btn btn-ghost btn-sm" onClick={requestClose} aria-label="Close">✕</button>
         </div>
         <div className="modal-body">{children}</div>
         {foot && <div className="modal-foot">{foot}</div>}
       </div>
+    </div>
+  );
+}
+
+// ─── Toasts ───────────────────────────────────────────────────────────────────
+// toast('Saved', 'success') from anywhere; <Toaster/> is mounted once in App.
+const toastListeners = new Set();
+let toastSeq = 0;
+export function toast(message, type = 'info', ms) {
+  const t = { id: ++toastSeq, message: String(message || ''), type };
+  toastListeners.forEach(fn => fn(t, ms ?? (type === 'error' ? 8000 : 3500)));
+}
+export function Toaster() {
+  const [list, setList] = useState([]);
+  useEffect(() => {
+    const fn = (t, ms) => {
+      setList(l => [...l.slice(-3), t]);
+      setTimeout(() => setList(l => l.filter(x => x.id !== t.id)), ms);
+    };
+    toastListeners.add(fn);
+    return () => toastListeners.delete(fn);
+  }, []);
+  if (!list.length) return null;
+  return (
+    <div className="toast-stack" role="status" aria-live="polite">
+      {list.map(t => (
+        <div key={t.id} className={`toast ${t.type}`}>
+          <span>{t.message}</span>
+          <button onClick={() => setList(l => l.filter(x => x.id !== t.id))} aria-label="Dismiss">✕</button>
+        </div>
+      ))}
     </div>
   );
 }

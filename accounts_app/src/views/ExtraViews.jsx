@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react';
-import { fmt, fmtDate, today, getFY, PAY_MODES, GST_RATES, INDIAN_STATES, gstType, calcLineTax } from '../lib/constants.js';
+import { fmt, fmtDate, today, getFY, getFYForDate, recentFYs, PAY_MODES, GST_RATES, INDIAN_STATES, gstType, calcLineTax } from '../lib/constants.js';
 import { savePaymentWithJournal, updateInvoiceStatus, saveInvoice } from '../lib/db.js';
 import { Badge, ModalShell, FG, EmptyState } from '../components/ui.jsx';
 
@@ -395,11 +395,12 @@ export function ExportView({ invoices, expenses, payments, parties, businesses, 
 // ─── TDS TRACKER ──────────────────────────────────────────────────────────────
 
 export function TDSView({ invoices, payments, parties, businesses, activeBiz }) {
-  const [fy] = useState(getFY());
+  const [fy, setFy] = useState(getFY());
   const bi = activeBiz ? invoices.filter(i => i.business_id === activeBiz) : invoices;
 
-  // Collect invoices that have tds_amount set
-  const tdsInvs = bi.filter(i => Number(i.tds_amount) > 0 && i.type === 'sale');
+  // Collect invoices that have tds_amount set — for the selected FY only (the
+  // header always said "FY …" but the figures were all-time).
+  const tdsInvs = bi.filter(i => Number(i.tds_amount) > 0 && i.type === 'sale' && i.status !== 'cancelled' && getFYForDate(i.issue_date) === fy);
 
   const partyMap = {};
   tdsInvs.forEach(inv => {
@@ -424,14 +425,19 @@ export function TDSView({ invoices, payments, parties, businesses, activeBiz }) 
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <div>
-          <div style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)', marginBottom: 3 }}>FY {fy} · TDS SUMMARY</div>
+          <div style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)', marginBottom: 3, display: 'flex', gap: 8, alignItems: 'center' }}>
+            <select value={fy} onChange={e => setFy(e.target.value)} style={{ background: 'var(--bg2)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 6, padding: '3px 6px', fontSize: 11 }}>
+              {recentFYs(4).map(y => <option key={y} value={y}>FY {y}</option>)}
+            </select>
+            TDS SUMMARY (deducted by customers)
+          </div>
           <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--accent)' }}>Total TDS: {fmt(totalTDS)}</div>
         </div>
         {rows.length > 0 && <button className="btn btn-ghost btn-sm" onClick={exportCSV}>↓ CSV</button>}
       </div>
 
       <div style={{ marginBottom: 12, fontSize: 12, color: 'var(--text3)', background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 'var(--r)', padding: '9px 13px' }}>
-        ℹ TDS amounts are tracked per invoice. To add TDS to an invoice, edit it and set the <strong style={{ color: 'var(--text2)' }}>TDS Amount</strong> field.
+        ℹ TDS amounts are tracked per invoice. To add TDS to an invoice, edit it and set the <strong style={{ color: 'var(--text2)' }}>TDS Deducted</strong> field — it's then taken off the invoice's balance, so the invoice can be marked paid when the customer pays the rest. Reconcile the total against your Form 26AS.
       </div>
 
       {rows.length === 0

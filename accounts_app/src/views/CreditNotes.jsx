@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { fmt, fmtDate, today, GST_RATES, gstType, calcLineTax, nextCNNum, getFYForDate, creditNoteDeadline, guessHSN, isHSNValid, MIN_HSN_DIGITS } from '../lib/constants.js';
 import { saveCreditNote } from '../lib/db.js';
 import { printInvoice } from '../lib/pdf.js';
-import { Badge, ModalShell, FG, EmptyState } from '../components/ui.jsx';
+import { Badge, ModalShell, FG, EmptyState, toast } from '../components/ui.jsx';
 
 function calcCNItem(it, isIntrastate) {
   const taxable = (Number(it.quantity) || 0) * (Number(it.unit_price) || 0);
@@ -10,7 +10,7 @@ function calcCNItem(it, isIntrastate) {
   return { ...it, taxable, cgst, sgst, igst, lineTotal: taxable + cgst + sgst + igst };
 }
 
-export function CreditNoteModal({ onClose, onSave, businesses, parties, invoices, creditNotes, preInvoice, activeBiz }) {
+export function CreditNoteModal({ onClose, onSave, businesses, parties, invoices, creditNotes, preInvoice, initialItems, activeBiz }) {
   const initialBizId = preInvoice?.business_id || activeBiz || businesses[0]?.id || '';
   const [f, setF] = useState({
     business_id: initialBizId,
@@ -24,7 +24,15 @@ export function CreditNoteModal({ onClose, onSave, businesses, parties, invoices
     notes: '',
     note_type: 'tax',
   });
-  const [items, setItems] = useState([{ description: '', hsn_code: '', quantity: 1, unit_price: 0, tax_percent: 5 }]);
+  // Opened from an invoice: start from that invoice's lines, priced at their
+  // taxable value per unit (so line discounts / GST-inclusive pricing carry over).
+  const [items, setItems] = useState(() => initialItems?.length
+    ? initialItems.map(it => {
+        const qty = Number(it.quantity) || 1;
+        const taxable = Number(it.taxable_amount ?? (qty * Number(it.unit_price || 0)));
+        return { description: it.description || '', hsn_code: it.hsn_code || '', quantity: qty, unit_price: Math.round((taxable / qty) * 100) / 100, tax_percent: Number(it.tax_percent || 0) };
+      })
+    : [{ description: '', hsn_code: '', quantity: 1, unit_price: 0, tax_percent: 5 }]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
 
@@ -126,10 +134,11 @@ export function CreditNoteModal({ onClose, onSave, businesses, parties, invoices
   }
 
   return (
-    <ModalShell title="New Credit Note" onClose={onClose} size="modal-xl"
+    <ModalShell title={preInvoice ? `Credit Note against ${preInvoice.invoice_number}` : 'New Credit Note'} onClose={onClose} size="modal-xl"
+      confirmClose="Close without issuing this credit note?"
       foot={<><button className="btn btn-ghost" onClick={onClose}>Cancel</button><button className="btn btn-primary" onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Issue Credit Note'}</button></>}>
 
-      <div className="cn-banner">🔄 A Credit Note reduces the amount due on an invoice — used for returns, price corrections, or goodwill adjustments.</div>
+      <div className="cn-banner">🔄 A Credit Note reduces the amount due on an invoice — used for returns, price corrections, or goodwill adjustments.{initialItems?.length ? ' Lines are copied from the invoice — reduce the quantities to what is being credited and remove the rest.' : ''}</div>
 
       <div className="form-row cols-3">
         <FG label="Business"><select value={f.business_id} onChange={e => setF(x => ({ ...x, business_id: e.target.value, party_id: '', invoice_id: '' }))}>{businesses.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></FG>
@@ -212,6 +221,7 @@ export function CreditNotesView({ creditNotes, invoices, businesses, parties, ac
 
   async function handleSave(cnData, items) {
     await saveCreditNote(cnData, items);
+    toast(`Credit note ${cnData.cn_number} issued`, 'success');
     reload();
   }
 

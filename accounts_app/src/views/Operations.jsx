@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect } from 'react';
-import { fmt, fmtDate, today, PAY_MODES, INDIAN_STATES, STATE_CODES, EXPENSE_CATEGORIES, B2CL_THRESHOLD, effectiveGstin } from '../lib/constants.js';
+import { fmt, fmtDate, today, PAY_MODES, INDIAN_STATES, STATE_CODES, EXPENSE_CATEGORIES, B2CL_THRESHOLD, effectiveGstin, isGSTINValid, invoiceDue, isOverdue, getFY, fyRange } from '../lib/constants.js';
 import { saveParty, deleteParty, saveExpenseWithJournal, deleteExpense, savePayment, saveBankAccount, saveBankTxnWithJournal, deleteBankTxn, deletePayment, updateInvoiceStatus, saveInvoice, uploadExpenseAttachment, getExpenseAttachmentUrl } from '../lib/db.js';
-import { Badge, ModalShell, FG, EmptyState, StatCard, PillTabs } from '../components/ui.jsx';
+import { Badge, ModalShell, FG, EmptyState, StatCard, PillTabs, toast } from '../components/ui.jsx';
 import { tallyExpense, tallyPayment, tallySummary, findDuplicateExpense } from '../lib/tally.js';
 
 // Shared pill shown in the Journal column once a Tally check has run.
@@ -26,7 +26,7 @@ function tallyAlertText(summary, label) {
 }
 
 // ─── PARTIES VIEW ─────────────────────────────────────────────────────────────
-export function PartiesView({ parties, businesses, activeBiz, reload }) {
+export function PartiesView({ parties, businesses, activeBiz, reload, invoices = [], payments = [], creditNotes = [] }) {
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
   const [showModal, setShowModal] = useState(false);
@@ -39,8 +39,25 @@ export function PartiesView({ parties, businesses, activeBiz, reload }) {
     return biz && t && (!q || p.name.toLowerCase().includes(q) || (p.gstin || '').toLowerCase().includes(q));
   });
 
-  async function save(data, id) { await saveParty(data, id); reload(); }
-  async function del(id) { if (!confirm('Delete?')) return; await deleteParty(id); reload(); }
+  async function save(data, id) { await saveParty(data, id); toast(`${data.name} saved`, 'success'); reload(); }
+  async function del(p) {
+    const used = invoices.some(i => i.party_id === p.id);
+    if (!confirm(`Delete ${p.name}?${used ? '\n\nThey have invoices/bills — those will stay but lose their party name.' : ''}`)) return;
+    try { await deleteParty(p.id); toast(`${p.name} deleted`, 'success'); }
+    catch (e) { toast(`Couldn't delete ${p.name}: ${e.message}${/foreign key|violates/i.test(e.message) ? ' — they are still used on a delivery challan.' : ''}`, 'error'); }
+    reload();
+  }
+  // Outstanding per party (receivable for clients, payable for vendors)
+  const balByParty = useMemo(() => {
+    const pays = {}; (payments || []).forEach(x => { (pays[x.invoice_id] ||= []).push(x); });
+    const cns = {}; (creditNotes || []).forEach(x => { (cns[x.invoice_id] ||= []).push(x); });
+    const m = {};
+    (invoices || []).forEach(i => {
+      if (['cancelled', 'proforma'].includes(i.status) || (i.type === 'sale' && i.status === 'draft')) return;
+      m[i.party_id] = (m[i.party_id] || 0) + Math.max(0, invoiceDue(i, pays[i.id] || [], cns[i.id] || []));
+    });
+    return m;
+  }, [invoices, payments, creditNotes]);
 
   return (
     <>
@@ -53,7 +70,7 @@ export function PartiesView({ parties, businesses, activeBiz, reload }) {
       </div>
       <div className="table-wrap">
         <table>
-          <thead><tr><th>Name</th><th>Type</th><th>Phone</th><th>State</th><th>GSTIN</th><th>Business</th><th>Actions</th></tr></thead>
+          <thead><tr><th>Name</th><th>Type</th><th>Phone</th><th>State</th><th>GSTIN</th><th>Business</th><th className="r">Outstanding</th><th>Actions</th></tr></thead>
           <tbody>
             {filtered.map(p => (
               <tr key={p.id}>
@@ -61,34 +78,56 @@ export function PartiesView({ parties, businesses, activeBiz, reload }) {
                 <td><Badge status={p.type} /></td>
                 <td className="mono" style={{ fontSize: 11 }}>{p.phone || '—'}</td>
                 <td style={{ fontSize: 11, color: 'var(--text2)' }}>{p.state || '—'}</td>
-                <td className="mono" style={{ fontSize: 10, color: 'var(--text3)' }}>{p.gstin || '—'}</td>
+                <td className="mono" style={{ fontSize: 10, color: p.gstin && !isGSTINValid(p.gstin) ? 'var(--red)' : 'var(--text3)' }} title={p.gstin && !isGSTINValid(p.gstin) ? 'GSTIN failed the format/checksum test' : undefined}>{p.gstin || '—'}{p.gstin && !isGSTINValid(p.gstin) ? ' ⚠' : ''}</td>
                 <td style={{ fontSize: 11, color: 'var(--text3)' }}>{businesses.find(b => b.id === p.business_id)?.name || '—'}</td>
+                <td className="r mono" style={{ fontSize: 11.5, color: balByParty[p.id] > 0.01 ? (p.type === 'vendor' ? 'var(--red)' : 'var(--amber)') : 'var(--text3)' }}>{balByParty[p.id] > 0.01 ? fmt(balByParty[p.id]) : '—'}</td>
                 <td>
                   <div style={{ display: 'flex', gap: 4 }}>
                     <button className="btn btn-ghost btn-sm" onClick={() => { setEditData(p); setShowModal(true); }}>Edit</button>
-                    <button className="btn btn-danger btn-sm" onClick={() => del(p.id)}>Del</button>
+                    <button className="btn btn-danger btn-sm" onClick={() => del(p)}>Del</button>
                   </div>
                 </td>
               </tr>
             ))}
-            {filtered.length === 0 && <tr><td colSpan={7}><EmptyState icon="👥" message="No parties found" /></td></tr>}
+            {filtered.length === 0 && <tr><td colSpan={8}><EmptyState icon="👥" message="No parties found" sub={search || typeFilter ? 'Try clearing the search' : 'Add your clients and suppliers — set their State so GST splits correctly'} /></td></tr>}
           </tbody>
         </table>
       </div>
-      {showModal && <PartyModal onClose={() => setShowModal(false)} onSave={save} businesses={businesses} parties={parties} editData={editData} />}
+      {showModal && <PartyModal onClose={() => setShowModal(false)} onSave={save} businesses={businesses} parties={parties} editData={editData} activeBiz={activeBiz} defaultType={typeFilter || 'client'} />}
     </>
   );
 }
 
-function PartyModal({ onClose, onSave, businesses, parties = [], editData }) {
+const STATE_BY_CODE = Object.fromEntries(Object.entries(STATE_CODES).map(([s, c]) => [c, s]));
+
+function PartyModal({ onClose, onSave, businesses, parties = [], editData, activeBiz, defaultType = 'client' }) {
   const [f, setF] = useState({
-    business_id: editData?.business_id || businesses[0]?.id || '',
-    name: editData?.name || '', type: editData?.type || 'client',
+    business_id: editData?.business_id || activeBiz || businesses[0]?.id || '',
+    name: editData?.name || '', type: editData?.type || defaultType,
     phone: editData?.phone || '', email: editData?.email || '',
     gstin: editData?.gstin || '', state: editData?.state || '', pan: editData?.pan || '',
     address: editData?.address || '',
   });
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  // A GSTIN already contains the state (first 2 digits) and the PAN (next 10),
+  // so typing it fills both in — and catches typos with the checksum test.
+  function setGSTIN(v) {
+    const g = v.toUpperCase().replace(/\s/g, '');
+    setF(x => {
+      const next = { ...x, gstin: g };
+      if (g.length === 15) {
+        const st = STATE_BY_CODE[g.slice(0, 2)];
+        if (st && !x.state) next.state = st;
+        if (!x.pan) next.pan = g.slice(2, 12);
+      }
+      return next;
+    });
+  }
+  const gstinBad = f.gstin.trim().length > 0 && !isGSTINValid(f.gstin);
+  const gstinState = f.gstin.length >= 2 ? STATE_BY_CODE[f.gstin.slice(0, 2)] : null;
+  const stateMismatch = gstinState && f.state && gstinState !== f.state;
 
   // Duplicate guard — same GSTIN or phone already on another party in this
   // business almost always means the same real-world party is being entered
@@ -100,9 +139,13 @@ function PartyModal({ onClose, onSave, businesses, parties = [], editData }) {
   const dupPhone = norm(f.phone).length >= 10 && parties.find(p => p.id !== editData?.id && p.business_id === f.business_id && norm(p.phone) === norm(f.phone));
 
   async function save() {
-    if (!f.name.trim()) return;
+    if (!f.name.trim()) { setErr('Name is required'); return; }
+    if (gstinBad && !confirm("This GSTIN doesn't pass the format/checksum check. Save it anyway?")) return;
     if ((dupGSTIN || dupPhone) && !confirm(`This ${dupGSTIN ? 'GSTIN' : 'phone number'} is already used by "${(dupGSTIN || dupPhone).name}". Save anyway as a separate party?`)) return;
-    setBusy(true); await onSave(f, editData?.id); setBusy(false); onClose();
+    setBusy(true); setErr('');
+    try { await onSave({ ...f, name: f.name.trim() }, editData?.id); onClose(); }
+    catch (e) { setErr(e.message || 'Save failed'); }
+    setBusy(false);
   }
   return (
     <ModalShell title={editData ? 'Edit Party' : 'Add Party'} onClose={onClose}
@@ -111,25 +154,30 @@ function PartyModal({ onClose, onSave, businesses, parties = [], editData }) {
         <FG label="Business"><select value={f.business_id} onChange={e => setF(x => ({ ...x, business_id: e.target.value }))}>{businesses.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></FG>
         <FG label="Type"><select value={f.type} onChange={e => setF(x => ({ ...x, type: e.target.value }))}><option value="client">Client</option><option value="vendor">Vendor</option><option value="employee">Employee</option></select></FG>
       </div>
-      <div className="form-row"><FG label="Name *"><input value={f.name} onChange={e => setF(x => ({ ...x, name: e.target.value }))} /></FG></div>
+      <div className="form-row"><FG label="Name *"><input autoFocus value={f.name} onChange={e => setF(x => ({ ...x, name: e.target.value }))} /></FG></div>
       <div className="form-row cols-2">
         <FG label="Phone"><input value={f.phone} onChange={e => setF(x => ({ ...x, phone: e.target.value }))} /></FG>
         <FG label="Email"><input value={f.email} onChange={e => setF(x => ({ ...x, email: e.target.value }))} /></FG>
       </div>
       {dupPhone && <div style={{ fontSize: 11, color: 'var(--amber)', marginTop: -6, marginBottom: 8 }}>⚠ This phone number is already on "{dupPhone.name}" — likely the same party.</div>}
-      <div className="form-row cols-2">
-        <FG label="GSTIN"><input value={f.gstin} onChange={e => setF(x => ({ ...x, gstin: e.target.value.toUpperCase() }))} /></FG>
+      <div className="form-row cols-3">
+        <FG label="GSTIN" note={f.gstin.length === 15 && !gstinBad ? '✓ valid — state & PAN filled from it' : 'Fills State and PAN automatically'}>
+          <input value={f.gstin} maxLength={15} onChange={e => setGSTIN(e.target.value)} placeholder="07AAXFN6403D1Z5"
+            style={gstinBad && f.gstin.length >= 15 ? { borderColor: 'var(--red)' } : undefined} /></FG>
         <FG label="PAN"><input value={f.pan} onChange={e => setF(x => ({ ...x, pan: e.target.value.toUpperCase() }))} placeholder="ABCDE1234F" /></FG>
         <FG label="State (Place of Supply)"><select value={f.state} onChange={e => setF(x => ({ ...x, state: e.target.value }))}><option value="">Select…</option>{INDIAN_STATES.map(s => <option key={s} value={s}>{s}</option>)}</select></FG>
       </div>
       {dupGSTIN && <div style={{ fontSize: 11, color: 'var(--amber)', marginTop: -6, marginBottom: 8 }}>⚠ This GSTIN is already on "{dupGSTIN.name}" — likely the same party.</div>}
+      {gstinBad && f.gstin.length >= 15 && <div style={{ fontSize: 11, color: 'var(--red)', marginTop: -6, marginBottom: 8 }}>⚠ GSTIN fails the checksum — check for a typo. A wrong GSTIN blocks the buyer's input credit.</div>}
+      {stateMismatch && <div style={{ fontSize: 11, color: 'var(--amber)', marginTop: -6, marginBottom: 8 }}>⚠ GSTIN is registered in {gstinState}, but State is set to {f.state}. Place of supply decides CGST/SGST vs IGST.</div>}
       <FG label="Address"><textarea value={f.address} onChange={e => setF(x => ({ ...x, address: e.target.value }))} /></FG>
+      {err && <p className="err-msg">{err}</p>}
     </ModalShell>
   );
 }
 
 // ─── AR LEDGER ────────────────────────────────────────────────────────────────
-export function ARLedgerView({ invoices, payments, creditNotes, debitNotes = [], parties, businesses, activeBiz }) {
+export function ARLedgerView({ invoices, payments, creditNotes, debitNotes = [], parties, businesses, activeBiz, setView }) {
   const [selectedParty, setSelectedParty] = useState('');
   const [agingTab, setAgingTab] = useState('ledger');
 
@@ -138,21 +186,22 @@ export function ARLedgerView({ invoices, payments, creditNotes, debitNotes = [],
   payments.forEach(p => { if (!paysByInv[p.invoice_id]) paysByInv[p.invoice_id] = []; paysByInv[p.invoice_id].push(p); });
 
   const clientSummaries = clients.map(c => {
-    const cInvs = invoices.filter(i => i.party_id === c.id && i.type === 'sale' && i.status !== 'proforma');
+    // Cancelled invoices and un-issued drafts aren't owed; they used to be counted.
+    const cInvs = invoices.filter(i => i.party_id === c.id && i.type === 'sale' && !['proforma', 'cancelled', 'draft'].includes(i.status));
     const totalBilled = cInvs.reduce((s, i) => s + Number(i.total), 0);
     const totalPaid = cInvs.reduce((s, i) => (paysByInv[i.id] || []).reduce((ps, p) => ps + Number(p.amount), 0) + s, 0);
-    const balance = totalBilled - totalPaid;
-    const cCNs = creditNotes.filter(cn => cn.party_id === c.id);
+    const tdsTotal = cInvs.reduce((s, i) => s + Number(i.tds_amount || 0), 0);
+    const balance = totalBilled - totalPaid - tdsTotal;
+    const cCNs = creditNotes.filter(cn => cn.party_id === c.id && cn.status !== 'cancelled');
     const cnTotal = cCNs.reduce((s, cn) => s + Number(cn.total || 0), 0);
-    const cDNs = debitNotes.filter(dn => dn.party_id === c.id);
+    const cDNs = debitNotes.filter(dn => dn.party_id === c.id && dn.status !== 'cancelled');
     const dnTotal = cDNs.reduce((s, dn) => s + Number(dn.total || 0), 0);
     const netBalance = balance - cnTotal + dnTotal;
     // Aging
     const now = new Date();
     let aging0 = 0, aging30 = 0, aging60 = 0, aging90 = 0;
-    cInvs.filter(i => !['paid', 'cancelled'].includes(i.status)).forEach(i => {
-      const paid = (paysByInv[i.id] || []).reduce((s, p) => s + Number(p.amount), 0);
-      const bal = Number(i.total) - paid;
+    cInvs.filter(i => i.status !== 'paid').forEach(i => {
+      const bal = invoiceDue(i, paysByInv[i.id] || [], cCNs.filter(cn => cn.invoice_id === i.id));
       if (bal <= 0) return;
       const days = i.due_date ? Math.floor((now - new Date(i.due_date)) / 86400000) : 0;
       if (days <= 0) aging0 += bal;
@@ -165,31 +214,32 @@ export function ARLedgerView({ invoices, payments, creditNotes, debitNotes = [],
 
   const grandBalance = clientSummaries.reduce((s, c) => s + c.netBalance, 0);
   const selectedData = selectedParty ? clientSummaries.find(c => c.id === selectedParty) : null;
-  const selectedInvs = selectedParty ? invoices.filter(i => i.party_id === selectedParty && i.type === 'sale' && i.status !== 'proforma') : [];
+  const selectedInvs = selectedParty ? invoices.filter(i => i.party_id === selectedParty && i.type === 'sale' && !['proforma', 'cancelled', 'draft'].includes(i.status)) : [];
 
   return (
     <div>
       <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(3,1fr)' }}>
         <StatCard label="Total Receivable" value={fmt(grandBalance)} color="amber" sub={`${clients.length} clients`} />
-        <StatCard label="Overdue (>30d)" value={fmt(clientSummaries.reduce((s, c) => s + c.aging30 + c.aging60 + c.aging90, 0))} color="red" sub="past due date" />
+        <StatCard label="Overdue" value={fmt(clientSummaries.reduce((s, c) => s + c.aging30 + c.aging60 + c.aging90, 0))} color="red" sub="past due date (any age)" />
         <StatCard label="Current (not due)" value={fmt(clientSummaries.reduce((s, c) => s + c.aging0, 0))} color="green" sub="within terms" />
       </div>
 
       <div className="two-col" style={{ alignItems: 'flex-start' }}>
         <div className="table-wrap">
-          <div className="table-toolbar"><h3>Client Balances</h3></div>
+          <div className="table-toolbar"><h3>Client Balances</h3><span className="hint">Click a client for their statement & aging</span></div>
           <table>
-            <thead><tr><th>Client</th><th className="r">Billed</th><th className="r">Paid</th><th className="r">Balance</th></tr></thead>
+            <thead><tr><th>Client</th><th className="r">Billed</th><th className="r">Paid</th><th className="r">Overdue</th><th className="r">Balance</th></tr></thead>
             <tbody>
-              {clientSummaries.filter(c => c.totalBilled > 0 || c.netBalance !== 0).map(c => (
+              {clientSummaries.filter(c => c.totalBilled > 0 || Math.abs(c.netBalance) > 0.01).sort((a, b) => b.netBalance - a.netBalance).map(c => (
                 <tr key={c.id} style={{ cursor: 'pointer', background: selectedParty === c.id ? 'var(--bg3)' : '' }} onClick={() => setSelectedParty(selectedParty === c.id ? '' : c.id)}>
                   <td style={{ fontWeight: 500 }}>{c.name}</td>
                   <td className="r mono" style={{ fontSize: 11 }}>{fmt(c.totalBilled)}</td>
                   <td className="r mono" style={{ fontSize: 11, color: 'var(--green)' }}>{fmt(c.totalPaid)}</td>
-                  <td className="r mono" style={{ fontSize: 12, fontWeight: 600, color: c.netBalance > 0 ? 'var(--amber)' : 'var(--text3)' }}>{fmt(c.netBalance)}</td>
+                  <td className="r mono" style={{ fontSize: 11, color: 'var(--red)' }}>{c.aging30 + c.aging60 + c.aging90 > 0.01 ? fmt(c.aging30 + c.aging60 + c.aging90) : '—'}</td>
+                  <td className="r mono" style={{ fontSize: 12, fontWeight: 600, color: c.netBalance > 0.01 ? 'var(--amber)' : 'var(--text3)' }}>{fmt(c.netBalance)}</td>
                 </tr>
               ))}
-              {clientSummaries.filter(c => c.totalBilled > 0).length === 0 && <tr><td colSpan={4}><EmptyState icon="🧾" message="No receivable data" /></td></tr>}
+              {clientSummaries.filter(c => c.totalBilled > 0).length === 0 && <tr><td colSpan={5}><EmptyState icon="🧾" message="No receivable data" sub="Issued sale invoices for clients show up here" /></td></tr>}
             </tbody>
           </table>
         </div>
@@ -200,7 +250,7 @@ export function ARLedgerView({ invoices, payments, creditNotes, debitNotes = [],
               <div className="card-head">{selectedData.name} — Statement</div>
               {selectedInvs.map(inv => {
                 const paid = (paysByInv[inv.id] || []).reduce((s, p) => s + Number(p.amount), 0);
-                const bal = Number(inv.total) - paid;
+                const bal = invoiceDue(inv, paysByInv[inv.id] || [], creditNotes.filter(cn => cn.invoice_id === inv.id));
                 const invPays = (paysByInv[inv.id] || []).slice().sort((a, b) => new Date(a.payment_date) - new Date(b.payment_date));
                 return (
                   <div key={inv.id} className="ledger-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 6 }}>
@@ -251,43 +301,80 @@ export function ARLedgerView({ invoices, payments, creditNotes, debitNotes = [],
 }
 
 // ─── AP LEDGER ────────────────────────────────────────────────────────────────
-export function APLedgerView({ invoices, expenses, payments, parties, businesses, activeBiz }) {
-  const vendors = parties.filter(p => p.type === 'vendor' && (activeBiz ? p.business_id === activeBiz : true));
+// What you owe suppliers = purchase bills − payments made against them. The old
+// screen added bills + expenses and never subtracted payments, so "Total Owed"
+// only ever grew. Expenses are recorded as already paid (they carry a payment
+// method), so they're shown for reference but never counted as owed.
+export function APLedgerView({ invoices, expenses, payments, parties, businesses, activeBiz, debitNotes = [] }) {
+  const [selected, setSelected] = useState('');
+  const vendors = parties.filter(p => (activeBiz ? p.business_id === activeBiz : true));
+  const paysByInv = {};
+  payments.forEach(p => { (paysByInv[p.invoice_id] ||= []).push(p); });
+  const now = today();
 
   const vendorSummaries = vendors.map(v => {
-    const vInvs = invoices.filter(i => i.party_id === v.id && i.type === 'purchase');
-    const vExps = expenses.filter(e => e.vendor_id === v.id);
-    const totalBilled = vInvs.reduce((s, i) => s + Number(i.total), 0);
-    const totalExpenses = vExps.reduce((s, e) => s + Number(e.amount), 0);
-    const totalOwed = totalBilled + totalExpenses;
-    return { ...v, totalBilled, totalExpenses, totalOwed };
-  });
+    const bills = invoices.filter(i => i.party_id === v.id && i.type === 'purchase' && i.status !== 'cancelled');
+    const billed = bills.reduce((s, i) => s + Number(i.total || 0), 0);
+    const paid = bills.reduce((s, i) => s + (paysByInv[i.id] || []).reduce((a, p) => a + Number(p.amount || 0), 0), 0);
+    const balance = bills.reduce((s, i) => s + Math.max(0, invoiceDue(i, paysByInv[i.id] || [])), 0);
+    const overdue = bills.filter(i => i.due_date && i.due_date < now).reduce((s, i) => s + Math.max(0, invoiceDue(i, paysByInv[i.id] || [])), 0);
+    const directExp = expenses.filter(e => e.vendor_id === v.id).reduce((s, e) => s + Number(e.amount || 0), 0);
+    return { ...v, bills, billed, paid, balance, overdue, directExp };
+  }).filter(v => v.billed > 0 || v.directExp > 0);
 
-  const grandOwed = vendorSummaries.reduce((s, v) => s + v.totalOwed, 0);
+  const totals = vendorSummaries.reduce((t, v) => ({ billed: t.billed + v.billed, paid: t.paid + v.paid, balance: t.balance + v.balance, overdue: t.overdue + v.overdue, directExp: t.directExp + v.directExp }), { billed: 0, paid: 0, balance: 0, overdue: 0, directExp: 0 });
+  const sel = vendorSummaries.find(v => v.id === selected);
 
   return (
     <div>
-      <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(3,1fr)' }}>
-        <StatCard label="Total Payable" value={fmt(grandOwed)} color="red" sub={`${vendors.length} vendors`} />
-        <StatCard label="Purchase Bills" value={fmt(vendorSummaries.reduce((s, v) => s + v.totalBilled, 0))} color="blue" />
-        <StatCard label="Direct Expenses" value={fmt(vendorSummaries.reduce((s, v) => s + v.totalExpenses, 0))} color="amber" />
+      <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(4,1fr)' }}>
+        <StatCard label="Total Payable" value={fmt(totals.balance)} color="red" sub="bills − payments made" />
+        <StatCard label="Overdue to suppliers" value={fmt(totals.overdue)} color="amber" sub="past the bill's due date" />
+        <StatCard label="Purchase Bills" value={fmt(totals.billed)} color="blue" sub={`paid ${fmt(totals.paid)}`} />
+        <StatCard label="Direct Expenses" value={fmt(totals.directExp)} color="purple" sub="already paid — not owed" />
       </div>
-      <div className="table-wrap">
-        <div className="table-toolbar"><h3>Vendor Balances</h3></div>
-        <table>
-          <thead><tr><th>Vendor</th><th className="r">Purchase Bills</th><th className="r">Direct Expenses</th><th className="r">Total Owed</th></tr></thead>
-          <tbody>
-            {vendorSummaries.filter(v => v.totalOwed > 0).map(v => (
-              <tr key={v.id}>
-                <td style={{ fontWeight: 500 }}>{v.name}</td>
-                <td className="r mono" style={{ fontSize: 11 }}>{fmt(v.totalBilled)}</td>
-                <td className="r mono" style={{ fontSize: 11, color: 'var(--amber)' }}>{fmt(v.totalExpenses)}</td>
-                <td className="r mono" style={{ fontSize: 12, fontWeight: 600, color: 'var(--red)' }}>{fmt(v.totalOwed)}</td>
-              </tr>
-            ))}
-            {vendorSummaries.filter(v => v.totalOwed > 0).length === 0 && <tr><td colSpan={4}><EmptyState icon="🏪" message="No payables data" sub="Add vendors and purchase bills to see AP ledger" /></td></tr>}
-          </tbody>
-        </table>
+      <div className="two-col" style={{ alignItems: 'flex-start' }}>
+        <div className="table-wrap">
+          <div className="table-toolbar"><h3>Supplier Balances</h3><span className="hint">Click a supplier for their bills</span></div>
+          <table>
+            <thead><tr><th>Supplier</th><th className="r">Billed</th><th className="r">Paid</th><th className="r">Overdue</th><th className="r">Balance</th></tr></thead>
+            <tbody>
+              {vendorSummaries.sort((a, b) => b.balance - a.balance).map(v => (
+                <tr key={v.id} className="clickable" style={{ background: selected === v.id ? 'var(--bg3)' : '' }} onClick={() => setSelected(selected === v.id ? '' : v.id)}>
+                  <td style={{ fontWeight: 500 }}>{v.name}</td>
+                  <td className="r mono" style={{ fontSize: 11 }}>{fmt(v.billed)}</td>
+                  <td className="r mono" style={{ fontSize: 11, color: 'var(--green)' }}>{fmt(v.paid)}</td>
+                  <td className="r mono" style={{ fontSize: 11, color: 'var(--amber)' }}>{v.overdue > 0.01 ? fmt(v.overdue) : '—'}</td>
+                  <td className="r mono" style={{ fontSize: 12, fontWeight: 600, color: v.balance > 0.01 ? 'var(--red)' : 'var(--text3)' }}>{v.balance > 0.01 ? fmt(v.balance) : '✓'}</td>
+                </tr>
+              ))}
+              {vendorSummaries.length === 0 && <tr><td colSpan={5}><EmptyState icon="🏪" message="No payables yet" sub="Record supplier bills under Purchases → Purchase Bills" /></td></tr>}
+            </tbody>
+          </table>
+        </div>
+        {sel && (
+          <div className="card">
+            <div className="card-head">{sel.name} — Bills</div>
+            {sel.bills.length === 0 && <div className="hint">No purchase bills — only direct expenses ({fmt(sel.directExp)}).</div>}
+            {sel.bills.sort((a, b) => (a.issue_date || '').localeCompare(b.issue_date || '')).map(b => {
+              const due = invoiceDue(b, paysByInv[b.id] || []);
+              const late = b.due_date && b.due_date < now && due > 0.01;
+              return (
+                <div key={b.id} className="ledger-row">
+                  <div>
+                    <div className="mono" style={{ fontSize: 12 }}>{b.invoice_number}</div>
+                    <div className="hint">{fmtDate(b.issue_date)} · due {fmtDate(b.due_date)}</div>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div className="mono" style={{ fontSize: 12 }}>{fmt(b.total)}</div>
+                    <div className="mono" style={{ fontSize: 11, fontWeight: 600, color: due <= 0.01 ? 'var(--green)' : late ? 'var(--red)' : 'var(--amber)' }}>{due <= 0.01 ? '✓ Paid' : `${fmt(due)} due${late ? ' · late' : ''}`}</div>
+                  </div>
+                </div>
+              );
+            })}
+            <div className="ledger-row total"><span>Balance</span><span className="mono" style={{ color: 'var(--red)' }}>{fmt(sel.balance)}</span></div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -299,19 +386,32 @@ export function ExpensesView({ expenses, businesses, parties, activeBiz, reload,
   const [showModal, setShowModal] = useState(false);
   const [tallyResults, setTallyResults] = useState({}); // id -> tally result, set once Tally has run
 
-  const filtered = expenses.filter(e => {
-    const biz = activeBiz ? e.business_id === activeBiz : true;
+  const [month, setMonth] = useState('');
+  const bizExp = expenses.filter(e => (activeBiz ? e.business_id === activeBiz : true));
+  const months = [...new Set(bizExp.map(e => (e.expense_date || '').slice(0, 7)).filter(Boolean))].sort().reverse();
+  const filtered = bizExp.filter(e => {
     const q = search.toLowerCase();
-    return biz && (!q || e.category.toLowerCase().includes(q) || (e.description || '').toLowerCase().includes(q));
+    const payee = parties.find(p => p.id === e.vendor_id)?.name || '';
+    return (!month || (e.expense_date || '').startsWith(month))
+      && (!q || e.category.toLowerCase().includes(q) || (e.description || '').toLowerCase().includes(q) || payee.toLowerCase().includes(q));
   });
+  const filteredTotal = filtered.reduce((s, e) => s + Number(e.amount || 0), 0);
 
   const [saveErr, setSaveErr] = useState('');
   async function save(data) {
     setSaveErr('');
-    try { await saveExpenseWithJournal(data); reload(); }
-    catch (e) { setSaveErr(e.message || 'Failed to save expense'); }
+    // Errors propagate to the modal so it stays open and shows them.
+    const res = await saveExpenseWithJournal(data);
+    if (res?.skipped) toast(`Expense saved, but no journal entry was posted (${res.skipReason === 'account_not_found' ? `no ledger matching "${data.category}" or Bank/Cash in the Chart of Accounts` : res.skipReason}). Re-post it from Journal Health.`, 'warn', 9000);
+    else toast('Expense saved', 'success');
+    reload();
   }
-  async function del(id) { if (!confirm('Delete?')) return; await deleteExpense(id); reload(); }
+  async function del(e) {
+    if (!confirm(`Delete this ${e.category} expense of ${fmt(e.amount)}? Its journal entry is removed too.`)) return;
+    try { await deleteExpense(e.id, e.attachment_path); toast('Expense deleted', 'success'); }
+    catch (err) { toast(err.message, 'error'); }
+    reload();
+  }
 
   function runTally() {
     const results = {};
@@ -332,7 +432,11 @@ export function ExpensesView({ expenses, businesses, parties, activeBiz, reload,
   return (
     <>
       <div className="filter-bar">
-        <input placeholder="Search category, description…" value={search} onChange={e => setSearch(e.target.value)} />
+        <input placeholder="Search category, description, payee…" value={search} onChange={e => setSearch(e.target.value)} />
+        <select value={month} onChange={e => setMonth(e.target.value)}>
+          <option value="">All months</option>
+          {months.map(m => <option key={m} value={m}>{new Date(m + '-01').toLocaleDateString('en-IN', { month: 'short', year: 'numeric' })}</option>)}
+        </select>
         <button className="btn btn-ghost" onClick={runTally} disabled={!filtered.length}
           title="Check every expense's date and amount against its journal entry">🔎 Tally</button>
         <button className="btn btn-primary" onClick={() => setShowModal(true)}>+ Add Expense</button>
@@ -362,11 +466,15 @@ export function ExpensesView({ expenses, businesses, parties, activeBiz, reload,
                       ? <span style={{ fontSize: 10, color: 'var(--green)', fontFamily: 'var(--mono)' }}>✓</span>
                       : <span style={{ fontSize: 10, color: 'var(--text4)', fontFamily: 'var(--mono)' }} title="No matching journal entry — see Journal Health">—</span>}
                 </td>
-                <td><button className="btn btn-danger btn-sm" onClick={() => del(e.id)}>Del</button></td>
+                <td><button className="btn btn-danger btn-sm" onClick={() => del(e)}>Del</button></td>
               </tr>
             ))}
-            {filtered.length === 0 && <tr><td colSpan={10}><EmptyState icon="💸" message="No expenses" /></td></tr>}
+            {filtered.length === 0 && <tr><td colSpan={10}><EmptyState icon="💸" message="No expenses" sub={search || month ? 'Nothing matches this search / month' : 'Click "+ Add Expense" to record one'} /></td></tr>}
           </tbody>
+          {filtered.length > 0 && <tfoot><tr style={{ background: 'var(--bg3)' }}>
+            <td colSpan={6} className="mono" style={{ fontSize: 11, color: 'var(--text3)' }}>{filtered.length} expense{filtered.length === 1 ? '' : 's'}</td>
+            <td className="r mono" style={{ fontWeight: 600, color: 'var(--red)' }}>{fmt(filteredTotal)}</td><td colSpan={3}></td>
+          </tr></tfoot>}
         </table>
       </div>
       {saveErr && <p className="err-msg" style={{ marginBottom: 8 }}>{saveErr}</p>}
@@ -608,18 +716,36 @@ function BankTxnModal({ onClose, onSave, bankAccountId }) {
 // ─── PAYMENTS VIEW ────────────────────────────────────────────────────────────
 export function PaymentsView({ payments, businesses, parties, invoices, activeBiz, reload, journalEntries, journalLines }) {
   const [tallyResults, setTallyResults] = useState({}); // id -> tally result, set once Tally has run
-  const filtered = activeBiz ? payments.filter(p => p.business_id === activeBiz) : payments;
+  const [search, setSearch] = useState('');
+  const [dir, setDir] = useState(''); // '' | 'in' | 'out'
+  const invById = useMemo(() => Object.fromEntries(invoices.map(i => [i.id, i])), [invoices]);
+  const filtered = (activeBiz ? payments.filter(p => p.business_id === activeBiz) : payments).filter(p => {
+    const inv = invById[p.invoice_id];
+    if (dir === 'in' && inv?.type === 'purchase') return false;
+    if (dir === 'out' && inv?.type !== 'purchase') return false;
+    const q = search.trim().toLowerCase();
+    if (!q) return true;
+    const party = parties.find(pt => pt.id === p.party_id)?.name || '';
+    return [party, inv?.invoice_number, p.reference, p.method].some(v => (v || '').toLowerCase().includes(q));
+  });
+  const totalIn = filtered.filter(p => invById[p.invoice_id]?.type !== 'purchase').reduce((s, p) => s + Number(p.amount || 0), 0);
+  const totalOut = filtered.filter(p => invById[p.invoice_id]?.type === 'purchase').reduce((s, p) => s + Number(p.amount || 0), 0);
 
   async function del(id, invId) {
-    if (!confirm('Delete this payment? Invoice status will be recalculated.')) return;
-    await deletePayment(id);
-    // Recalc invoice status
-    const inv = invoices.find(i => i.id === invId);
-    if (inv) {
-      const remaining = payments.filter(p => p.id !== id && p.invoice_id === invId).reduce((s, p) => s + Number(p.amount), 0);
-      const status = remaining <= 0 ? 'sent' : remaining >= Number(inv.total) - 0.01 ? 'paid' : 'partially_paid';
-      await updateInvoiceStatus(invId, status);
-    }
+    if (!confirm('Delete this payment? Its journal entry is removed and the invoice status recalculated.')) return;
+    try {
+      await deletePayment(id);
+      // Recalc invoice status. A proforma stays a proforma; with nothing left
+      // paid an issued invoice goes back to "sent" (purchase bills likewise).
+      const inv = invoices.find(i => i.id === invId);
+      if (inv && !['proforma', 'cancelled', 'draft'].includes(inv.status)) {
+        const remaining = payments.filter(p => p.id !== id && p.invoice_id === invId);
+        const due = invoiceDue(inv, remaining);
+        const status = remaining.length === 0 ? 'sent' : due <= 0.01 ? 'paid' : 'partially_paid';
+        if (status !== inv.status) await updateInvoiceStatus(invId, status);
+      }
+      toast('Payment deleted', 'success');
+    } catch (e) { toast(e.message, 'error'); }
     reload();
   }
 
@@ -633,9 +759,14 @@ export function PaymentsView({ payments, businesses, parties, invoices, activeBi
   return (
     <>
       <div className="filter-bar">
+        <input placeholder="Search party, invoice #, UTR…" value={search} onChange={e => setSearch(e.target.value)} />
+        <select value={dir} onChange={e => setDir(e.target.value)}>
+          <option value="">Received & paid</option><option value="in">Received (sales)</option><option value="out">Paid (purchase bills)</option>
+        </select>
         <button className="btn btn-ghost" onClick={runTally} disabled={!filtered.length}
           title="Check every payment's date and amount against its journal entry">🔎 Tally</button>
       </div>
+      <div className="sum-strip"><span>{filtered.length} payments</span><span>Received <b style={{ color: 'var(--green)' }}>{fmt(totalIn)}</b></span><span>Paid out <b style={{ color: 'var(--red)' }}>{fmt(totalOut)}</b></span></div>
       <div className="table-wrap">
         <table>
           <thead><tr><th>Date</th><th>Party</th><th>Invoice</th><th>Method</th><th>Reference</th><th className="r">Amount</th><th>Journal</th><th></th></tr></thead>
@@ -649,7 +780,7 @@ export function PaymentsView({ payments, businesses, parties, invoices, activeBi
                   <td className="mono" style={{ fontSize: 11, color: 'var(--text3)' }}>{inv?.invoice_number || '—'}</td>
                   <td className="mono" style={{ fontSize: 11 }}>{p.method}</td>
                   <td className="mono" style={{ fontSize: 10, color: 'var(--text3)' }}>{p.reference || '—'}</td>
-                  <td className="r mono" style={{ color: 'var(--green)', fontWeight: 600 }}>{fmt(p.amount)}</td>
+                  <td className="r mono" style={{ color: inv?.type === 'purchase' ? 'var(--red)' : 'var(--green)', fontWeight: 600 }}>{inv?.type === 'purchase' ? '−' : ''}{fmt(p.amount)}</td>
                   <td style={{ textAlign: 'center' }}>
                     <TallyBadge result={tallyResults[p.id]} />
                   </td>
