@@ -39,7 +39,9 @@ export async function loadOpsData() {
       pageAll(() => supabase.from('invoice_items').select('id,invoice_id,ops_product_id,quantity').not('ops_product_id', 'is', null).order('id')),
     ]);
     if (settingsRes.error) throw settingsRes.error;
-    return { ok: true, brands, products, sizes, shipments, employees, workLogs, linkedItems, settings: settingsRes.data || {} };
+    // piece_rates comes with the operations app's migration 008 — optional
+    const pr = await ops().from('piece_rates').select('*');
+    return { ok: true, brands, products, sizes, shipments, employees, workLogs, linkedItems, settings: settingsRes.data || {}, pieceRates: pr.error ? [] : (pr.data || []) };
   } catch (e) {
     return { ok: false, error: e?.message || String(e) };
   }
@@ -217,7 +219,7 @@ export async function applyAdvance({ proformaPayments, toInvoiceId, amountNeeded
 // Labour cost per piece for each employee and month: monthly salary ÷ pieces
 // they logged that month. Logs without a quantity can't be costed.
 export function labourRates(employees, workLogs) {
-  const salary = Object.fromEntries(employees.map(e => [e.id, Number(e.monthly_salary || 0)]));
+  const salary = Object.fromEntries(employees.filter(e => e.pay_type !== 'piece').map(e => [e.id, Number(e.monthly_salary || 0)]));
   const pieces = {};
   workLogs.forEach(w => {
     if (!w.employee_id || !w.quantity) return;
@@ -227,6 +229,19 @@ export function labourRates(employees, workLogs) {
   const rate = {};
   Object.entries(pieces).forEach(([k, n]) => { const s = salary[k.split('|')[0]]; if (s && n) rate[k] = s / n; });
   return rate;
+}
+// Piece-rate staff: ₹ per piece for a work type, product-specific rate first.
+export function pieceRateFor(rates, workType, productId) {
+  return rates.find(r => r.work_type === workType && r.product_id === productId)?.rate
+    ?? rates.find(r => r.work_type === workType && !r.product_id)?.rate ?? null;
+}
+// Labour cost of one work log: piece rate for piece-paid staff, else monthly salary ÷ pieces that month.
+export function logCost(w, employeesById, rates, salaryRates) {
+  if (!w.quantity) return null;
+  const e = employeesById[w.employee_id];
+  if (e?.pay_type === 'piece') { const r = pieceRateFor(rates, w.work_type, w.product_id); return r == null ? null : Number(r) * Number(w.quantity); }
+  const r = salaryRates[`${w.employee_id}|${monthOf(w.logged_at)}`];
+  return r ? r * Number(w.quantity) : null;
 }
 export function monthOf(ts) {
   if (!ts) return '';

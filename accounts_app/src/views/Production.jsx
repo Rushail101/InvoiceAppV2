@@ -4,7 +4,7 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import { fmt, fmtDate, today, localISO, nextInvNum, monthEnd, thisMonthKey, invoiceDue } from '../lib/constants.js';
 import { saveInvoice, saveChallan, updateInvoice, updateInvoiceStatus, saveExpenseWithJournal, supabase } from '../lib/db.js';
-import { loadOpsData, setOpsBusiness, buildOrders, linesForOrder, linesForDispatches, linkShipments, applyAdvance, labourRates, monthOf } from '../lib/opsLink.js';
+import { loadOpsData, setOpsBusiness, buildOrders, linesForOrder, linesForDispatches, linkShipments, applyAdvance, labourRates, monthOf, logCost, pieceRateFor } from '../lib/opsLink.js';
 import { ModalShell, EmptyState, StatCard, toast } from '../components/ui.jsx';
 import { InvoiceModal } from './Invoices.jsx';
 import { ChallanModal } from './DeliveryChallans.jsx';
@@ -234,7 +234,7 @@ export function ProductionOrdersView({ businesses, parties, invoices, payments, 
       )}
 
       {open && !modal && (
-        <OrderDetail order={open} biz={biz} party={partyFor(open)} rates={rates} workLogs={data.workLogs} invoices={invoices} expenses={expenses} paysBy={paysBy}
+        <OrderDetail order={open} biz={biz} party={partyFor(open)} rates={rates} pieceRates={data.pieceRates || []} employees={data.employees} workLogs={data.workLogs} invoices={invoices} expenses={expenses} paysBy={paysBy}
           onClose={() => setOpenKey(null)}
           actions={{ openProforma, openDispatchInvoice, openFinal, openChallan, closeProforma }} />
       )}
@@ -250,7 +250,8 @@ export function ProductionOrdersView({ businesses, parties, invoices, payments, 
   );
 }
 
-function OrderDetail({ order: o, biz, party, rates, workLogs, invoices, expenses, paysBy, onClose, actions }) {
+function OrderDetail({ order: o, biz, party, rates, pieceRates, employees, workLogs, invoices, expenses, paysBy, onClose, actions }) {
+  const empById = Object.fromEntries(employees.map(e => [e.id, e]));
   const sameState = party?.state && biz.state && party.state === biz.state;
   const unchallaned = o.lines.reduce((s, l) => s + l.unchallanedShip.reduce((a, x) => a + Number(x.quantity || 0), 0), 0);
   const po = o.po_number;
@@ -264,8 +265,8 @@ function OrderDetail({ order: o, biz, party, rates, workLogs, invoices, expenses
   const pids = new Set(o.lines.map(l => l.product.id));
   let labour = 0, uncosted = 0;
   workLogs.filter(w => pids.has(w.product_id)).forEach(w => {
-    const r = rates[`${w.employee_id}|${monthOf(w.logged_at)}`];
-    if (r && w.quantity) labour += r * Number(w.quantity); else uncosted++;
+    const c = logCost(w, empById, pieceRates, rates);
+    if (c != null) labour += c; else uncosted++;
   });
   const margin = revenue - material - otherExp - labour;
 
@@ -334,7 +335,7 @@ function OrderDetail({ order: o, biz, party, rates, workLogs, invoices, expenses
           <div className="ledger-row"><span>Revenue (ex-GST){!o.taxDocs.length && <span className="hint"> · order value</span>}</span><span className="mono" style={{ color: 'var(--green)' }}>{fmt(revenue)}</span></div>
           <div className="ledger-row"><span>Material bills tagged {po || '—'}</span><span className="mono" style={{ color: 'var(--red)' }}>−{fmt(material)}</span></div>
           {otherExp > 0 && <div className="ledger-row"><span>Expenses referenced {po}</span><span className="mono" style={{ color: 'var(--red)' }}>−{fmt(otherExp)}</span></div>}
-          <div className="ledger-row"><span>Labour (logged work × monthly rate)</span><span className="mono" style={{ color: 'var(--red)' }}>−{fmt(labour)}</span></div>
+          <div className="ledger-row"><span>Labour (logged work × salary or piece rate)</span><span className="mono" style={{ color: 'var(--red)' }}>−{fmt(labour)}</span></div>
           <div className="ledger-row total"><span>Margin</span><span className="mono" style={{ color: margin >= 0 ? 'var(--green)' : 'var(--red)' }}>{fmt(margin)}{revenue > 0 && <span className="hint"> · {((margin / revenue) * 100).toFixed(0)}%</span>}</span></div>
           <div className="hint" style={{ marginTop: 8, lineHeight: 1.6 }}>
             Tag fabric/trim purchase bills with this PO number (PO Reference) to count them.
@@ -368,8 +369,12 @@ export function PayrollView({ businesses, parties, expenses, reload }) {
     const pieces = mine.reduce((s, w) => s + Number(w.quantity || 0), 0);
     const posted = expenses.find(x => x.employee_id === e.id && x.payroll_month === month);
     const party = parties.find(p => p.business_id === opsBiz && p.employee_id === e.id);
-    const amount = amounts[e.id] ?? Number(e.monthly_salary || 0);
-    return { e, entries: mine.length, pieces, posted, party, amount, cpp: pieces ? amount / pieces : null };
+    // piece-rate staff: pieces logged this month × rate (product rate first, then default)
+    let earned = 0, unpriced = 0;
+    if (e.pay_type === 'piece') mine.forEach(w => { const r = pieceRateFor(data.pieceRates || [], w.work_type, w.product_id); if (!w.quantity) return; if (r == null) unpriced += Number(w.quantity); else earned += Number(r) * Number(w.quantity); });
+    const base = e.pay_type === 'piece' ? Math.round(earned) : Number(e.monthly_salary || 0);
+    const amount = amounts[e.id] ?? base;
+    return { e, entries: mine.length, pieces, posted, party, amount, unpriced, cpp: pieces ? amount / pieces : null };
   });
   const pending = rows.filter(r => !r.posted && Number(r.amount) > 0);
   const chosen = pending.filter(r => picked[r.e.id] !== false);
@@ -422,12 +427,12 @@ export function PayrollView({ businesses, parties, expenses, reload }) {
               <tr key={r.e.id}>
                 <td>{!r.posted && Number(r.amount) > 0 && <input type="checkbox" checked={picked[r.e.id] !== false} onChange={ev => setPicked(p => ({ ...p, [r.e.id]: ev.target.checked }))} />}</td>
                 <td style={{ fontWeight: 500 }}>{r.e.name}{!r.party && <div className="hint" style={{ color: 'var(--amber)' }}>no employee party yet</div>}</td>
-                <td className="hint">{r.e.role || '—'}</td>
+                <td className="hint">{r.e.role || '—'}{r.e.pay_type === 'piece' && <div style={{ color: 'var(--blue)' }}>per piece{r.unpriced ? ` · ${r.unpriced} pcs unpriced` : ''}</div>}</td>
                 <td className="r mono">{r.entries || '—'}</td>
                 <td className="r mono">{r.pieces || '—'}</td>
                 <td className="r">
                   {r.posted ? <span className="mono">{fmt(r.posted.amount)}</span> : (
-                    <input type="number" value={amounts[r.e.id] ?? (r.e.monthly_salary ?? '')} placeholder="0"
+                    <input type="number" value={amounts[r.e.id] ?? (r.amount || '')} placeholder="0"
                       onChange={ev => setAmounts(a => ({ ...a, [r.e.id]: ev.target.value }))}
                       title="Adjust for leave, overtime or bonus before posting"
                       style={{ width: 110, textAlign: 'right', background: 'var(--bg3)', border: '1px solid var(--border2)', color: 'var(--text)', borderRadius: 6, padding: '4px 8px', fontFamily: 'var(--mono)' }} />
@@ -435,7 +440,7 @@ export function PayrollView({ businesses, parties, expenses, reload }) {
                 </td>
                 <td className="r mono">{r.cpp ? fmt(r.cpp) : '—'}</td>
                 <td>{r.posted ? <span style={{ fontSize: 11, color: 'var(--green)' }}>✓ posted {fmtDate(r.posted.expense_date)}</span>
-                  : Number(r.amount) > 0 ? <span className="hint">not posted</span> : <span className="hint" style={{ color: 'var(--amber)' }}>no salary set</span>}</td>
+                  : Number(r.amount) > 0 ? <span className="hint">not posted</span> : <span className="hint" style={{ color: 'var(--amber)' }}>{r.e.pay_type === 'piece' ? 'no priced work' : 'no salary set'}</span>}</td>
               </tr>
             ))}
             {!rows.length && <tr><td colSpan={8}><EmptyState icon="👷" message="No active team members" sub="Add staff with a monthly salary in the operations app (Team)" /></td></tr>}
