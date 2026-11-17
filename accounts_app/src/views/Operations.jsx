@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect } from 'react';
+import { useBrandLinks, BrandLinksModal, unlinkedBrandCount } from '../components/BrandLinks.jsx';
 import { fmt, fmtDate, today, PAY_MODES, INDIAN_STATES, STATE_CODES, EXPENSE_CATEGORIES, B2CL_THRESHOLD, effectiveGstin, isGSTINValid, invoiceDue, isOverdue, getFY, fyRange } from '../lib/constants.js';
 import { saveParty, deleteParty, saveExpenseWithJournal, deleteExpense, savePayment, saveBankAccount, saveBankTxnWithJournal, deleteBankTxn, deletePayment, updateInvoiceStatus, saveInvoice, uploadExpenseAttachment, getExpenseAttachmentUrl } from '../lib/db.js';
 import { Badge, ModalShell, FG, EmptyState, StatCard, PillTabs, toast } from '../components/ui.jsx';
@@ -31,6 +32,10 @@ export function PartiesView({ parties, businesses, activeBiz, reload, invoices =
   const [typeFilter, setTypeFilter] = useState('');
   const [showModal, setShowModal] = useState(false);
   const [editData, setEditData] = useState(null);
+  const [links, refreshLinks] = useBrandLinks();
+  const [showLinks, setShowLinks] = useState(false);
+  const toLink = unlinkedBrandCount(links, parties);
+  const brandName = id => links?.ok ? links.brands.find(b => b.id === id)?.name : null;
 
   const filtered = parties.filter(p => {
     const biz = activeBiz ? p.business_id === activeBiz : true;
@@ -66,6 +71,11 @@ export function PartiesView({ parties, businesses, activeBiz, reload, invoices =
         <select value={typeFilter} onChange={e => setTypeFilter(e.target.value)}>
           <option value="">All Types</option><option value="client">Clients</option><option value="vendor">Vendors</option><option value="employee">Employees</option>
         </select>
+        {toLink != null && (
+          <button className="btn btn-ghost" onClick={() => setShowLinks(true)} title="Which client party each operations brand is billed as">
+            🔗 Brand links{toLink > 0 && <span className="tag" style={{ marginLeft: 6, color: 'var(--amber)' }}>{toLink} to link</span>}
+          </button>
+        )}
         <button className="btn btn-primary" onClick={() => { setEditData(null); setShowModal(true); }}>+ Add Party</button>
       </div>
       <div className="table-wrap">
@@ -75,7 +85,8 @@ export function PartiesView({ parties, businesses, activeBiz, reload, invoices =
             {filtered.map(p => (
               <tr key={p.id}>
                 <td style={{ fontWeight: 500 }}>{p.name}</td>
-                <td><Badge status={p.type} />{(p.brand_id || p.employee_id) && <span className="tag" style={{ marginLeft: 5 }} title={p.brand_id ? 'Synced with a brand in the operations app' : 'Synced with a team member in the operations app'}>🔗 ops</span>}</td>
+                <td><Badge status={p.type} />{p.brand_id && <span className="tag" style={{ marginLeft: 5, cursor: 'pointer' }} onClick={() => setShowLinks(true)} title="Linked to this brand in the operations app: billing details stay in sync">🔗 {brandName(p.brand_id) || 'brand'}</span>}
+                  {p.employee_id && <span className="tag" style={{ marginLeft: 5 }} title="Synced with a team member in the operations app">🔗 team</span>}</td>
                 <td className="mono" style={{ fontSize: 11 }}>{p.phone || '—'}</td>
                 <td style={{ fontSize: 11, color: 'var(--text2)' }}>{p.state || '—'}</td>
                 <td className="mono" style={{ fontSize: 10, color: p.gstin && !isGSTINValid(p.gstin) ? 'var(--red)' : 'var(--text3)' }} title={p.gstin && !isGSTINValid(p.gstin) ? 'GSTIN failed the format/checksum test' : undefined}>{p.gstin || '—'}{p.gstin && !isGSTINValid(p.gstin) ? ' ⚠' : ''}</td>
@@ -93,6 +104,7 @@ export function PartiesView({ parties, businesses, activeBiz, reload, invoices =
           </tbody>
         </table>
       </div>
+      {showLinks && <BrandLinksModal data={links} parties={parties} onClose={() => setShowLinks(false)} onChanged={async () => { await refreshLinks(); await reload(); }} />}
       {showModal && <PartyModal onClose={() => setShowModal(false)} onSave={save} businesses={businesses} parties={parties} editData={editData} activeBiz={activeBiz} defaultType={typeFilter || 'client'} />}
     </>
   );

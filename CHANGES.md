@@ -81,3 +81,18 @@ Setup: follow [MERGE_GUIDE.md](MERGE_GUIDE.md). Everything below needs both apps
 ## Fixes
 
 - Opening the app directly on a screen (e.g. `#/audit`, `#/gstr3b`) could crash it. Those screens loaded their own data before the database connection existed, which last round's URL routing made possible. The app now waits for the first data load.
+
+## Operations app in this project (latest)
+
+- **Reads from the `ops` schema.** The operations app now lives in this project in its own `ops` schema, instead of in its own Supabase project. See MERGE_GUIDE.md.
+- **New: Parties → 🔗 Brand links** to match operations brands to client parties:
+  - ★ suggested matches, with "accept all";
+  - pick or move a link;
+  - make a new party from a brand, or a new brand from a client.
+  The tag on each party shows its brand name.
+- **Production Orders:**
+  - Setup links only sure matches (same GSTIN or name), so no more duplicate parties.
+  - A "Match brands" banner shows while any brand is unlinked.
+  - Unlinked orders show "not linked: match".
+- **Party names are no longer overwritten** by the brand name. The party keeps your legal billing name.
+- **`sql/integration/000_after_restore_grants.sql` was removed.** Nothing needs restoring any more.

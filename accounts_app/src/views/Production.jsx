@@ -6,6 +6,7 @@ import { fmt, fmtDate, today, localISO, nextInvNum, monthEnd, thisMonthKey, invo
 import { saveInvoice, saveChallan, updateInvoice, updateInvoiceStatus, saveExpenseWithJournal, supabase } from '../lib/db.js';
 import { loadOpsData, setOpsBusiness, buildOrders, linesForOrder, linesForDispatches, linkShipments, applyAdvance, labourRates, monthOf, logCost, pieceRateFor } from '../lib/opsLink.js';
 import { ModalShell, EmptyState, StatCard, toast } from '../components/ui.jsx';
+import { useBrandLinks, BrandLinksModal, unlinkedBrandCount } from '../components/BrandLinks.jsx';
 import { InvoiceModal } from './Invoices.jsx';
 import { ChallanModal } from './DeliveryChallans.jsx';
 
@@ -35,13 +36,13 @@ function SetupCard({ data, businesses, onLinked }) {
       <div className="card" style={{ maxWidth: 760 }}>
         <div className="card-head">Connect the operations app</div>
         <p style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.7, marginBottom: 10 }}>
-          This screen reads orders, dispatches and staff from the Needle Point operations app. Both apps have to live in the
-          same Supabase project, with the link script run once:
+          This screen reads orders, dispatches and staff from the Needle Point operations app, which lives in this same
+          Supabase project in its own <code>ops</code> schema. To connect it (full steps in the operations app's <code>MOVE_GUIDE.md</code>):
         </p>
         <ol style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 2, paddingLeft: 20 }}>
-          <li>Move this app's <code>accounts_erp</code> schema into the operations project — steps in <code>MERGE_GUIDE.md</code>.</li>
-          <li>In that project's SQL editor run <code>sql/integration/001_link_operations.sql</code>.</li>
-          <li>Point this app's <code>VITE_SUPABASE_URL</code> / <code>VITE_SUPABASE_ANON_KEY</code> at that project and redeploy.</li>
+          <li>Run the operations app's <code>supabase/ops_install.sql</code> in this project's SQL editor.</li>
+          <li>Project Settings → API → Exposed schemas: add <code>ops</code>.</li>
+          <li>Run <code>sql/integration/001_link_operations.sql</code>, then come back here.</li>
         </ol>
         <p className="err-msg" style={{ marginTop: 10 }}>Database said: {data.error}</p>
       </div>
@@ -51,9 +52,10 @@ function SetupCard({ data, businesses, onLinked }) {
     <div className="card" style={{ maxWidth: 620 }}>
       <div className="card-head">One-time setup</div>
       <p style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.7, marginBottom: 12 }}>
-        Which business makes the garments? Every brand in the operations app becomes a client party of this business
-        (an existing party with the same name is reused), every team member becomes an employee party, and they stay in
-        sync from then on — GSTIN, state and address edited in either app update the other.
+        Which business makes the garments? Brands in the operations app are matched to this business's client parties
+        (same GSTIN, or the same name ignoring "Pvt Ltd" etc.). Anything unsure is left for you to match on the next
+        screen, so no duplicate parties. Team members become employee parties. Linked pairs stay in sync: GSTIN, state
+        and address edited in either app update the other.
       </p>
       <div style={{ display: 'flex', gap: 8 }}>
         <select value={biz} onChange={e => setBiz(e.target.value)} style={{ flex: 1, background: 'var(--bg3)', border: '1px solid var(--border2)', color: 'var(--text)', borderRadius: 'var(--r)', padding: '7px 10px' }}>
@@ -61,7 +63,11 @@ function SetupCard({ data, businesses, onLinked }) {
         </select>
         <button className="btn btn-primary" disabled={!biz || busy} onClick={async () => {
           setBusy(true);
-          try { const n = await setOpsBusiness(biz); toast(`Linked — ${n} brands and staff are now parties`, 'success'); await onLinked(); }
+          try {
+            const r = await setOpsBusiness(biz);
+            toast(r.to_review ? `${r.linked} brand${r.linked === 1 ? '' : 's'} linked to existing clients. ${r.to_review} left for you to match` : `All ${r.linked} brands linked`, 'success', 6000);
+            await onLinked(r);
+          }
           catch (e) { toast(e.message, 'error'); }
           setBusy(false);
         }}>{busy ? 'Linking…' : 'Link brands & staff'}</button>
@@ -77,6 +83,9 @@ export function ProductionOrdersView({ businesses, parties, invoices, payments, 
   const [search, setSearch] = useState('');
   const [openKey, setOpenKey] = useState(null);
   const [modal, setModal] = useState(null); // { kind, order, prefill?, editData?, shipIds?, isProforma? }
+  const [links, refreshLinks] = useBrandLinks();
+  const [showLinks, setShowLinks] = useState(false);
+  const toLink = unlinkedBrandCount(links, parties);
 
   const opsBiz = data?.ok ? data.settings?.ops_business_id : null;
   const orders = useMemo(() => data?.ok ? buildOrders(data, { invoices, payments, challans }) : [], [data, invoices, payments, challans]);
@@ -85,7 +94,7 @@ export function ProductionOrdersView({ businesses, parties, invoices, payments, 
   const partyFor = o => parties.find(p => p.business_id === opsBiz && p.brand_id && p.brand_id === o.brand_id);
   const paysBy = useMemo(() => { const m = {}; payments.forEach(p => { (m[p.invoice_id] ||= []).push(p); }); return m; }, [payments]);
 
-  if (!data || !data.ok || !opsBiz) return <SetupCard data={data} businesses={businesses} onLinked={async () => { await refreshOps(); reload(); }} />;
+  if (!data || !data.ok || !opsBiz) return <SetupCard data={data} businesses={businesses} onLinked={async r => { await refreshOps(); await refreshLinks(); await reload(); if (r?.to_review) setShowLinks(true); }} />;
 
   const refreshAll = async () => { await refreshOps(); reload(); };
   const q = search.trim().toLowerCase();
@@ -193,6 +202,12 @@ export function ProductionOrdersView({ businesses, parties, invoices, payments, 
         <StatCard label="Invoiced, awaiting payment" value={fmt(awaiting)} color="red" sub="across production orders" />
         <StatCard label="Advances held" value={fmt(advances)} color="blue" sub="on open proformas" />
       </div>
+      {toLink > 0 && (
+        <div className="info-banner" style={{ color: 'var(--amber)', borderColor: '#3a2800', background: '#1a1000', display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ flex: 1 }}>{toLink} brand{toLink === 1 ? " isn't" : "s aren't"} linked to a client party yet, so their orders can't be billed.</span>
+          <button className="btn btn-sm btn-primary" onClick={() => setShowLinks(true)}>🔗 Match brands</button>
+        </div>
+      )}
 
       <div className="filter-bar">
         <input placeholder="Search PO, brand, garment, style code…" value={search} onChange={e => setSearch(e.target.value)} />
@@ -216,7 +231,7 @@ export function ProductionOrdersView({ businesses, parties, invoices, payments, 
                       <div className="mono" style={{ color: 'var(--accent)' }}>{o.po_number || 'No PO'}</div>
                       <div className="hint" style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{o.lines.map(l => l.product.name).join(', ')}</div>
                     </td>
-                    <td>{o.brand?.name || '—'}{!partyFor(o) && <div className="hint" style={{ color: 'var(--amber)' }}>not linked</div>}</td>
+                    <td>{o.brand?.name || '—'}{!partyFor(o) && <div className="hint" style={{ color: 'var(--amber)', textDecoration: 'underline', cursor: 'pointer' }} onClick={e => { e.stopPropagation(); setShowLinks(true); }}>not linked: match</div>}</td>
                     <td className="r mono">{o.ordered}</td>
                     <td className="r mono">{o.dispatched || '—'}{o.toInvoiceQty > 0 && <div style={{ fontSize: 10, color: 'var(--amber)' }}>{o.toInvoiceQty} to invoice</div>}</td>
                     <td className="r mono">{o.invoicedQty || '—'}</td>
@@ -233,6 +248,7 @@ export function ProductionOrdersView({ businesses, parties, invoices, payments, 
         </div>
       )}
 
+      {showLinks && <BrandLinksModal data={links} parties={parties} onClose={() => setShowLinks(false)} onChanged={async () => { await refreshLinks(); await reload(); }} />}
       {open && !modal && (
         <OrderDetail order={open} biz={biz} party={partyFor(open)} rates={rates} pieceRates={data.pieceRates || []} employees={data.employees} workLogs={data.workLogs} invoices={invoices} expenses={expenses} paysBy={paysBy}
           onClose={() => setOpenKey(null)}
@@ -272,7 +288,7 @@ function OrderDetail({ order: o, biz, party, rates, pieceRates, employees, workL
 
   return (
     <ModalShell size="modal-xl" onClose={onClose} title={<>{po || 'Order'} · {o.brand?.name || '—'} <span style={{ fontSize: 12, color: STATUS[o.status].color, marginLeft: 8 }}>● {STATUS[o.status].label}</span></>}>
-      {!party && <div className="info-banner" style={{ color: 'var(--amber)', borderColor: '#3a2800', background: '#1a1000' }}>This brand isn't linked to a party yet. Open the brand in the operations app and save it once (add its GSTIN and state while you're there).</div>}
+      {!party && <div className="info-banner" style={{ color: 'var(--amber)', borderColor: '#3a2800', background: '#1a1000' }}>This brand isn't linked to a client party yet. Link it in Parties → 🔗 Brand links (or "Match brands" on the orders list), then bill this order.</div>}
 
       <div className="table-wrap" style={{ marginBottom: 14 }}>
         <table>

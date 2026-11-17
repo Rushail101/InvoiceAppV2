@@ -1,11 +1,11 @@
-// opsLink.js — reads the Needle Point operations app's tables (public schema:
+// opsLink.js — reads the Needle Point operations app's tables (`ops` schema:
 // brands, products, product_sizes, shipments, employees, work_logs) from the
 // SAME Supabase project and connects them to accounting documents.
 // Needs sql/integration/001_link_operations.sql. See MERGE_GUIDE.md.
 import { supabase } from './db.js';
 import { guessHSN } from './constants.js';
 
-const ops = () => supabase.schema('public');
+const ops = () => supabase.schema('ops');
 
 // Must match accounts_erp.ops_order_key() in the SQL and the operations app.
 export function orderKeyOf(product) {
@@ -47,10 +47,63 @@ export async function loadOpsData() {
   }
 }
 
+// Returns { linked, to_review }: brands linked to a party automatically (same
+// GSTIN / same name) and brands left for you in Parties → Brand links.
 export async function setOpsBusiness(businessId) {
   const { data, error } = await supabase.rpc('set_ops_business', { biz: businessId });
   if (error) throw new Error(`Linking failed: ${error.message}`);
+  return typeof data === 'number' ? { linked: data, to_review: 0 } : data;
+}
+
+// ── Brand ⇄ party links ──────────────────────────────────────────────────
+// Everything Parties → Brand links needs. ok:false when the ops schema or the
+// link SQL isn't there yet.
+export async function loadBrandLinks() {
+  const [b, s] = await Promise.all([
+    ops().from('brands').select('id,name,gstin,state,contact_phone,email,billing_address,logo_url').order('name'),
+    supabase.from('integration_settings').select('ops_business_id').eq('id', 1).maybeSingle(),
+  ]);
+  if (b.error || s.error) return { ok: false, error: (b.error || s.error).message };
+  return { ok: true, brands: b.data || [], opsBiz: s.data?.ops_business_id || null };
+}
+
+async function linkRpc(fn, args, what) {
+  const { data, error } = await supabase.rpc(fn, args);
+  if (error) throw new Error(`${what}: ${error.message}`);
   return data;
+}
+export const linkBrandParty      = (brandId, partyId) => linkRpc('link_brand_party', { p_brand: brandId, p_party: partyId }, "Couldn't link");
+export const unlinkBrand         = (brandId) => linkRpc('unlink_brand', { p_brand: brandId }, "Couldn't unlink");
+export const createPartyForBrand = (brandId) => linkRpc('create_party_for_brand', { p_brand: brandId }, "Couldn't create the party");
+export const createBrandFromParty = (partyId, name) => linkRpc('create_brand_from_party', { p_party: partyId, p_brand_name: name || null }, "Couldn't create the brand");
+
+// Same rule as accounts_erp.norm_name(): "Cayani Apparel Pvt. Ltd." ≈ "cayani apparel".
+const STOP = /\b(pvt|private|ltd|limited|llp|inc|co|company|the|and|india|opc)\b/g;
+export const normName = t => String(t || '').toLowerCase().replace(STOP, ' ').replace(/[^a-z0-9]/g, '');
+const words = t => String(t || '').toLowerCase().replace(STOP, ' ').split(/[^a-z0-9]+/).filter(w => w.length > 1);
+
+// Best guess at which (unlinked) client party a brand is. score: 100 = same
+// GSTIN, 90 = same name, 70 = one name contains the other, ≥50 = shared words.
+export function suggestParty(brand, candidates) {
+  let best = null;
+  const bn = normName(brand.name), bw = new Set(words(brand.name));
+  for (const p of candidates) {
+    let score = 0, why = '';
+    if (brand.gstin && p.gstin && brand.gstin.toUpperCase() === p.gstin.toUpperCase()) { score = 100; why = 'same GSTIN'; }
+    else {
+      const pn = normName(p.name);
+      if (bn && pn === bn) { score = 90; why = 'same name'; }
+      else if (bn.length >= 4 && pn.length >= 4 && (pn.includes(bn) || bn.includes(pn))) { score = 70; why = 'similar name'; }
+      else {
+        const pw = new Set(words(p.name)); const common = [...bw].filter(w => pw.has(w)).length;
+        const j = common / Math.max(1, new Set([...bw, ...pw]).size);
+        if (j >= 0.5) { score = Math.round(50 + 20 * j); why = 'similar name'; }
+      }
+      if (score && brand.gstin && p.gstin) score = 0;   // both have GSTINs and they differ → not the same client
+    }
+    if (score > (best?.score || 0)) best = { party: p, score, why };
+  }
+  return best;
 }
 
 export async function linkShipments(ids, patch) {
