@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import { FONTS, CSS, today, getFY, fyRange, invoiceDue, isOverdue } from './lib/constants.js';
-import { initSupabase, loadCore, loadHeavy, saveBusiness, deleteBusiness } from './lib/db.js';
+import { initSupabase, loadCore, loadHeavy, saveBusiness } from './lib/db.js';
+import { setOpsBusiness } from './lib/opsLink.js';
 import { InvoicesView } from './views/Invoices.jsx';
 import { PartiesView, ExpensesView, PaymentsView, ARLedgerView, APLedgerView } from './views/Operations.jsx';
 import { PartyStatementView, PaymentListView, ExportView, TDSView } from './views/ExtraViews.jsx';
@@ -56,7 +57,7 @@ const NAV = [
   { id: 'gstr3b',      label: 'GSTR-3B',           icon: '🧮', group: 'GST', keys: 'gst return itc' },
   { id: 'parties',     label: 'Parties',           icon: '👥', group: 'Masters', keys: 'clients customers vendors suppliers' },
   { id: 'items',       label: 'Item Master',       icon: '📦', group: 'Masters', keys: 'products catalog hsn' },
-  { id: 'businesses',  label: 'Businesses',        icon: '🏢', group: 'Settings', keys: 'company gstin' },
+  { id: 'businesses',  label: 'Business profile',  icon: '🏢', group: 'Settings', keys: 'company gstin bank logo needle point' },
   { id: 'audit',       label: 'Audit Trail',       icon: '🛡', group: 'Settings', keys: 'log history' },
   { id: 'export',      label: 'Export Data',       icon: '↓',  group: 'Settings', keys: 'csv excel download' },
   { id: 'sqlsetup',    label: 'SQL Setup',         icon: '⚙',  group: 'Settings', keys: 'schema migration database' },
@@ -223,51 +224,83 @@ function BizModal({ biz, onClose, onSave }) {
   );
 }
 
-// ─── BUSINESSES VIEW ──────────────────────────────────────────────────────────
-function BusinessesView({ businesses, reload }) {
-  const [modal, setModal] = useState(false);
-  const [editBiz, setEditBiz] = useState(null);
+// ─── ONE BUSINESS: NEEDLE POINT ──────────────────────────────────────────────
+// The app runs a single business. It's the one the operations link points at;
+// failing that, the one called Needle Point; failing that, the first one.
+// Any other businesses in the database stay there untouched, just hidden.
+function pickHomeBusiness(businesses, opsBizId) {
+  if (!businesses?.length) return null;
+  return businesses.find(b => b.id === opsBizId)
+    || businesses.find(b => /needle\s*point/i.test(b.name || ''))
+    || businesses[0];
+}
 
-  async function handleSave(data, id) { await saveBusiness(data, id); reload(); }
-  async function handleDelete(id) {
-    if (!confirm('Delete this business and ALL its data? Cannot be undone.')) return;
-    await deleteBusiness(id); reload();
+// Only the home business's records reach the screens. Rows with no business
+// (shared defaults such as a common chart of accounts) are kept. Child tables
+// follow their parent: bank lines → bank accounts, journal lines → entries,
+// invoice lines → invoices, bank links → bank lines.
+function scopeToBusiness(data, home) {
+  if (!home || data.businesses.length <= 1) return { ...data, businesses: home ? [home] : [] };
+  const mine = r => !r.business_id || r.business_id === home.id;
+  const out = { ...data, businesses: [home] };
+  for (const k of ['invoices', 'parties', 'expenses', 'payments', 'accounts', 'bankAccounts', 'items', 'challans', 'creditNotes', 'debitNotes', 'journalEntries']) {
+    out[k] = (data[k] || []).filter(mine);
   }
+  const bankIds = new Set(out.bankAccounts.map(b => b.id));
+  out.bankTransactions = (data.bankTransactions || []).filter(t => !t.bank_account_id || bankIds.has(t.bank_account_id));
+  const txnIds = new Set(out.bankTransactions.map(t => t.id));
+  out.bankLinks = (data.bankLinks || []).filter(l => txnIds.has(l.bank_txn_id));
+  const entryIds = new Set(out.journalEntries.map(e => e.id));
+  out.journalLines = (data.journalLines || []).filter(l => !l.journal_id || entryIds.has(l.journal_id));
+  const invIds = new Set(out.invoices.map(i => i.id));
+  out.invoiceItems = (data.invoiceItems || []).filter(it => invIds.has(it.invoice_id));
+  return out;
+}
 
+// ─── BUSINESS PROFILE ─────────────────────────────────────────────────────────
+function BusinessProfileView({ home, hiddenCount, reload }) {
+  const [modal, setModal] = useState(false);
+  async function handleSave(data, id) { await saveBusiness(data, id); reload(); }
+  const row = (label, value, warn) => (
+    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '9px 0', borderBottom: '1px solid var(--border)' }}>
+      <span style={{ color: 'var(--text3)', fontSize: 12 }}>{label}</span>
+      <span style={{ fontSize: 13, textAlign: 'right', color: warn ? 'var(--red)' : 'var(--text)' }}>{value}</span>
+    </div>
+  );
+  if (!home) return (
+    <div className="card" style={{ maxWidth: 560 }}>
+      <div className="card-title">Set up your business</div>
+      <p style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.7, marginBottom: 14 }}>
+        Add Needle Point's details once: name, GSTIN, home state (for the CGST/SGST split), address, bank and UPI.
+        They appear on every invoice, proforma and challan.
+      </p>
+      <button className="btn btn-primary" onClick={() => setModal(true)}>Add business details</button>
+      {modal && <BizModal biz={{ name: 'Needle Point' }} onClose={() => setModal(false)} onSave={(d) => handleSave(d, null)} />}
+    </div>
+  );
   return (
-    <>
-      <div className="filter-bar">
-        <button className="btn btn-primary" onClick={() => { setEditBiz(null); setModal(true); }}>+ Add Business</button>
+    <div className="card" style={{ maxWidth: 640 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 10 }}>
+        {home.logo_url && <img src={home.logo_url} alt="" style={{ width: 48, height: 48, objectFit: 'contain', borderRadius: 8, background: '#fff' }} />}
+        <div style={{ flex: 1 }}>
+          <div style={{ fontFamily: 'var(--display, inherit)', fontSize: 20, fontWeight: 700 }}>{home.name}</div>
+          <div className="hint">These details print on every invoice, proforma and challan.</div>
+        </div>
+        <button className="btn btn-primary" onClick={() => setModal(true)}>⚙ Edit details</button>
       </div>
-      <div className="table-wrap">
-        <table>
-          <thead><tr><th>Name</th><th>Home State</th><th>GSTIN</th><th>Phone</th><th>UPI</th><th>Actions</th></tr></thead>
-          <tbody>
-            {businesses.map(b => (
-              <tr key={b.id}>
-                <td style={{ fontWeight: 600 }}>{b.name}</td>
-                <td style={{ fontSize: 11 }}>
-                  {b.state || <span style={{ color: 'var(--red)', fontSize: 10, fontFamily: 'var(--mono)' }}>⚠ Not set — GST split disabled</span>}
-                </td>
-                <td className="mono" style={{ fontSize: 11 }}>{b.gstin || '—'}</td>
-                <td style={{ fontSize: 12 }}>{b.phone || '—'}</td>
-                <td className="mono" style={{ fontSize: 11, color: 'var(--text3)' }}>{b.upi_id || '—'}</td>
-                <td>
-                  <div style={{ display: 'flex', gap: 5 }}>
-                    <button className="btn btn-ghost btn-sm" onClick={() => { setEditBiz(b); setModal(true); }}>⚙ Edit</button>
-                    <button className="btn btn-danger btn-sm" onClick={() => handleDelete(b.id)}>Del</button>
-                  </div>
-                </td>
-              </tr>
-            ))}
-            {businesses.length === 0 && (
-              <tr><td colSpan={6}><EmptyState icon="🏢" message="No businesses yet" sub='Click "+ Add Business" to get started' /></td></tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-      {modal && <BizModal biz={editBiz} onClose={() => setModal(false)} onSave={handleSave} />}
-    </>
+      {row('GSTIN', home.gstin || '—')}
+      {row('Home state', home.state || '⚠ Not set — CGST/SGST can\'t be split', !home.state)}
+      {row('Address', home.address || '—')}
+      {row('Phone / email', [home.phone, home.email].filter(Boolean).join(' · ') || '—')}
+      {row('Bank', [home.bank_name, home.bank_account, home.ifsc_code].filter(Boolean).join(' · ') || '—')}
+      {row('UPI', home.upi_id || '—')}
+      {hiddenCount > 0 && (
+        <p className="hint" style={{ marginTop: 12 }}>
+          {hiddenCount} other business{hiddenCount === 1 ? ' is' : 'es are'} saved in the database from before. {hiddenCount === 1 ? 'It\'s' : 'They\'re'} hidden here, and {hiddenCount === 1 ? 'its' : 'their'} data is kept untouched.
+        </p>
+      )}
+      {modal && <BizModal biz={home} onClose={() => setModal(false)} onSave={handleSave} />}
+    </div>
   );
 }
 
@@ -685,8 +718,10 @@ export default function App() {
   // One-shot instruction for the next screen (e.g. dashboard "+ New Invoice" or "View overdue").
   const [pendingAction, setPendingAction] = useState(null);
   const startAction = useCallback((v, action) => { setPendingAction({ view: v, ...action, at: Date.now() }); setView(v); }, [setView]);
-  const [activeBiz, setActiveBizState] = useState(() => { try { return localStorage.getItem('np_active_biz') || ''; } catch (_) { return ''; } });
-  const setActiveBiz = v => { setActiveBizState(v); try { localStorage.setItem('np_active_biz', v); } catch (_) {} };
+  // This app runs one business: Needle Point. Which row that is comes from the
+  // operations link (integration_settings) — see pickHomeBusiness below.
+  const [opsBizId, setOpsBizId] = useState(undefined);   // undefined = not checked yet, null = not linked
+  const autoLinked = useRef(false);
   const [navQuery, setNavQuery] = useState('');
   const navSearchRef = useRef(null);
   const [collapsedGroups, setCollapsedGroups] = useState(() => { try { return JSON.parse(localStorage.getItem('np_nav_collapsed') || '{}'); } catch (_) { return {}; } });
@@ -796,12 +831,32 @@ export default function App() {
       ]);
       setData(d => ({ ...d, ...core }));
       coreLoaded.current = true;
+      const { data: integ, error: integErr } = await client.from('integration_settings').select('ops_business_id').eq('id', 1).maybeSingle();
+      setOpsBizId(integErr ? null : (integ?.ops_business_id || null));
     } catch (e) { console.error('Load error:', e); toast(`Couldn't load data: ${e.message || e}`, 'error'); }
     setCoreReady(true);
     if (first) setCoreLoading(false); else setRefreshing(false);
   }, [client, loadGroup]);
 
   useEffect(() => { if (client && authed) reload(); }, [client, authed, reload]);
+
+  // Link Needle Point with the operations app on its own — no setup screen.
+  // Runs once, only when the link isn't set yet and the ops tables are there.
+  useEffect(() => {
+    if (!client || !authed || opsBizId !== null || autoLinked.current) return;
+    const homeNow = pickHomeBusiness(data.businesses, null);
+    if (!homeNow) return;
+    autoLinked.current = true;
+    (async () => {
+      const probe = await client.schema('ops').from('brands').select('id', { head: true, count: 'exact' });
+      if (probe.error) return;                     // operations app not installed here
+      try {
+        const r = await setOpsBusiness(homeNow.id);
+        toast(r.to_review ? `Linked with the operations app. ${r.to_review} brand${r.to_review === 1 ? '' : 's'} to match in Parties → Brand links` : 'Linked with the operations app', 'success', 6000);
+        reload();
+      } catch (e) { console.warn('auto-link', e); }
+    })();
+  }, [client, authed, opsBizId, data.businesses]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const viewNeeds = VIEW_NEEDS[view] || [];
   useEffect(() => { if (client && authed && viewNeeds.length) ensureGroups(viewNeeds); }, [view, client, authed]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -816,9 +871,12 @@ export default function App() {
 
   if (!authed) return <><style>{FONTS}{CSS}</style><LoginScreen onLogin={handleLogin} client={client} /></>;
 
+  const home = pickHomeBusiness(data.businesses, opsBizId);
+  const activeBiz = home?.id || '';
+  const hiddenBusinesses = home ? data.businesses.length - 1 : 0;
   const { businesses, invoices, parties, expenses, payments,
     accounts, journalEntries, journalLines, creditNotes, debitNotes,
-    bankAccounts, bankTransactions, items, challans, invoiceItems, bankLinks, bankLinksReady, bankLinksError } = data;
+    bankAccounts, bankTransactions, items, challans, invoiceItems, bankLinks, bankLinksReady, bankLinksError } = scopeToBusiness(data, home);
 
   // true while the first load runs, or while this screen's big tables are still being fetched
   const loading = (dbConfigured && !coreReady) || coreLoading || !viewNeeds.every(g => heavyReady[g]);
@@ -853,14 +911,7 @@ export default function App() {
         <aside className={`sidebar${mobileNavOpen ? ' open' : ''}`}>
           <div className="sidebar-logo">
             <h1>Accounts</h1>
-            <p>{businesses.find(b => b.id === activeBiz)?.name || 'All Businesses'}</p>
-          </div>
-          <div className="sidebar-biz">
-            <label>Business</label>
-            <select className="biz-select" value={activeBiz} onChange={e => setActiveBiz(e.target.value)}>
-              <option value="">All Businesses</option>
-              {businesses.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
-            </select>
+            <p>{home?.name || 'Set up your business'}</p>
           </div>
           <div className="nav-search">
             <span className="ico">⌕</span>
@@ -911,6 +962,12 @@ export default function App() {
             </div>
           </div>
           <div className="content">
+            {!loading && !home && view !== 'businesses' && (
+              <div className="info-banner" style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+                <span style={{ flex: 1 }}>Add Needle Point's details (GSTIN, state, bank) before making invoices.</span>
+                <button className="btn btn-sm btn-primary" onClick={() => setView('businesses')}>Set up</button>
+              </div>
+            )}
             {loading && <div className="loading">Loading data…</div>}
 
             {!loading && view === 'dashboard' && (
@@ -1020,7 +1077,7 @@ export default function App() {
             {!loading && view === 'gstr3b' && <GSTR3BView activeBiz={activeBiz} businesses={businesses} invoices={invoices} creditNotes={creditNotes} reload={reload} />}
             {!loading && view === 'audit' && <AuditTrailView activeBiz={activeBiz} />}
             {!loading && view === 'kpis' && <KPIDashboard activeBiz={activeBiz} invoices={invoices} expenses={expenses} payments={payments} parties={parties} creditNotes={creditNotes} />}
-            {!loading && view === 'businesses' && <BusinessesView businesses={businesses} reload={reload} />}
+            {!loading && view === 'businesses' && <BusinessProfileView home={home} hiddenCount={hiddenBusinesses} reload={reload} />}
             {!loading && view === 'sqlsetup' && <SqlSetupView invoices={invoices} payments={payments} />}
           </div>
         </div>

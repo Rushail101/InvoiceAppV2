@@ -58,7 +58,7 @@ export function BrandLinksModal({ data, parties, onClose, onChanged }) {
   );
   if (!opsBiz) return (
     <ModalShell title="Brand links" onClose={onClose}>
-      <p style={{ fontSize: 13, color: 'var(--text2)' }}>First pick which business makes the garments: Production → Production Orders → One-time setup.</p>
+      <p style={{ fontSize: 13, color: 'var(--text2)' }}>Not linked with the operations app yet. It links on its own when the app opens; or use Production Orders → Link now.</p>
     </ModalShell>
   );
 

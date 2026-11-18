@@ -141,7 +141,7 @@ export function CreditNoteModal({ onClose, onSave, businesses, parties, invoices
       <div className="cn-banner">🔄 A Credit Note reduces the amount due on an invoice — used for returns, price corrections, or goodwill adjustments.{initialItems?.length ? ' Lines are copied from the invoice — reduce the quantities to what is being credited and remove the rest.' : ''}</div>
 
       <div className="form-row cols-3">
-        <FG label="Business"><select value={f.business_id} onChange={e => setF(x => ({ ...x, business_id: e.target.value, party_id: '', invoice_id: '' }))}>{businesses.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></FG>
+        {businesses.length > 1 && <FG label="Business"><select value={f.business_id} onChange={e => setF(x => ({ ...x, business_id: e.target.value, party_id: '', invoice_id: '' }))}>{businesses.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></FG>}
         <FG label="CN Number"><input value={f.cn_number} onChange={e => setF(x => ({ ...x, cn_number: e.target.value }))} /></FG>
         <FG label="Date"><input type="date" value={f.cn_date} onChange={e => setF(x => ({ ...x, cn_date: e.target.value }))} /></FG>
       </div>

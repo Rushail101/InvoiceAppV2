@@ -138,11 +138,11 @@ function AccountModal({ onClose, onSave, editData, businesses, activeBiz }) {
             {(subGroups[f.group] || []).map(s => <option key={s} value={s}>{s}</option>)}
           </select>
         </FG>
-        <FG label="Business">
+        {businesses.length > 1 && <FG label="Business">
           <select value={f.business_id} onChange={e => setF(x => ({ ...x, business_id: e.target.value }))}>
             {businesses.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
           </select>
-        </FG>
+        </FG>}
       </div>
       <FG label="Description"><textarea value={f.description} onChange={e => setF(x => ({ ...x, description: e.target.value }))} /></FG>
       {(f.group === 'asset' || f.group === 'liability') && !f.sub_group && <p className="warn-msg">Pick a sub-group so it lands in the right Balance Sheet section (blank counts as Current).</p>}
@@ -562,7 +562,7 @@ function JournalModal({ onClose, onSave, accounts, businesses, activeBiz, mode =
       </>}>
       <div onKeyDown={onModalKeyDown}>
         <div className="form-row cols-3">
-          <FG label="Business"><select value={f.business_id} onChange={e => setF(x => ({ ...x, business_id: e.target.value }))}>{businesses.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></FG>
+          {businesses.length > 1 && <FG label="Business"><select value={f.business_id} onChange={e => setF(x => ({ ...x, business_id: e.target.value }))}>{businesses.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></FG>}
           <FG label="Date"><input type="date" value={f.entry_date} onChange={e => setF(x => ({ ...x, entry_date: e.target.value }))} /></FG>
           <FG label="Reference / Voucher No."><input value={f.reference} onChange={e => setF(x => ({ ...x, reference: e.target.value }))} placeholder="JV-001" /></FG>
         </div>

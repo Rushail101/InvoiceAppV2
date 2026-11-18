@@ -28,7 +28,6 @@ function useOps() {
 }
 
 function SetupCard({ data, businesses, onLinked }) {
-  const [biz, setBiz] = useState(businesses.find(b => /needle/i.test(b.name))?.id || businesses[0]?.id || '');
   const [busy, setBusy] = useState(false);
   if (!data) return <div className="loading">Loading production data…</div>;
   if (!data.ok) {
@@ -48,30 +47,32 @@ function SetupCard({ data, businesses, onLinked }) {
       </div>
     );
   }
+  // Normally linked automatically when the app opens; this only shows if that
+  // couldn't happen (e.g. no business details yet, or no permission).
+  const home = businesses[0];
   return (
     <div className="card" style={{ maxWidth: 620 }}>
-      <div className="card-head">One-time setup</div>
-      <p style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.7, marginBottom: 12 }}>
-        Which business makes the garments? Brands in the operations app are matched to this business's client parties
-        (same GSTIN, or the same name ignoring "Pvt Ltd" etc.). Anything unsure is left for you to match on the next
-        screen, so no duplicate parties. Team members become employee parties. Linked pairs stay in sync: GSTIN, state
-        and address edited in either app update the other.
-      </p>
-      <div style={{ display: 'flex', gap: 8 }}>
-        <select value={biz} onChange={e => setBiz(e.target.value)} style={{ flex: 1, background: 'var(--bg3)', border: '1px solid var(--border2)', color: 'var(--text)', borderRadius: 'var(--r)', padding: '7px 10px' }}>
-          {businesses.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
-        </select>
-        <button className="btn btn-primary" disabled={!biz || busy} onClick={async () => {
-          setBusy(true);
-          try {
-            const r = await setOpsBusiness(biz);
-            toast(r.to_review ? `${r.linked} brand${r.linked === 1 ? '' : 's'} linked to existing clients. ${r.to_review} left for you to match` : `All ${r.linked} brands linked`, 'success', 6000);
-            await onLinked(r);
-          }
-          catch (e) { toast(e.message, 'error'); }
-          setBusy(false);
-        }}>{busy ? 'Linking…' : 'Link brands & staff'}</button>
-      </div>
+      <div className="card-head">Link with the operations app</div>
+      {!home ? (
+        <p style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.7 }}>Add your business details first (Settings → Business profile). The link then happens on its own.</p>
+      ) : (
+        <>
+          <p style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.7, marginBottom: 12 }}>
+            Connect <b>{home.name}</b> with the operations app: brands are matched to your client parties (same GSTIN, or the same name
+            ignoring "Pvt Ltd" etc.), anything unsure is left for you to match, and team members become employee parties.
+          </p>
+          <button className="btn btn-primary" disabled={busy} onClick={async () => {
+            setBusy(true);
+            try {
+              const r = await setOpsBusiness(home.id);
+              toast(r.to_review ? `Linked. ${r.to_review} brand${r.to_review === 1 ? '' : 's'} to match` : 'Linked', 'success', 6000);
+              await onLinked(r);
+            }
+            catch (e) { toast(e.message, 'error'); }
+            setBusy(false);
+          }}>{busy ? 'Linking…' : 'Link now'}</button>
+        </>
+      )}
     </div>
   );
 }

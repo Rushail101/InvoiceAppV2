@@ -147,7 +147,7 @@ export function DebitNoteModal({ onClose, onSave, businesses, parties, invoices,
       </div>
 
       <div className="form-row cols-3">
-        <FG label="Business"><select value={f.business_id} onChange={e => setF(x => ({ ...x, business_id: e.target.value }))}>{businesses.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></FG>
+        {businesses.length > 1 && <FG label="Business"><select value={f.business_id} onChange={e => setF(x => ({ ...x, business_id: e.target.value }))}>{businesses.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></FG>}
         <FG label="DN Number"><input value={f.dn_number} onChange={e => setF(x => ({ ...x, dn_number: e.target.value }))} /></FG>
         <FG label="Date"><input type="date" value={f.dn_date} onChange={e => setF(x => ({ ...x, dn_date: e.target.value }))} /></FG>
       </div>

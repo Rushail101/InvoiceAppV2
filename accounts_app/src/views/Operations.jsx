@@ -80,7 +80,7 @@ export function PartiesView({ parties, businesses, activeBiz, reload, invoices =
       </div>
       <div className="table-wrap">
         <table>
-          <thead><tr><th>Name</th><th>Type</th><th>Phone</th><th>State</th><th>GSTIN</th><th>Business</th><th className="r">Outstanding</th><th>Actions</th></tr></thead>
+          <thead><tr><th>Name</th><th>Type</th><th>Phone</th><th>State</th><th>GSTIN</th>{businesses.length > 1 && <th>Business</th>}<th className="r">Outstanding</th><th>Actions</th></tr></thead>
           <tbody>
             {filtered.map(p => (
               <tr key={p.id}>
@@ -90,7 +90,7 @@ export function PartiesView({ parties, businesses, activeBiz, reload, invoices =
                 <td className="mono" style={{ fontSize: 11 }}>{p.phone || '—'}</td>
                 <td style={{ fontSize: 11, color: 'var(--text2)' }}>{p.state || '—'}</td>
                 <td className="mono" style={{ fontSize: 10, color: p.gstin && !isGSTINValid(p.gstin) ? 'var(--red)' : 'var(--text3)' }} title={p.gstin && !isGSTINValid(p.gstin) ? 'GSTIN failed the format/checksum test' : undefined}>{p.gstin || '—'}{p.gstin && !isGSTINValid(p.gstin) ? ' ⚠' : ''}</td>
-                <td style={{ fontSize: 11, color: 'var(--text3)' }}>{businesses.find(b => b.id === p.business_id)?.name || '—'}</td>
+                {businesses.length > 1 && <td style={{ fontSize: 11, color: 'var(--text3)' }}>{businesses.find(b => b.id === p.business_id)?.name || '—'}</td>}
                 <td className="r mono" style={{ fontSize: 11.5, color: balByParty[p.id] > 0.01 ? (p.type === 'vendor' ? 'var(--red)' : 'var(--amber)') : 'var(--text3)' }}>{balByParty[p.id] > 0.01 ? fmt(balByParty[p.id]) : '—'}</td>
                 <td>
                   <div style={{ display: 'flex', gap: 4 }}>
@@ -163,7 +163,7 @@ function PartyModal({ onClose, onSave, businesses, parties = [], editData, activ
     <ModalShell title={editData ? 'Edit Party' : 'Add Party'} onClose={onClose}
       foot={<><button className="btn btn-ghost" onClick={onClose}>Cancel</button><button className="btn btn-primary" onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button></>}>
       <div className="form-row cols-2">
-        <FG label="Business"><select value={f.business_id} onChange={e => setF(x => ({ ...x, business_id: e.target.value }))}>{businesses.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></FG>
+        {businesses.length > 1 && <FG label="Business"><select value={f.business_id} onChange={e => setF(x => ({ ...x, business_id: e.target.value }))}>{businesses.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></FG>}
         <FG label="Type"><select value={f.type} onChange={e => setF(x => ({ ...x, type: e.target.value }))}><option value="client">Client</option><option value="vendor">Vendor</option><option value="employee">Employee</option></select></FG>
       </div>
       <div className="form-row"><FG label="Name *"><input autoFocus value={f.name} onChange={e => setF(x => ({ ...x, name: e.target.value }))} /></FG></div>
@@ -537,7 +537,7 @@ function ExpenseModal({ onClose, onSave, businesses, parties, activeBiz, expense
     <ModalShell title="Add Expense" onClose={onClose}
       foot={<><button className="btn btn-ghost" onClick={onClose}>Cancel</button><button className="btn btn-primary" onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button></>}>
       <div className="form-row cols-2">
-        <FG label="Business"><select value={f.business_id} onChange={e => setF(x => ({ ...x, business_id: e.target.value, vendor_id: '' }))}>{businesses.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></FG>
+        {businesses.length > 1 && <FG label="Business"><select value={f.business_id} onChange={e => setF(x => ({ ...x, business_id: e.target.value, vendor_id: '' }))}>{businesses.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></FG>}
         <FG label="Category *"><select value={f.category} onChange={e => setF(x => ({ ...x, category: e.target.value }))}><option value="">Select…</option>{EXPENSE_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}</select></FG>
       </div>
       <div className="form-row cols-2">
@@ -689,7 +689,7 @@ function BankModal({ onClose, onSave, businesses, activeBiz }) {
       </div>
       <div className="form-row cols-2">
         <FG label="Opening Balance (₹)"><input type="number" value={f.opening_balance} onChange={e => setF(x => ({ ...x, opening_balance: e.target.value }))} /></FG>
-        <FG label="Business"><select value={f.business_id} onChange={e => setF(x => ({ ...x, business_id: e.target.value }))}>{businesses.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></FG>
+        {businesses.length > 1 && <FG label="Business"><select value={f.business_id} onChange={e => setF(x => ({ ...x, business_id: e.target.value }))}>{businesses.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></FG>}
       </div>
       {err && <p className="err-msg">{err}</p>}
     </ModalShell>

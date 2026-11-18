@@ -266,11 +266,11 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
 
       {/* Top fields */}
       <div className="form-row cols-3">
-        <FG label="Business">
+        {businesses.length > 1 && <FG label="Business">
           <select value={f.business_id} onChange={e => setF(x => ({ ...x, business_id: e.target.value, party_id: '' }))}>
             {businesses.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
           </select>
-        </FG>
+        </FG>}
         <FG label={isPurchase ? 'Supplier Bill # *' : isPF ? 'Proforma #' : 'Invoice #'} note={isPurchase ? "As printed on the supplier's bill" : undefined}>
           <input value={f.invoice_number} disabled={!!editData?.gst_filed} placeholder={isPurchase ? "Supplier's bill number" : ''}
             onChange={e => { numberTouched.current = true; setF(x => ({ ...x, invoice_number: e.target.value })); }} />

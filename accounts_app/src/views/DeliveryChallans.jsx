@@ -170,11 +170,11 @@ export function ChallanModal({ onClose, onSave, businesses, parties, allChallans
     >
       {/* ── Header ── */}
       <div className="form-row cols-3">
-        <FG label="Business">
+        {businesses.length > 1 && <FG label="Business">
           <select value={f.business_id} onChange={e => setF(p => ({ ...p, business_id: e.target.value }))}>
             {businesses.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
           </select>
-        </FG>
+        </FG>}
         <FG label="Challan Number">
           <input value={f.challan_number} onChange={e => setF(p => ({ ...p, challan_number: e.target.value }))} />
         </FG>
