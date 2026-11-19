@@ -336,7 +336,7 @@ function SqlSetupView({ invoices = [], payments = [] }) {
         const converted = invoices.filter(inv =>
           inv.status === 'paid' &&
           inv.invoice_number &&
-          !inv.invoice_number.startsWith('PI-') &&
+          !/^PI[-/]/i.test(inv.invoice_number) &&
           !inv.invoice_number.startsWith('PF-')
         );
 

@@ -338,17 +338,21 @@ export function nextInvNum(invoices, isProforma, dateStr) {
   const fy = dateStr ? getFYForDate(dateStr) : getFY();
   const sales = invoices.filter(i => i.type !== 'purchase');
   if (isProforma) {
-    const pat = new RegExp(`^PI-${fy}/(\\d+)$`);
-    let max = 0;
-    sales.forEach(i => {
-      // Check active proforma numbers
-      const m1 = (i.invoice_number || '').match(pat);
-      if (m1) max = Math.max(max, parseInt(m1[1], 10));
-      // Also check proforma_number on converted invoices — never reuse those slots
-      const m2 = (i.proforma_number || '').match(pat);
-      if (m2) max = Math.max(max, parseInt(m2[1], 10));
-    });
-    return `PI-${fy}/${String(max + 1).padStart(3, '0')}`;
+    // Same rule as accounts_erp.next_proforma_number() in the database, which the
+    // operations app and the Telegram bot use — so both apps give the same numbers:
+    //   style  = your main series ("PI/26-27/…" or "PI-26-27/…"): highest number, newest year
+    //   number = highest proforma number this financial year + 1, never below 1001.
+    //   Converted invoices keep their old proforma number, so it's never reused.
+    const PI_RE = /^(PI[^0-9]*?)(\d{2}-\d{2})([/-])(\d+)$/;
+    let style = null, top = 0;
+    sales.forEach(i => [i.invoice_number, i.proforma_number].forEach(num => {
+      const m = String(num || '').trim().toUpperCase().match(PI_RE);
+      if (!m) return;
+      const n = parseInt(m[4], 10);
+      if (!style || m[2] > style.fy || (m[2] === style.fy && n > style.n)) style = { pre: m[1], fy: m[2], sep: m[3], n };
+      if (m[2] === fy) top = Math.max(top, n);
+    }));
+    return `${style ? style.pre : 'PI-'}${fy}${style ? style.sep : '/'}${Math.max(top, 1000) + 1}`;
   }
   const pat = new RegExp(`^${fy}/(\\d+)$`);
   let max = 1000; sales.forEach(i => { const m = (i.invoice_number || '').match(pat); if (m) max = Math.max(max, parseInt(m[1], 10)); });

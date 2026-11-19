@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { fmt, fmtDate, today, GST_RATES, PAY_MODES, INDIAN_STATES, gstType, calcLineTax, nextInvNum, getFY, getFYForDate, garmentGSTRate, isGSTINValid, guessHSN, isHSNValid, MIN_HSN_DIGITS, needsEwayBill, ewayBillThreshold, invoiceDue, isOverdue } from '../lib/constants.js';
-import { saveInvoice, getInvoiceItems, updateInvoiceStatus, updateInvoice, deleteInvoice, cancelInvoice, savePaymentWithJournal, saveCreditNote } from '../lib/db.js';
+import { saveInvoice, getInvoiceItems, updateInvoiceStatus, updateInvoice, deleteInvoice, cancelInvoice, savePaymentWithJournal, saveCreditNote, supabase } from '../lib/db.js';
 import { printInvoice } from '../lib/pdf.js';
 import { Badge, ModalShell, FG, PayHistory, EmptyState, toast } from '../components/ui.jsx';
 import { LinkBankPaymentModal } from '../components/LinkBankPayment.jsx';
@@ -110,6 +110,20 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
     prevKeyRef.current = key;
     if (!numberTouched.current) setF(x => ({ ...x, invoice_number: suggestNumber(f.business_id, f.issue_date) }));
   }, [f.business_id, f.issue_date]);
+
+  // New proforma: take the number from the same database function the
+  // operations app and the Telegram bot use, so all three always agree (it also
+  // skips PO numbers already given to operations orders). If it isn't
+  // available, the number worked out above (same rule) stays.
+  useEffect(() => {
+    if (!isPF || editData || isPurchase || prefill?.invoice_number || !supabase) return;
+    if (getFYForDate(f.issue_date) !== getFY()) return;     // back-dated into another year: keep the local rule
+    let live = true;
+    supabase.rpc('next_proforma_number').then(({ data, error }) => {
+      if (live && !error && data && !numberTouched.current) setF(x => ({ ...x, invoice_number: data }));
+    });
+    return () => { live = false; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const bizObj = businesses.find(b => b.id === f.business_id) || {};
   const partyObj = parties.find(p => p.id === f.party_id) || {};
@@ -261,7 +275,7 @@ export function InvoiceModal({ onClose, onSave, businesses, parties, catalogItem
           : <button className="btn btn-primary" onClick={() => save(false)} disabled={busy}>{busy ? 'Saving…' : saveLabel || (isPurchase ? 'Save bill' : isPF ? 'Save proforma' : 'Save invoice')}</button>}
       </>}>
 
-      {isPF && <div className="pf-banner">⚡ Proforma Invoice — numbered PI-… Use "→ Invoice" to convert when approved.</div>}
+      {isPF && <div className="pf-banner">⚡ Proforma Invoice — numbered in your PI series. Use "→ Invoice" to convert when approved.</div>}
       {f.ops_order_key && <div className="info-banner">🔗 Production order <b>{f.po_number || 'without PO number'}</b> — lines were filled from the order. Check HSN codes and quantities before saving.</div>}
 
       {/* Top fields */}
